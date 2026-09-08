@@ -23,3 +23,6 @@ VideoDownloader_installer.iss
 # Python (los scripts de tools/)
 __pycache__/
 *.pyc
+
+# Icono de carpeta en Windows
+desktop.ini
