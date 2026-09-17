@@ -295,11 +295,36 @@ bool usesFallback(const QString &name)
     return s_cache.value(name).fallback;
 }
 
+bool looksLikeToolsFolder(const QString &dir)
+{
+    const QDir base(dir);
+    if (!base.exists()) {
+        return false;
+    }
+    if (base.exists(QStringLiteral("tools.json"))) {
+        return true;
+    }
+    for (ToolsUpdater::Tool tool : {ToolsUpdater::Tool::YtDlp, ToolsUpdater::Tool::Deno}) {
+        const QString name = ToolsUpdater::binaryName(tool);
+        // Tambien cuenta el staging: una carpeta que solo tiene una descarga verificada
+        // esperando el swap es una carpeta de tools igual.
+        if (base.exists(name) || base.exists(QStringLiteral(".staging/") + name)) {
+            return true;
+        }
+    }
+    return false;
+}
+
 QStringList migrateToolsFolder(const QString &legacyDir, const QString &targetDir)
 {
     QStringList lines;
 #ifdef Q_OS_WIN
     if (!QDir(legacyDir).exists() || QDir::cleanPath(legacyDir) == QDir::cleanPath(targetDir)) {
+        return lines;
+    }
+    // La migracion termina borrando el origen: si no es una carpeta de tools, no se toca nada.
+    if (!looksLikeToolsFolder(legacyDir)) {
+        qWarning() << "[AppPaths] Migracion: " << legacyDir << "no es una carpeta de tools, no se toca";
         return lines;
     }
     const QJsonObject legacyState = readState(legacyDir);

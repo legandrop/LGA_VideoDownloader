@@ -265,6 +265,13 @@ int runMigrateCheck(const QStringList &args)
         fprintf(stderr, "qa-migrate: needs <legacy folder> <target folder>\n");
         return 2;
     }
+    // La migracion borra la carpeta de origen cuando termina: no se acepta una carpeta que no
+    // sea de tools, para que un error de tipeo no barra algo del usuario.
+    if (!AppPaths::looksLikeToolsFolder(legacyDir)) {
+        fprintf(stderr, "qa-migrate: %s is not a tools folder (needs yt-dlp/deno or tools.json); nothing touched\n",
+                qPrintable(QDir::toNativeSeparators(legacyDir)));
+        return 2;
+    }
     const QStringList lines = AppPaths::migrateToolsFolder(legacyDir, targetDir);
     for (const QString &line : lines) {
         fprintf(stdout, "moved %s\n", qPrintable(line));

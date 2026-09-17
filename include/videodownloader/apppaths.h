@@ -27,6 +27,10 @@ QString userDataDir(const QString &name);
 // true si en Windows la carpeta de `name` tuvo que caer a LOCALAPPDATA.
 bool usesFallback(const QString &name);
 
+// true si `dir` tiene pinta de carpeta de tools: `yt-dlp.exe`, `deno.exe` o `tools.json`
+// (sin `.exe` en macOS), sueltos o en `.staging`. Guarda contra borrar una carpeta ajena.
+bool looksLikeToolsFolder(const QString &dir);
+
 // Migra una carpeta de tools a otra (Windows). Mueve lo que este en staging verificado y las
 // tools instaladas que sean MAS NUEVAS que las del destino, decidiendo por el `--version` del
 // binario y no por tools.json. Solo borra la carpeta de origen si no quedo NADA atras. Es el
