@@ -50,6 +50,9 @@ protected:
     void paintEvent(QPaintEvent *event) override;
 
 private:
+    // Alto del dialogo segun el layout ya pulido (ver helpdialog.cpp).
+    void fitHeight();
+
     QLabel *m_dot;
     QLabel *m_updateTitle;
     QLabel *m_updateCaption;

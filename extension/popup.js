@@ -120,7 +120,16 @@ async function loadTab() {
   }
   let host = '';
   if (isDownloadableUrl(tab.url)) host = new URL(tab.url).hostname.replace(/^www\./, '');
-  $('pageTitle').textContent = tab.title || host || 'Untitled page';
+  // Sin titulo: el host de la URL (aunque no sea http/https) antes que un texto generico.
+  let anyHost = host;
+  if (!anyHost) {
+    try {
+      anyHost = new URL(tab.url).hostname.replace(/^www\./, '');
+    } catch {
+      anyHost = '';
+    }
+  }
+  $('pageTitle').textContent = tab.title || anyHost || 'Untitled page';
   $('pageHost').textContent = host || tab.url.slice(0, 200);
   return Boolean(host);
 }

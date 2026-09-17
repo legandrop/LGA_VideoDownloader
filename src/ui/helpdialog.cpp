@@ -177,27 +177,21 @@ HelpDialog::HelpDialog(QWidget *parent)
     extensionIntro->setWordWrap(true);
     layout->addWidget(extensionIntro);
     const QStringList steps = {
-        QStringLiteral("Open %1 (or %2, %3).").arg(strong(QStringLiteral("brave://extensions")),
-                                                   strong(QStringLiteral("chrome://extensions")),
-                                                   strong(QStringLiteral("edge://extensions"))),
-        QStringLiteral("Turn on %1 and keep it on: turning it off disables the extension.")
-            .arg(strong(QStringLiteral("Developer mode"))),
+        QStringLiteral("Open %1 (Chrome: %2).").arg(strong(QStringLiteral("brave://extensions")),
+                                                    strong(QStringLiteral("chrome://extensions"))),
+        QStringLiteral("Turn on %1. Keep it on, or the extension stops.").arg(strong(QStringLiteral("Developer mode"))),
         QStringLiteral("Click %1 and pick the extension folder.").arg(strong(QStringLiteral("Load unpacked"))),
         QStringLiteral("Pin LGA Video Downloader in the toolbar."),
     };
+    // Un QLabel de UNA linea por paso, sin wordWrap. Con wordWrap (heightForWidth) la ventana real
+    // les daba menos alto que el texto y quedaban de 9 px, encimados; el render offscreen de
+    // --ui-shot no lo reproducia. Por eso los textos son cortos: cada uno entra en el ancho fijo.
     auto *stepsLayout = new QVBoxLayout();
     stepsLayout->setSpacing(4);
     for (int i = 0; i < steps.size(); ++i) {
-        auto *row = new QHBoxLayout();
-        row->setSpacing(8);
-        auto *number = label(QString::number(i + 1), "kvKey", this);
-        number->setFixedWidth(12);
-        row->addWidget(number, 0, Qt::AlignTop);
-        auto *text = label(steps.at(i), "helpBody", this);
+        auto *text = label(QStringLiteral("%1.&nbsp;&nbsp;%2").arg(i + 1).arg(steps.at(i)), "helpBody", this);
         text->setTextFormat(Qt::RichText);
-        text->setWordWrap(true);
-        row->addWidget(text, 1);
-        stepsLayout->addLayout(row);
+        stepsLayout->addWidget(text);
     }
     layout->addLayout(stepsLayout);
 
@@ -364,14 +358,31 @@ void HelpDialog::setUpdateView(const UpdateView &view)
         m_updateBox->setProperty("accent", accent);
         Ui::repolish(m_updateBox);
     }
-    adjustSize();
+    fitHeight();
+}
+
+void HelpDialog::fitHeight()
+{
+    // adjustSize() calculaba el alto con los labels todavia sin la fuente de la hoja de estilo y
+    // en la ventana real quedaba corto: el layout comprimia los pasos de la extension a 9 px.
+    // Se pule todo primero y se toma el alto que pide el layout para el ancho fijo.
+    ensurePolished();
+    for (QWidget *child : findChildren<QWidget *>()) {
+        child->ensurePolished();
+    }
+    layout()->invalidate();
+    layout()->activate();
+    const int needed = layout()->hasHeightForWidth() ? layout()->totalHeightForWidth(DIALOG_WIDTH)
+                                                     : layout()->totalSizeHint().height();
+    setMinimumHeight(needed);
+    resize(DIALOG_WIDTH, needed);
 }
 
 int HelpDialog::execOver(QWidget *window)
 {
     auto *scrim = new Scrim(window);
     scrim->show();
-    adjustSize();
+    fitHeight();
     const QPoint center = window->mapToGlobal(window->rect().center());
     move(center - QPoint(width() / 2, height() / 2));
     const int result = exec();
