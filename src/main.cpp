@@ -145,6 +145,9 @@ int main(int argc, char *argv[])
 
     // Captura de QA (--ui-shot): sale antes de migrar settings, registrarse o tocar red, asi
     // dibujar un estado no tiene ningun efecto sobre la instalacion del usuario.
+    if (app.arguments().contains(QStringLiteral("--qa-parse"))) {
+        return runParseCheck(app.arguments());
+    }
     if (app.arguments().contains(QStringLiteral("--ui-shot"))) {
         Theme::apply(app);
         return runUiShot(app.arguments());

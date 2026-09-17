@@ -323,6 +323,7 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
     m_stderrDecoder = QStringDecoder(QStringDecoder::Utf8);
     m_errorLogged = false;
     m_liveAbort = false;
+    m_liveSkipped = 0;
     m_destinations.clear();
     m_formatIds.clear();
     m_mergeTarget.clear();
@@ -387,7 +388,9 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
     // [vdinfo] queda como segunda red.
     // "!=?" deja pasar a los sitios que no informan live_status (SoundCloud, Dailymotion...):
     // con "!=" un campo ausente no pasa el filtro y todo se marcaba como vivo.
-    arguments << "--match-filter" << "live_status!=?is_live & live_status!=?is_upcoming";
+    // Los programados (is_upcoming) no pasan por el filtro: yt-dlp los corta antes con
+    // "This live event will begin in...", que classifyFailure traduce a "hasn't started".
+    arguments << "--match-filter" << "live_status!=?is_live";
     arguments << "--print"
               << "before_dl:[vdinfo] %(format_id)s|%(resolution)s|%(ext)s|%(filesize,filesize_approx)s|%(live_status)s|"
                  "%(extractor_key)s|%(title)s";
@@ -401,7 +404,10 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
         arguments << "--format" << "bv*+ba/b/ba";
         if (item.options.quality == VideoQuality::Compatible) {
             // H.264 + AAC primero aunque haya mas resolucion en AV1/VP9: abre en cualquier editor.
-            arguments << "--format-sort" << "vcodec:h264,res,acodec:aac" << "--merge-output-format" << "mp4";
+            // ext:mp4 despues del codec: sitios que no informan el codec (archive.org) elegian
+            // un .ogv. mkv/mov con H.264 se pasan a mp4 sin recodificar.
+            arguments << "--format-sort" << "vcodec:h264,ext:mp4:m4a,res,acodec:aac" << "--merge-output-format" << "mp4"
+                      << "--remux-video" << "mkv>mp4/mov>mp4";
         } else {
             // Remux solo de contenedores de video: un audio suelto queda en su formato.
             arguments << "--format-sort" << "res" << "--merge-output-format" << "mp4" << "--remux-video" << "webm>mp4/mkv>mp4";
@@ -557,9 +563,10 @@ void DownloadQueue::handleStdoutLine(const QString &line)
     }
 
     if (line.contains(QLatin1String("does not pass filter")) && line.contains(QLatin1String("live_status"))) {
-        // yt-dlp salteo el vivo por --match-filter y termina solo, sin bajar nada.
-        markLive(*item, false);
-        log(line, LogLevel::Detail);
+        // yt-dlp salteo un vivo por --match-filter. Si era el unico video el item falla al
+        // terminar; en una playlist con otros videos bajados queda completo con un aviso.
+        ++m_liveSkipped;
+        log(line, LogLevel::Warning);
         return;
     }
 
@@ -643,7 +650,19 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
 {
     // Traduce los errores conocidos de yt-dlp a un titular y una solucion para la tarjeta.
     // Los textos se comparan contra la salida real de yt-dlp 2026.08.
-    const QString &err = item.errorMessage;
+    // Solo las lineas ERROR: los WARNING no explican el fallo y confunden la clasificacion
+    // (SoundCloud avisa siempre "...to provide account credentials" aunque el video sea
+    // publico). Sin ninguna linea ERROR (no arranco yt-dlp) se usa el mensaje entero.
+    QString err;
+    const QStringList messageLines = item.errorMessage.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (const QString &messageLine : messageLines) {
+        if (messageLine.startsWith(QLatin1String("ERROR"), Qt::CaseInsensitive)) {
+            err += messageLine + QLatin1Char('\n');
+        }
+    }
+    if (err.isEmpty()) {
+        err = item.errorMessage;
+    }
     const bool usedCookies = !item.options.cookiesBrowser.isEmpty() || !item.options.cookiesFile.isEmpty();
     const QString browser = BrowserDetect::displayName(item.options.cookiesBrowser);
     // Nombre del sitio para los textos: los conocidos por dominio, si no el extractor de yt-dlp.
@@ -696,10 +715,15 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
             item.errorDetail = QStringLiteral("This session can't watch it. Sign in to %1 with an account that can, "
                                               "then retry.").arg(site);
         }
-    } else if (has("live event will begin") || has("Premieres in") || has("This live event has ended")
-               || has("live stream recording is not available")
+    } else if (has("live event will begin") || has("Premieres in")) {
+        // Programado: yt-dlp lo corta antes del filtro.
+        item.failure = FailureKind::LiveStream;
+        item.errorHeadline = QStringLiteral("This live stream hasn't started");
+        item.errorDetail = QStringLiteral("Live streams can't be downloaded. Once it ends and is saved as a video, "
+                                          "paste the link again.");
+    } else if (has("This live event has ended") || has("live stream recording is not available")
                || (has("ffmpeg exited with code") && has("live"))) {
-        // Vivos que no llegaron a [vdinfo] (programados) o que yt-dlp corto por su cuenta.
+        // Vivos que yt-dlp corto por su cuenta.
         item.failure = FailureKind::LiveStream;
         item.errorHeadline = QStringLiteral("Live streams aren't supported");
         item.errorDetail = QStringLiteral("Only regular videos can be downloaded. If the stream is saved as a video "
@@ -767,8 +791,12 @@ void DownloadQueue::onDownloadFinished(int exitCode, QProcess::ExitStatus exitSt
     item->etaSeconds = -1;
     item->finishing = false;
 
+    if (!m_liveAbort && m_liveSkipped > 0 && item->filePath.isEmpty() && item->status != DownloadStatus::Cancelled) {
+        // Todo lo que habia era un vivo salteado: no se bajo nada.
+        markLive(*item, false);
+    }
     if (m_liveAbort) {
-        // El item ya quedo fallido con su explicacion en abortLive().
+        // El item ya quedo fallido con su explicacion en abortLive()/markLive().
         item->status = DownloadStatus::Failed;
         removePartialFiles();
     } else if (item->status == DownloadStatus::Cancelled) {
@@ -787,6 +815,10 @@ void DownloadQueue::onDownloadFinished(int exitCode, QProcess::ExitStatus exitSt
         const QString name = item->filePath.isEmpty() ? item->title : QFileInfo(item->filePath).fileName();
         log(size > 0 ? QStringLiteral("Saved %1 (%2)").arg(name, humanSize(size)) : QStringLiteral("Saved %1").arg(name),
             LogLevel::Done);
+        if (m_liveSkipped > 0) {
+            item->note = QStringLiteral("Some entries were skipped (live streams)");
+            log(item->note, LogLevel::Warning);
+        }
     } else {
         const bool passwordError = item->errorMessage.contains(QLatin1String("protected by a password"), Qt::CaseInsensitive)
                                    || item->errorMessage.contains(QLatin1String("--video-password"), Qt::CaseInsensitive);

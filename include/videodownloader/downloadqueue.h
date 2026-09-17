@@ -105,6 +105,7 @@ private:
     QStringDecoder m_stderrDecoder{QStringDecoder::Utf8};
     bool m_errorLogged = false;  // yt-dlp ya escribio una linea ERROR para el item actual
     bool m_liveAbort = false;    // se corto yt-dlp porque el link es una transmision en vivo
+    int m_liveSkipped = 0;       // vivos que yt-dlp salteo por --match-filter
     QStringList m_destinations;  // rutas "[download] Destination:" del item actual
     QStringList m_formatIds;     // formatos elegidos ("137", "140") para reconocer streams intermedios
     QString m_mergeTarget;       // archivo final de la union de video + audio

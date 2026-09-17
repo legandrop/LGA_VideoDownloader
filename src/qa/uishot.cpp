@@ -7,6 +7,7 @@
 #include "videodownloader/tabheader.h"
 
 #include "videodownloader/downloadqueue.h"
+#include "videodownloader/linkparser.h"
 #include "videodownloader/toolsmanager.h"
 
 #include <QAbstractButton>
@@ -235,6 +236,22 @@ QJsonObject geometryOf(QWidget *widget, QWidget *root)
 }
 
 } // namespace
+
+int runParseCheck(const QStringList &args)
+{
+    // --qa-parse <texto.txt>: imprime lo que LinkParser saca de un texto pegado, sin red.
+    QFile file(args.value(args.indexOf(QStringLiteral("--qa-parse")) + 1));
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        fprintf(stderr, "usage: --qa-parse <text.txt>\n");
+        return 2;
+    }
+    const LinkParser::Result result = LinkParser::parse(QString::fromUtf8(file.readAll()));
+    for (const QString &link : result.links) {
+        fprintf(stdout, "link %s\n", qPrintable(link));
+    }
+    fprintf(stdout, "ignored %d: %s\n", result.ignoredWords, qPrintable(result.ignoredText));
+    return 0;
+}
 
 int runWalkthrough(const QStringList &args)
 {

@@ -286,6 +286,9 @@ void QueueCard::setItem(const DownloadItem &item, int position, bool firefoxAvai
         // Solo el nombre de la carpeta: la ruta completa va en el tooltip.
         const QString folder = QFileInfo(QDir::cleanPath(item.options.downloadDir)).fileName();
         meta << QStringLiteral("Saved to %1").arg((folder.isEmpty() ? QDir::toNativeSeparators(item.options.downloadDir) : folder).toHtmlEscaped());
+        if (!item.note.isEmpty()) {
+            meta << QStringLiteral("<span style=\"color:%1;\">%2</span>").arg(QLatin1String(Theme::kWarn), item.note.toHtmlEscaped());
+        }
     } else if (pending) {
         if (position < 0) {
             meta << QStringLiteral("Waiting for download tools");

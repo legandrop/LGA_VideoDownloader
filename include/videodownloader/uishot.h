@@ -12,4 +12,7 @@ int runUiShot(const QStringList &args);
 // usuario (carpeta de descarga incluida) y descarga de verdad.
 int runWalkthrough(const QStringList &args);
 
+// `--qa-parse <texto.txt>`: lista los links que LinkParser extrae de un texto (sin red).
+int runParseCheck(const QStringList &args);
+
 #endif // UISHOT_H

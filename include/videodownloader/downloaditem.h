@@ -71,6 +71,7 @@ struct DownloadItem {
     qint64 doneBytes = -1;
     double speedBytes = -1;  // bytes por segundo
     int etaSeconds = -1;
+    QString note;            // aviso sobre un item completo (p.ej. vivos salteados en una playlist)
     bool finishing = false;  // streams bajados, ffmpeg uniendo o convirtiendo
 
     // Fallo: salida cruda de yt-dlp (stderr) y la version entendible para la tarjeta.
