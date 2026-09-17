@@ -34,7 +34,8 @@ constexpr int AUTO_UPDATE_DELAY_MS = 2000;
 constexpr int DEFAULT_WIDTH = 1200;
 constexpr int DEFAULT_HEIGHT = 860;
 constexpr int MIN_WIDTH = 900;
-constexpr int MIN_HEIGHT = 640;
+// Lo que ocupa la barra de titulo del sistema por encima del area cliente.
+constexpr int TITLE_BAR_ALLOWANCE = 40;
 
 bool g_automaticUpdates = true;
 
@@ -85,10 +86,16 @@ MainWindow::MainWindow(Mode mode, QWidget *parent)
 
     const QRect available = QApplication::primaryScreen() ? QApplication::primaryScreen()->availableGeometry()
                                                           : QRect(0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT);
-    setMinimumSize(MIN_WIDTH, MIN_HEIGHT);
-    resize(qMin(DEFAULT_WIDTH, available.width() - 40), qMin(DEFAULT_HEIGHT, available.height() - 60));
+    // Alto minimo: el que piden los layouts (Add videos entera, una tarjeta de error completa
+    // en la cola y 4 lineas de log), no una constante que pueda quedar corta.
+    setMinimumWidth(MIN_WIDTH);
+    const int minimumHeight = qMax(layout() ? layout()->minimumSize().height() : 0, minimumSizeHint().height());
+    // Nunca mas alto que el area de trabajo (menos la barra de titulo del sistema).
+    const int height = qMax(minimumHeight, qMin(DEFAULT_HEIGHT, available.height() - TITLE_BAR_ALLOWANCE));
+    resize(qMax(MIN_WIDTH, qMin(DEFAULT_WIDTH, available.width() - 40)), height);
     if (m_mode == Mode::Normal) {
-        move(available.center() - rect().center());
+        move(available.left() + (available.width() - width()) / 2,
+             available.top() + qMax(0, (available.height() - TITLE_BAR_ALLOWANCE - height) / 2));
     }
 }
 
@@ -161,6 +168,8 @@ void MainWindow::setupServices()
     connect(m_downloadQueue, &DownloadQueue::itemAdded, m_queueView, &QueueView::upsertItem);
     connect(m_downloadQueue, &DownloadQueue::itemUpdated, m_queueView, &QueueView::upsertItem);
     connect(m_downloadQueue, &DownloadQueue::itemRemoved, m_queueView, &QueueView::removeItem);
+    connect(m_downloadQueue, &DownloadQueue::itemUpdated, this, &MainWindow::refreshCookiesAttention);
+    connect(m_downloadQueue, &DownloadQueue::itemRemoved, this, &MainWindow::refreshCookiesAttention);
     connect(m_downloadQueue, &DownloadQueue::logLine, this, &MainWindow::log);
     connect(m_downloadQueue, &DownloadQueue::videoPasswordRequired, this, &MainWindow::onVideoPasswordRequired);
 
@@ -173,7 +182,13 @@ void MainWindow::setupServices()
     connect(m_queueView, &QueueView::clearFinishedRequested, m_downloadQueue, &DownloadQueue::clearFinished);
     connect(m_queueView, &QueueView::cancelAllRequested, m_downloadQueue, &DownloadQueue::cancelAll);
     connect(m_queueView, &QueueView::retryFailedRequested, this, [this]() {
-        m_downloadQueue->retryFailed(currentOptions());
+        // Igual que el Retry de cada tarjeta: formato, calidad y carpeta de cada item, la
+        // sesion elegida ahora.
+        for (const DownloadItem &item : m_downloadQueue->items()) {
+            if (item.status == DownloadStatus::Failed && item.failure != FailureKind::InvalidLink) {
+                onRetryRequested(item.id);
+            }
+        }
     });
 
     // El swap de tools espera a que no haya un yt-dlp corriendo.
@@ -339,6 +354,27 @@ void MainWindow::onCookiesSourceActivated(const QString &key)
     m_settings->setValue(QStringLiteral("auth/cookiesBrowser"), key);
     m_settings->sync();
     m_addCard->setCookiesSource(key, cookiesFile);
+    refreshCookiesAttention();
+}
+
+void MainWindow::refreshCookiesAttention()
+{
+    if (!m_downloadQueue) {
+        return;
+    }
+    // En rojo mientras haya un fallo de sesion con la misma eleccion que muestra el combo:
+    // al cambiarla (el arreglo) el resaltado se apaga.
+    const DownloadOptions now = currentOptions();
+    bool attention = false;
+    for (const DownloadItem &item : m_downloadQueue->items()) {
+        const bool sessionProblem = item.status == DownloadStatus::Failed
+            && (item.failure == FailureKind::NeedsSignIn || item.failure == FailureKind::CookiesUnreadable);
+        if (sessionProblem && item.options.cookiesBrowser == now.cookiesBrowser && item.options.cookiesFile == now.cookiesFile) {
+            attention = true;
+            break;
+        }
+    }
+    m_addCard->setCookiesAttention(attention);
 }
 
 void MainWindow::onToolsStatusChanged()

@@ -30,6 +30,8 @@ public:
     // key: "" = ninguno, "file" = cookies.txt, o la clave del navegador.
     void setCookiesSource(const QString &key, const QString &cookiesFile);
     QString cookiesSource() const;
+    // Resalta "Use cookies from" en rojo cuando un video fallo por falta de sesion.
+    void setCookiesAttention(bool attention);
 
     void setFormat(OutputFormat format);
     OutputFormat format() const;

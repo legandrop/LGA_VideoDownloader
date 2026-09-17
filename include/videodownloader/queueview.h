@@ -74,6 +74,10 @@ public:
     void setFirefoxAvailable(bool available);
     void setWaitingForTools(bool waiting);
 
+    // Pide solo su minimo: el espacio que sobra le llega por stretch, y ante falta de alto
+    // cede primero el log (que si pide sus 196px).
+    QSize sizeHint() const override;
+
 signals:
     void cancelRequested(int id);
     void removeRequested(int id);

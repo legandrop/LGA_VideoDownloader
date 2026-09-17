@@ -197,19 +197,6 @@ void DownloadQueue::retryItem(int id, const DownloadOptions &options)
     }
 }
 
-void DownloadQueue::retryFailed(const DownloadOptions &options)
-{
-    QList<int> ids;
-    for (const DownloadItem &entry : std::as_const(m_items)) {
-        if (entry.status == DownloadStatus::Failed && entry.failure != FailureKind::InvalidLink) {
-            ids.append(entry.id);
-        }
-    }
-    for (int id : std::as_const(ids)) {
-        retryItem(id, options);
-    }
-}
-
 void DownloadQueue::clearFinished()
 {
     QList<int> ids;
@@ -317,6 +304,10 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
     cleanupCurrentProcess();
     m_stdoutBuffer.clear();
     m_stderrBuffer.clear();
+    m_stdoutDecoder = QStringDecoder(QStringDecoder::Utf8);
+    m_stderrDecoder = QStringDecoder(QStringDecoder::Utf8);
+    m_errorLogged = false;
+    m_expectedTotal = 0;
     m_streamCount = 1;
     m_streamIndex = -1;
     m_streamDoneBase = 0;
@@ -368,7 +359,9 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
     arguments << "--progress-template"
               << "download:[vdprog] %(progress.downloaded_bytes)s|%(progress.total_bytes)s|"
                  "%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s";
-    arguments << "--print" << "before_dl:[vdinfo] %(format_id)s|%(resolution)s|%(ext)s|%(title)s";
+    // filesize_approx del formato elegido: con video + audio es la suma de los dos, y permite
+    // ponderar el progreso por bytes en vez de 50/50 por stream.
+    arguments << "--print" << "before_dl:[vdinfo] %(format_id)s|%(resolution)s|%(ext)s|%(filesize,filesize_approx)s|%(title)s";
     arguments << "--print" << "after_move:[vdfile] %(filepath)s";
 
     if (item.options.format == OutputFormat::AudioM4a) {
@@ -433,7 +426,8 @@ void DownloadQueue::onDownloadOutput()
     if (!m_currentProcess) {
         return;
     }
-    m_stdoutBuffer += QString::fromUtf8(m_currentProcess->readAllStandardOutput());
+    // Decodificador con estado: un caracter UTF-8 partido entre dos lecturas no se rompe.
+    m_stdoutBuffer += m_stdoutDecoder.decode(m_currentProcess->readAllStandardOutput());
     int newline;
     while ((newline = m_stdoutBuffer.indexOf(QLatin1Char('\n'))) >= 0) {
         const QString line = m_stdoutBuffer.left(newline).trimmed();
@@ -471,15 +465,23 @@ void DownloadQueue::handleStdoutLine(const QString &line)
         if (done >= 0) {
             item->doneBytes = m_streamDoneBase + done;
         }
-        item->totalBytes = m_streamDoneBase + qMax<qint64>(total, 0);
+        item->totalBytes = qMax(m_expectedTotal, m_streamDoneBase + qMax<qint64>(total, 0));
         bool ok = false;
         const double speed = parts.at(3).toDouble(&ok);
         item->speedBytes = ok ? speed : -1;
         const int eta = parts.at(4).toInt(&ok);
         item->etaSeconds = ok ? eta : -1;
         if (done >= 0 && total > 0) {
-            const double fraction = qBound(0.0, double(done) / double(total), 1.0);
-            const int overall = int(((m_streamIndex + fraction) / qMax(1, m_streamCount)) * 100.0);
+            int overall;
+            if (m_expectedTotal > 0) {
+                // Por bytes: un video de 700 MB con audio de 5 MB no marca 50% al terminar el video.
+                const qint64 expected = qMax(m_expectedTotal, m_streamDoneBase + total);
+                overall = int(double(m_streamDoneBase + done) / double(expected) * 100.0);
+            } else {
+                // Sin tamano anunciado: cada stream pesa lo mismo.
+                const double fraction = qBound(0.0, double(done) / double(total), 1.0);
+                overall = int(((m_streamIndex + fraction) / qMax(1, m_streamCount)) * 100.0);
+            }
             // Monotono: un stream nuevo no hace retroceder la barra.
             item->progress = qBound(item->progress, overall, 100);
         }
@@ -488,16 +490,17 @@ void DownloadQueue::handleStdoutLine(const QString &line)
     }
 
     if (line.startsWith(kInfoTag)) {
-        // format_id|resolution|ext|title (el titulo va al final porque puede traer '|').
+        // format_id|resolution|ext|size|title (el titulo va al final porque puede traer '|').
         const QString rest = line.mid(kInfoTag.size());
         const QStringList parts = rest.split(QLatin1Char('|'));
-        if (parts.size() >= 4) {
+        if (parts.size() >= 5) {
             m_streamCount = parts.at(0).count(QLatin1Char('+')) + 1;
             const QString resolution = parts.at(1);
             item->resolution = resolution == QLatin1String("audio only") || resolution == QLatin1String("NA")
                                    ? QString() : resolution;
             item->extension = item->options.format == OutputFormat::AudioM4a ? QStringLiteral("m4a") : parts.at(2);
-            item->title = parts.mid(3).join(QLatin1Char('|'));
+            m_expectedTotal = qMax<qint64>(0, parseBytes(parts.at(3)));
+            item->title = parts.mid(4).join(QLatin1Char('|'));
             log(QStringLiteral("Format: %1 %2 · %3").arg(item->resolution.isEmpty() ? QStringLiteral("audio") : item->resolution,
                                                           item->extension, item->title));
             emitUpdated(*item);
@@ -536,17 +539,24 @@ void DownloadQueue::onDownloadError()
     }
     // stderr de yt-dlp NO es solo errores: ahi van tambien los WARNING. Se loguea linea por
     // linea tal cual; el fragmento sin salto de linea final se guarda hasta el proximo chunk.
-    m_stderrBuffer += QString::fromUtf8(m_currentProcess->readAllStandardError());
+    m_stderrBuffer += m_stderrDecoder.decode(m_currentProcess->readAllStandardError());
     int newline;
     while ((newline = m_stderrBuffer.indexOf(QLatin1Char('\n'))) >= 0) {
         const QString line = m_stderrBuffer.left(newline).trimmed();
         m_stderrBuffer.remove(0, newline + 1);
         if (!line.isEmpty()) {
-            log(line, classifyLogLine(line));
-            if (DownloadItem *item = currentItem()) {
-                item->errorMessage += line + QLatin1Char('\n');
-            }
+            logStderrLine(line);
         }
+    }
+}
+
+void DownloadQueue::logStderrLine(const QString &line)
+{
+    const LogLevel level = classifyLogLine(line);
+    m_errorLogged = m_errorLogged || level == LogLevel::Error;
+    log(line, level);
+    if (DownloadItem *item = currentItem()) {
+        item->errorMessage += line + QLatin1Char('\n');
     }
 }
 
@@ -555,10 +565,7 @@ void DownloadQueue::flushStderrBuffer()
     const QString rest = m_stderrBuffer.trimmed();
     m_stderrBuffer.clear();
     if (!rest.isEmpty()) {
-        log(rest, classifyLogLine(rest));
-        if (DownloadItem *item = currentItem()) {
-            item->errorMessage += rest + QLatin1Char('\n');
-        }
+        logStderrLine(rest);
     }
     const QString out = m_stdoutBuffer.trimmed();
     m_stdoutBuffer.clear();
@@ -579,18 +586,18 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
 
     if (has("Could not copy Chrome cookie database")) {
         item.failure = FailureKind::CookiesUnreadable;
+        // Detalles cortos (una linea con la ventana en su ancho minimo): el titular ya dice
+        // que paso, el detalle solo la solucion.
         item.errorHeadline = QStringLiteral("Close %1 to read its session").arg(browser);
-        item.errorDetail = QStringLiteral("%1 locks its cookies while it is open. Close it completely (also from the "
-                                          "system tray) and retry, or choose Firefox or a cookies.txt file.").arg(browser);
+        item.errorDetail = QStringLiteral("Close %1 completely (also from the tray) and retry, or use Firefox or cookies.txt.").arg(browser);
     } else if (has("Failed to decrypt with DPAPI") || has("app-bound")) {
         item.failure = FailureKind::CookiesUnreadable;
         item.errorHeadline = QStringLiteral("Can't read %1 cookies on Windows").arg(browser);
-        item.errorDetail = QStringLiteral("%1 encrypts its cookies on Windows. Sign in to %2 in Firefox and choose "
-                                          "Firefox in Use cookies from, or load a cookies.txt file.").arg(browser, site);
+        item.errorDetail = QStringLiteral("Sign in to %1 in Firefox and pick Firefox in Use cookies from, or use cookies.txt.").arg(site);
     } else if (has("could not find") && has("cookies database")) {
         item.failure = FailureKind::CookiesUnreadable;
         item.errorHeadline = QStringLiteral("No %1 session found").arg(browser);
-        item.errorDetail = QStringLiteral("Open %1 at least once and sign in to %2, then retry.").arg(browser, site);
+        item.errorDetail = QStringLiteral("Open %1, sign in to %2, then retry.").arg(browser, site);
     } else if (has("Sign in to confirm") || has("only works when logged-in") || has("--cookies-from-browser or --cookies")
                || has("members-only") || has("Join this channel") || has("Private video") || has("This video is private")
                || has("logged-in") || has("login required")) {
@@ -606,15 +613,15 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
         }
         if (!usedCookies) {
 #ifdef Q_OS_WIN
-            item.errorDetail = QStringLiteral("%1 only shows this video to signed-in users. Sign in to %1 in Firefox, "
-                                              "choose it in Use cookies from, and retry.").arg(site);
+            item.errorDetail = QStringLiteral("No browser session was used. Sign in to %1 in Firefox, pick Firefox in "
+                                              "Use cookies from and retry.").arg(site);
 #else
-            item.errorDetail = QStringLiteral("%1 only shows this video to signed-in users. Sign in to %1 in your "
-                                              "browser, choose it in Use cookies from, and retry.").arg(site);
+            item.errorDetail = QStringLiteral("No browser session was used. Sign in to %1 in your browser, pick it in "
+                                              "Use cookies from and retry.").arg(site);
 #endif
         } else {
-            item.errorDetail = QStringLiteral("The selected session has no access to this video. Sign in to %1 with an "
-                                              "account that can watch it (or export a fresh cookies.txt), then retry.").arg(site);
+            item.errorDetail = QStringLiteral("This session can't watch it. Sign in to %1 with an account that can, "
+                                              "then retry.").arg(site);
         }
     } else if (has("Unsupported URL") || has("is not a valid URL")) {
         item.failure = FailureKind::InvalidLink;
@@ -694,7 +701,10 @@ void DownloadQueue::onDownloadFinished(int exitCode, QProcess::ExitStatus exitSt
         }
         item->status = DownloadStatus::Failed;
         classifyFailure(*item);
-        log(QStringLiteral("%1 · %2").arg(item->errorHeadline, item->errorDetail), LogLevel::Error);
+        // Un fallo cuenta un solo error: si yt-dlp ya dejo su linea ERROR, la explicacion va
+        // como continuacion de esa linea.
+        log(QStringLiteral("%1 · %2").arg(item->errorHeadline, item->errorDetail),
+            m_errorLogged ? LogLevel::Detail : LogLevel::Error);
     }
 
     emit itemUpdated(*item);

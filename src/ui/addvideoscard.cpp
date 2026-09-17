@@ -42,7 +42,9 @@ AddVideosCard::AddVideosCard(QWidget *parent)
     : QFrame(parent)
 {
     setObjectName(QStringLiteral("card"));
-    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Maximum);
+    // Alto fijo = alto natural: con poco espacio ceden el log y la cola, nunca esta tarjeta
+    // (comprimida, el cuadro de links pisaba las etiquetas de abajo).
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 14);
@@ -136,7 +138,10 @@ AddVideosCard::AddVideosCard(QWidget *parent)
     m_note = new QLabel(this);
     m_note->setObjectName(QStringLiteral("note"));
     m_note->setTextFormat(Qt::RichText);
-    m_note->setWordWrap(true);
+    // Una sola linea siempre: si la nota se partiera en dos al achicar la ventana, la
+    // tarjeta creceria y el alto minimo de la ventana dejaria de ser fijo.
+    m_note->setWordWrap(false);
+    m_note->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
     noteRow->addWidget(m_note, 1);
     layout->addLayout(noteRow);
 
@@ -283,14 +288,29 @@ VideoQuality AddVideosCard::quality() const
 void AddVideosCard::updateNote()
 {
     // Una sola linea: la aclaracion de Windows solo aparece si hay un navegador que no sirve.
+    // Corta a proposito: tiene que entrar en una linea con la ventana en su ancho minimo.
     QString text = QStringLiteral("<span style=\"color:#9a9a9a; font-weight:500;\">No passwords needed.</span> "
-                                  "Pick a browser where you are signed in to get private, members-only or age-restricted videos.");
+                                  "Use a browser where you're signed in for private or age-restricted videos.");
     bool unsupported = false;
     for (const BrowserDetect::Browser &browser : std::as_const(m_browsers)) {
         unsupported = unsupported || !browser.supported;
     }
     if (unsupported) {
-        text += QStringLiteral(" On Windows use Firefox or a cookies.txt file.");
+        text += QStringLiteral(" On Windows: Firefox or cookies.txt.");
     }
     m_note->setText(text);
+    m_note->setToolTip(QStringLiteral("No username or password is asked. Downloads reuse the session of the browser "
+                                      "chosen in Use cookies from, for private, members-only or age-restricted videos.%1")
+                           .arg(unsupported ? QStringLiteral("\nOn Windows, Chrome, Edge and similar browsers encrypt their "
+                                                             "cookies: use Firefox or a cookies.txt file.")
+                                            : QString()));
+}
+
+void AddVideosCard::setCookiesAttention(bool attention)
+{
+    if (m_cookies->property("attention").toBool() == attention) {
+        return;
+    }
+    m_cookies->setProperty("attention", attention);
+    Ui::repolish(m_cookies);
 }

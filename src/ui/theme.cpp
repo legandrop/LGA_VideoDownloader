@@ -127,6 +127,7 @@ QComboBox {
 }
 QComboBox:focus, QComboBox:on { border-color: #555555; }
 QComboBox#cookiesCombo { color: #9a9a9a; }
+QComboBox#cookiesCombo[attention="true"] { color: @error; border-color: #5c3330; }
 QComboBox:disabled { color: #555555; }
 QComboBox::drop-down { subcontrol-origin: border; subcontrol-position: top right; width: 22px; border: none; border-left: 1px solid @fieldBorder; }
 QComboBox::down-arrow { image: none; width: 0px; height: 0px; border: none; }

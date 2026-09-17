@@ -128,8 +128,8 @@ void loadError(MainWindow &window)
     failed.options.cookiesBrowser.clear();
     failed.failure = FailureKind::NeedsSignIn;
     failed.errorHeadline = QStringLiteral("Sign in to confirm your age");
-    failed.errorDetail = QStringLiteral("YouTube only shows this video to signed-in users. Sign in to YouTube in Firefox, "
-                                        "choose it in Use cookies from, and retry.");
+    failed.errorDetail = QStringLiteral("No browser session was used. Sign in to YouTube in Firefox, pick Firefox in "
+                                        "Use cookies from and retry.");
     failed.errorMessage = QStringLiteral("ERROR: [youtube] aB3xK9: Sign in to confirm your age.");
     queue->upsertItem(failed);
 
@@ -146,7 +146,7 @@ void loadError(MainWindow &window)
     addLog(log, "10:52:30", LogLevel::Info, QStringLiteral("Added 2 links to the queue"));
     addLog(log, "10:52:31", LogLevel::Info, QStringLiteral("Fetching info · https://www.youtube.com/watch?v=aB3xK9 · cookies: no browser session"));
     addLog(log, "10:52:33", LogLevel::Error, QStringLiteral("ERROR: [youtube] aB3xK9: Sign in to confirm your age. This video may be inappropriate for some users."));
-    addLog(log, "10:52:33", LogLevel::Error, QStringLiteral("Sign in to confirm your age · YouTube only shows this video to signed-in users, and no browser session was used."));
+    addLog(log, "10:52:33", LogLevel::Detail, QStringLiteral("Sign in to confirm your age · No browser session was used. Sign in to YouTube in Firefox, pick Firefox in Use cookies from and retry."));
     addLog(log, "10:52:34", LogLevel::Info, QStringLiteral("Fetching info · https://vimeo.com/76979871 · cookies: no browser session"));
     addLog(log, "10:54:10", LogLevel::Done, QStringLiteral("Saved Director_Interview_Final_Cut.mp4 (268 MiB)"));
 }
@@ -333,6 +333,14 @@ int runUiShot(const QStringList &args)
 
     MainWindow window(MainWindow::Mode::Capture);
     window.setAttribute(Qt::WA_DontShowOnScreen, true);
+    // Como el sistema de ventanas: nunca por debajo del minimo que piden los layouts. Si el
+    // tamano pedido era menor se captura el minimo y se informa.
+    const QSize requested(shotWidth, shotHeight);
+    shotWidth = qMax(shotWidth, window.minimumWidth());
+    shotHeight = qMax(shotHeight, window.layout()->minimumSize().height());
+    if (QSize(shotWidth, shotHeight) != requested) {
+        fprintf(stdout, "ui-shot clamped %dx%d -> %dx%d\n", requested.width(), requested.height(), shotWidth, shotHeight);
+    }
     window.resize(shotWidth, shotHeight);
 
     AddVideosCard *card = window.addCard();
@@ -349,6 +357,7 @@ int runUiShot(const QStringList &args)
         loadDownloading(window);
     } else if (state == QLatin1String("error")) {
         card->setCookiesSource(QString(), QString());
+        card->setCookiesAttention(true);
         loadError(window);
     } else if (state == QLatin1String("tools")) {
         card->setCookiesSource(QStringLiteral("firefox"), QString());
@@ -418,6 +427,7 @@ int runUiShot(const QStringList &args)
     descriptor.insert(QStringLiteral("state"), state);
     descriptor.insert(QStringLiteral("dpr"), dpr);
     descriptor.insert(QStringLiteral("logical"), QJsonArray{shotWidth, shotHeight});
+    descriptor.insert(QStringLiteral("requested"), QJsonArray{requested.width(), requested.height()});
     descriptor.insert(QStringLiteral("physical"), QJsonArray{check.width(), check.height()});
     descriptor.insert(QStringLiteral("pid"), qint64(QCoreApplication::applicationPid()));
     descriptor.insert(QStringLiteral("version"), QStringLiteral(VIDEODOWNLOADER_VERSION));

@@ -320,6 +320,9 @@ QueueView::QueueView(QWidget *parent)
     : QFrame(parent)
 {
     setObjectName(QStringLiteral("card"));
+    // Encabezado (29) + margenes de la lista (20) + una tarjeta de error con su caja de
+    // solucion y botones (140) + pie (47): la tarjeta entra completa aun con la ventana minima.
+    setMinimumHeight(236);
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
@@ -413,6 +416,11 @@ QueueView::QueueView(QWidget *parent)
     connect(m_cancelAll, &QPushButton::clicked, this, &QueueView::cancelAllRequested);
 
     refresh();
+}
+
+QSize QueueView::sizeHint() const
+{
+    return QSize(QFrame::sizeHint().width(), minimumHeight());
 }
 
 void QueueView::upsertItem(const DownloadItem &item)

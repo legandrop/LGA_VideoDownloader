@@ -138,17 +138,28 @@ void LogCanvas::append(const QString &text, LogLevel level, const QTime &time)
         ++m_errors;
     }
 
+    int removedRows = 0;
     if (m_entries.size() > MAX_ENTRIES + TRIM_CHUNK) {
         for (int i = 0; i < TRIM_CHUNK; ++i) {
-            const LogLevel old = m_entries.at(i).level;
-            if (old == LogLevel::Warning) {
+            const Entry &old = m_entries.at(i);
+            if (old.level == LogLevel::Warning) {
                 --m_warnings;
-            } else if (old == LogLevel::Error) {
+            } else if (old.level == LogLevel::Error) {
                 --m_errors;
             }
+            if (matches(old)) {
+                ++removedRows;
+            }
         }
+        const int previousValue = verticalScrollBar()->value();
         m_entries.remove(0, TRIM_CHUNK);
         rebuildVisible();
+        updateScrollRange();
+        if (!followTail) {
+            // Las filas descartadas estaban arriba: se resta su alto para que lo que el
+            // usuario esta leyendo no salte.
+            verticalScrollBar()->setValue(qMax(0, previousValue - removedRows * rowHeight()));
+        }
     } else if (matches(m_entries.constLast())) {
         m_visible.append(m_entries.size() - 1);
     }
@@ -347,7 +358,11 @@ LogView::LogView(QWidget *parent)
     : QFrame(parent)
 {
     setObjectName(QStringLiteral("card"));
-    setFixedHeight(196);
+    // 196px del diseno cuando sobra lugar. Si la ventana es baja el log cede primero, hasta
+    // encabezado (42) + 4 lineas de 21px + margen superior (5): la cola conserva su tarjeta.
+    setMinimumHeight(131);
+    setMaximumHeight(196);
+    setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Preferred);
 
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);

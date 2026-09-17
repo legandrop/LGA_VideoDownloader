@@ -66,6 +66,7 @@ private:
     void onBrowseRequested();
     void onCookiesSourceActivated(const QString &key);
     void onToolsStatusChanged();
+    void refreshCookiesAttention();
     void onVideoPasswordRequired(const DownloadItem &item);
     void onShowRequested(int id);
     void onCopyErrorRequested(int id);

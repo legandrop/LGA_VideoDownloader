@@ -5,6 +5,7 @@
 #include <QList>
 #include <QObject>
 #include <QProcess>
+#include <QStringDecoder>
 
 #include "downloaditem.h"
 #include "loglevel.h"
@@ -32,7 +33,6 @@ public:
     void removeItem(int id);
     // Vuelve a encolar un item terminado (fallido o cancelado) con las cookies indicadas.
     void retryItem(int id, const DownloadOptions &options);
-    void retryFailed(const DownloadOptions &options);
     void clearFinished();
     void cancelAll();
 
@@ -81,6 +81,7 @@ private:
     void killCurrentProcessTree();
     void classifyFailure(DownloadItem &item) const;
     void flushStderrBuffer();
+    void logStderrLine(const QString &line);
     void log(const QString &text, LogLevel level = LogLevel::Info);
     void emitUpdated(const DownloadItem &item, bool throttle = false);
 
@@ -94,6 +95,10 @@ private:
     QProcess *m_currentProcess = nullptr;
     QString m_stdoutBuffer;  // linea incompleta de stdout pendiente del proximo chunk
     QString m_stderrBuffer;  // idem stderr
+    QStringDecoder m_stdoutDecoder{QStringDecoder::Utf8};
+    QStringDecoder m_stderrDecoder{QStringDecoder::Utf8};
+    bool m_errorLogged = false;  // yt-dlp ya escribio una linea ERROR para el item actual
+    qint64 m_expectedTotal = 0;  // tamano anunciado del formato elegido (0 = desconocido)
 
     // Progreso de varios streams (video + audio se bajan por separado y despues se unen).
     int m_streamCount = 1;
