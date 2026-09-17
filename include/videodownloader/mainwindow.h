@@ -11,9 +11,11 @@
 #include <QTextEdit>
 #include <QGroupBox>
 #include <QSettings>
+#include <QComboBox>
 
 class ToolsManager;
 class DownloadQueue;
+class UpdateService;
 struct DownloadItem;
 
 QT_BEGIN_NAMESPACE
@@ -27,13 +29,21 @@ public:
     MainWindow(QWidget *parent = nullptr);
     ~MainWindow();
 
+    // Servicios para la UI (ventana principal y dialogo de Help):
+    //  - UpdateService: update de la app (estado, version disponible, installAppUpdate()).
+    //  - ToolsManager: rutas y versiones de yt-dlp/deno/ffmpeg, auto-update de tools.
+    //  - DownloadQueue: activeDownloadCount() para confirmar antes de instalar un update.
+    UpdateService *updateService() const { return m_updateService; }
+    ToolsManager *toolsManager() const { return m_toolsManager; }
+    DownloadQueue *downloadQueue() const { return m_downloadQueue; }
+
 protected:
     bool eventFilter(QObject *obj, QEvent *event) override;
 
 private slots:
     void onDownloadClicked();
     void onUrlChanged();
-    void onSaveCredentialsClicked();
+    void onCookiesSourceChanged(int index);
     void onBrowseFolderClicked();
     void onToolsStatusChanged(bool allInstalled);
     void onToolsStatusChangedForInitialState(bool allInstalled);
@@ -60,7 +70,10 @@ private:
     bool isValidDownloadPath(const QString &path) const;
     bool shouldShowSettingsExpanded();
     void setInitialSettingsState();
-    
+    // provisional: lo reemplaza el rediseño
+    void refreshUpdateLink();
+    void onUpdateLinkClicked();
+
     // UI Components
     QWidget *m_centralWidget;
     QVBoxLayout *m_mainLayout;
@@ -90,10 +103,9 @@ private:
     QHBoxLayout *m_folderLayout;
     QHBoxLayout *m_toolsLayout;
     
-    // Credentials row
-    QLineEdit *m_userInput;
-    QLineEdit *m_passwordInput;
-    QPushButton *m_saveCredentialsButton;
+    // Login row: origen de las cookies (navegador o cookies.txt)
+    QLabel *m_cookiesLabel;
+    QComboBox *m_cookiesSourceCombo;
     
     // Folder row
     QLineEdit *m_downloadFolderInput;
@@ -108,6 +120,11 @@ private:
     
     // Download queue
     DownloadQueue *m_downloadQueue;
+
+    // Update de la app
+    UpdateService *m_updateService;
+    // provisional: lo reemplaza el rediseño
+    QPushButton *m_updateLinkButton;
 
     // Track maximum width for consistent sizing when settings is collapsed
     int m_maxWindowWidth;

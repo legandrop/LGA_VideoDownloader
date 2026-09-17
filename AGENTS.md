@@ -73,7 +73,15 @@ Lo que mas cuesta si no se lee:
 - **Fuente de verdad: `../LGA_Base_QT_C_Py/docs/Doc_Deploy_macOS.md`** — bundle autocontenido, firma ad-hoc antes de empaquetar, el `.zip` con `ditto` y nunca con `zip`, y las restricciones de Finder que definen el DMG dark.
 - Son TRES nombres y no hay que confundirlos: el `.app` y el ejecutable se llaman **`LGA Video Downloader`** (con espacios — es lo que ve el usuario en `/Applications`, donde Finder ordena por el nombre de ARCHIVO del bundle y no por `CFBundleName`); los artefactos `.zip`/`.dmg` se llaman **`LGA_Video_Downloader_Mac_v<version>`** (SIN espacios, porque viajan por URL en los releases y un espacio se vuelve `%20`); y `DISPLAY_NAME` —volumen del DMG y titulo del fondo— dice lo mismo que el `.app`. Las tres salen de constantes arriba de `create_dmg.sh`.
 - El rename va SOLO en el bloque `if(APPLE)` del CMakeLists: en Windows el ejecutable y el instalador siguen siendo `VideoDownloader`.
-- **Esta app NO tiene auto-updater**, asi que cambiar el nombre de los artefactos no rompe ninguna actualizacion.
+- **Esta app TIENE auto-updater** (`UpdateService`): lee el tag del redirect de `github.com/legandrop/LGA_VideoDownloader/releases/latest` (sin API) y del MISMO release baja `SHA256SUMS` y el asset `VideoDownloader_Setup_v<version>.exe` (Windows) o `LGA_Video_Downloader_Mac_v<version>.zip` (macOS, por ahora solo abre la pagina del release). Cambiar el nombre de esos artefactos rompe la actualizacion de las copias instaladas.
+- **Todo release lleva `SHA256SUMS`** (formato `hash  nombre`) con las lineas de TODOS los assets de update: sin la linea de su asset, la app no ofrece el update. `instalador.bat` genera `installer/SHA256SUMS` y `deploy.sh` genera `deploy/SHA256SUMS`; si se publican las dos plataformas en el mismo release, se suben concatenados en un solo `SHA256SUMS`.
+
+## Tools en runtime (yt-dlp y deno)
+
+- Se instalan y actualizan solas al abrir la app (`ToolsUpdater`), desde GitHub con tag fijo y SHA-256 obligatorio, en `%LOCALAPPDATA%\LGA\VideoDownloader\tools` (macOS `~/Library/Application Support/LGA/VideoDownloader/tools`). Nunca se escriben dentro de la instalacion ni del bundle.
+- Orden de resolucion: carpeta de usuario → copia de la instalacion (`tools/`, `toolsmac/`) → PATH en macOS.
+- El swap de un binario verificado se hace en UN solo punto: al arrancar y antes de lanzar cada proceso de yt-dlp (`ToolsManager::applyStagedTools`).
+- Para probar sin publicar: `LGA_VD_GITHUB_BASE` (tools y app), que solo acepta `localhost`/`127.0.0.1`.
 - **No hay que instalar nada**: `dmgbuild` va vendorizado en `tools/macos/vendor/` (Python puro, corre con el `python3` del sistema) y el fondo lo genera `tools/macos/make_dmg_background.js` con AppKit via JXA. El `.tiff` esta versionado en `resources/dmg/`; regenerarlo solo hace falta si cambia el diseno o el nombre.
 
 ## Commits

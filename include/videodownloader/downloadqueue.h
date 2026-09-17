@@ -23,7 +23,7 @@ public:
     ~DownloadQueue();
 
     // Queue management
-    void addDownload(const QString &url, const QString &username, const QString &password, const QString &downloadDir);
+    void addDownload(const QString &url, const QString &cookiesBrowser, const QString &cookiesFile, const QString &downloadDir);
     void retryDownloadWithVideoPassword(const QString &videoPassword);
     void startQueue();
     void pauseQueue();
@@ -37,7 +37,14 @@ public:
     int getCurrentIndex() const { return m_completedCount; }
     int getTotalCount() const { return m_totalCount; }
     int getQueueSize() const { return m_queue.size(); }
-    
+    // Hay un proceso de yt-dlp vivo (el swap de tools tiene que esperar).
+    bool hasActiveProcess() const;
+    // Descargas que se perderian al cerrar: la actual mas las encoladas.
+    int activeDownloadCount() const;
+    // Para el update de la app: vacia la cola y mata yt-dlp CON sus hijos (ffmpeg, deno,
+    // y el proceso real de yt-dlp, que en Windows es hijo del lanzador onefile).
+    void stopAllForShutdown();
+
     // Current download info
     DownloadItem getCurrentDownload() const;
     QList<DownloadItem> getCompletedDownloads() const { return m_completedDownloads; }
@@ -63,7 +70,12 @@ private:
     void logMessage(const QString &message);
     void startDownloadProcess(const DownloadItem &item);
     void cleanupCurrentProcess();
-    
+    // Mata yt-dlp CON sus hijos: el ejecutable onefile relanza el yt-dlp real como hijo, y
+    // este a su vez lanza ffmpeg y deno. Matar solo el padre dejaba la descarga huerfana.
+    void killCurrentProcessTree();
+    void logFailureHint(const DownloadItem &item);
+    void flushStderrBuffer();
+
     // UI references
     QTextEdit *m_logOutput;
     QProgressBar *m_progressBar;
@@ -77,6 +89,7 @@ private:
     
     // Process management
     QProcess *m_currentProcess;
+    QString m_stderrBuffer; // Linea incompleta de stderr pendiente del proximo chunk
     QMutex m_queueMutex;
     
     // Status tracking

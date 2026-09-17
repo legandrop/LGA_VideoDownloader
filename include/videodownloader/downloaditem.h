@@ -14,8 +14,12 @@ enum class DownloadStatus {
 
 struct DownloadItem {
     QString url;
-    QString username;
-    QString password;
+    // Autenticacion por cookies, nunca por usuario/contrasena de la cuenta.
+    // cookiesBrowser: nombre que entiende --cookies-from-browser (firefox, chrome, ...).
+    // cookiesFile: ruta a un cookies.txt en formato Netscape (--cookies).
+    // Como mucho uno de los dos viene cargado.
+    QString cookiesBrowser;
+    QString cookiesFile;
     QString videoPassword;
     QString downloadDir;
     QString title;
@@ -32,10 +36,10 @@ struct DownloadItem {
         , progress(0)
     {}
 
-    DownloadItem(const QString &url, const QString &user, const QString &pass, const QString &dir)
+    DownloadItem(const QString &url, const QString &browser, const QString &cookiesTxt, const QString &dir)
         : url(url)
-        , username(user)
-        , password(pass)
+        , cookiesBrowser(browser)
+        , cookiesFile(cookiesTxt)
         , videoPassword("")
         , downloadDir(dir)
         , status(DownloadStatus::Pending)
@@ -43,10 +47,10 @@ struct DownloadItem {
         , progress(0)
     {}
 
-    DownloadItem(const QString &url, const QString &user, const QString &pass, const QString &videoPass, const QString &dir)
+    DownloadItem(const QString &url, const QString &browser, const QString &cookiesTxt, const QString &videoPass, const QString &dir)
         : url(url)
-        , username(user)
-        , password(pass)
+        , cookiesBrowser(browser)
+        , cookiesFile(cookiesTxt)
         , videoPassword(videoPass)
         , downloadDir(dir)
         , status(DownloadStatus::Pending)

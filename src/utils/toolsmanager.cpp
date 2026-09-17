@@ -1,13 +1,41 @@
 #include "videodownloader/toolsmanager.h"
+#include "videodownloader/toolsupdater.h"
 
 #include <QCoreApplication>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QNetworkRequest>
 #include <QStandardPaths>
 #include <QStyle>
 #include <QSysInfo>
 #include <QTimer>
+
+namespace {
+
+// Copia que viene con la instalacion (Windows `<app>/tools`) o adentro del bundle (macOS
+// `Contents/MacOS/toolsmac`). Es el "seed": se usa mientras la carpeta de usuario no tenga
+// su propia copia actualizada. Vacio si no existe.
+QString seedToolPath(ToolsUpdater::Tool tool)
+{
+#ifdef Q_OS_WIN
+    const QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/tools/") + ToolsUpdater::binaryName(tool);
+#else
+    const QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/toolsmac/") + ToolsUpdater::binaryName(tool);
+#endif
+    return QFileInfo(path).isFile() ? path : QString();
+}
+
+// Orden de resolucion de yt-dlp/deno: carpeta de usuario -> seed. Vacio si no hay ninguno
+// (en macOS el llamador cae despues a Homebrew/PATH).
+QString localToolPath(ToolsUpdater::Tool tool)
+{
+    const QString user = ToolsUpdater::installedBinary(tool);
+    return user.isEmpty() ? seedToolPath(tool) : user;
+}
+
+} // namespace
 
 ToolsManager::ToolsManager(QTextEdit *logOutput, QPushButton *toolsButton, QObject *parent)
     : QObject(parent)
@@ -19,12 +47,112 @@ ToolsManager::ToolsManager(QTextEdit *logOutput, QPushButton *toolsButton, QObje
     , m_checkingTools(false)
     , m_networkManager(nullptr)
     , m_pendingProcesses(0)
+    , m_toolsUpdater(nullptr)
+    , m_autoUpdateAttempted(false)
 {
     // Connect button signal
     connect(m_toolsButton, &QPushButton::clicked, this, &ToolsManager::onInstallUpdateClicked);
-    
+
     // Initialize network manager
     m_networkManager = new QNetworkAccessManager(this);
+
+    m_toolsUpdater = new ToolsUpdater(this);
+    connect(m_toolsUpdater, &ToolsUpdater::logMessage, this, &ToolsManager::logMessage);
+    connect(m_toolsUpdater, &ToolsUpdater::runningChanged, this, [this](bool running) {
+        emit toolsUpdateRunningChanged(running);
+        if (running) {
+            updateButtonState();
+        }
+    });
+    connect(m_toolsUpdater, &ToolsUpdater::toolStaged, this, [this]() {
+        // Si la cola esta quieta se activa ya; si hay un yt-dlp corriendo, espera al
+        // proximo lanzamiento de proceso (DownloadQueue) o al proximo arranque.
+        if (!m_processActiveProbe || !m_processActiveProbe()) {
+            applyStagedTools();
+        } else {
+            logMessage("Tools update is ready and will be used by the next download");
+        }
+    });
+    connect(m_toolsUpdater, &ToolsUpdater::finished, this, [this](bool) {
+        checkToolsInstallation();
+        refreshToolVersions();
+    });
+
+    // Arranque: no hay procesos todavia, asi que es un momento valido para el swap.
+    ToolsUpdater::cleanupLeftovers();
+    applyStagedTools();
+}
+
+void ToolsManager::startAutomaticUpdate()
+{
+    m_autoUpdateAttempted = true;
+    m_toolsUpdater->start();
+}
+
+bool ToolsManager::isUpdatingTools() const
+{
+    return m_toolsUpdater && m_toolsUpdater->isRunning();
+}
+
+bool ToolsManager::applyStagedTools()
+{
+    QStringList lines;
+    const QStringList swapped = ToolsUpdater::applyStaged(&lines);
+    for (const QString &line : lines) {
+        logMessage(line);
+    }
+    if (swapped.isEmpty()) {
+        return false;
+    }
+    if (swapped.contains(QStringLiteral("yt-dlp"))) {
+        m_ytDlpInstalled = true;
+    }
+    if (swapped.contains(QStringLiteral("deno"))) {
+        m_denoInstalled = true;
+    }
+    if (!m_checkingTools) {
+        updateButtonState();
+    }
+    return true;
+}
+
+void ToolsManager::refreshToolVersions()
+{
+    struct Probe { QString key; QString program; QString arg; };
+    const QList<Probe> probes = {
+        {QStringLiteral("yt-dlp"), getYtDlpPath(), QStringLiteral("--version")},
+        {QStringLiteral("deno"), getDenoPath(), QStringLiteral("--version")},
+        {QStringLiteral("ffmpeg"), getFfmpegPath(), QStringLiteral("-version")},
+    };
+    for (const Probe &probe : probes) {
+        QProcess *process = new QProcess(this);
+        const QString key = probe.key;
+        connect(process, &QProcess::finished, this, [this, process, key](int exitCode, QProcess::ExitStatus status) {
+            process->deleteLater();
+            QString version;
+            if (status == QProcess::NormalExit && exitCode == 0) {
+                const QString first = QString::fromUtf8(process->readAllStandardOutput()).trimmed().section(QLatin1Char('\n'), 0, 0).trimmed();
+                // "2026.08.19" / "deno 2.9.6 (stable, ...)" / "ffmpeg version 7.1-full_build ..."
+                if (key == QLatin1String("deno")) {
+                    version = first.section(QLatin1Char(' '), 1, 1);
+                } else if (key == QLatin1String("ffmpeg")) {
+                    version = first.section(QLatin1Char(' '), 2, 2);
+                } else {
+                    version = first;
+                }
+            }
+            m_toolVersions.insert(key, version);
+            emit toolVersionsChanged();
+        });
+        connect(process, &QProcess::errorOccurred, this, [this, process, key](QProcess::ProcessError error) {
+            if (error == QProcess::FailedToStart) {
+                process->deleteLater();
+                m_toolVersions.insert(key, QString());
+                emit toolVersionsChanged();
+            }
+        });
+        process->start(probe.program, {probe.arg});
+    }
 }
 
 ToolsManager::~ToolsManager()
@@ -52,16 +180,15 @@ void ToolsManager::checkToolsInstallation()
 void ToolsManager::checkYtDlpInstallation()
 {
 #ifdef Q_OS_WIN
-    // Windows: Check if yt-dlp.exe exists in the tools subdirectory
-    QString appDir = QCoreApplication::applicationDirPath();
-    QString ytDlpPath = appDir + "/tools/yt-dlp.exe";
-    
-    if (QFile::exists(ytDlpPath)) {
+    // Windows: carpeta de usuario (auto-update) y, si no hay, la copia de la instalacion
+    QString ytDlpPath = localToolPath(ToolsUpdater::Tool::YtDlp);
+
+    if (!ytDlpPath.isEmpty()) {
         m_ytDlpInstalled = true;
-        logMessage("✓ yt-dlp.exe found in tools directory");
+        logMessage(QString("✓ yt-dlp.exe found: %1").arg(QDir::toNativeSeparators(ytDlpPath)));
     } else {
         m_ytDlpInstalled = false;
-        logMessage("✗ yt-dlp.exe not found in tools directory");
+        logMessage("✗ yt-dlp.exe not found");
     }
     
     // Check ffmpeg after yt-dlp check is done
@@ -72,13 +199,12 @@ void ToolsManager::checkYtDlpInstallation()
 #endif
     
 #ifdef Q_OS_MAC
-    // macOS: Check if yt-dlp exists in the toolsmac subdirectory first, then fallback to system
-    QString appDir = QCoreApplication::applicationDirPath();
-    QString ytDlpPath = appDir + "/toolsmac/yt-dlp";
-    
-    if (QFile::exists(ytDlpPath)) {
+    // macOS: carpeta de usuario, despues toolsmac del bundle, despues Homebrew/PATH
+    QString ytDlpPath = localToolPath(ToolsUpdater::Tool::YtDlp);
+
+    if (!ytDlpPath.isEmpty()) {
         m_ytDlpInstalled = true;
-        logMessage("✓ yt-dlp found in toolsmac directory");
+        logMessage(QString("✓ yt-dlp found: %1").arg(ytDlpPath));
         
         // Check ffmpeg after yt-dlp check is done
         if (m_pendingProcesses == 0) {
@@ -383,14 +509,27 @@ void ToolsManager::checkFfmpegInstallation()
 
 void ToolsManager::checkDenoInstallation()
 {
-#ifdef Q_OS_MAC
-    // macOS: Check if deno exists in the toolsmac subdirectory first, then fallback to system
-    QString appDir = QCoreApplication::applicationDirPath();
-    QString denoPath = appDir + "/toolsmac/deno";
-    
-    if (QFile::exists(denoPath)) {
+#ifdef Q_OS_WIN
+    // Windows: deno.exe en la carpeta de usuario (lo instala el auto-update) o en la
+    // instalacion. Sin deno, yt-dlp no resuelve los desafios JS de YouTube.
+    QString denoPath = localToolPath(ToolsUpdater::Tool::Deno);
+    if (!denoPath.isEmpty()) {
         m_denoInstalled = true;
-        logMessage("✓ deno found in toolsmac directory");
+        logMessage(QString("✓ deno.exe found: %1").arg(QDir::toNativeSeparators(denoPath)));
+    } else {
+        m_denoInstalled = false;
+        logMessage("✗ deno.exe not found (needed for YouTube)");
+    }
+    return;
+#endif
+
+#ifdef Q_OS_MAC
+    // macOS: carpeta de usuario, despues toolsmac del bundle, despues Homebrew/PATH
+    QString denoPath = localToolPath(ToolsUpdater::Tool::Deno);
+
+    if (!denoPath.isEmpty()) {
+        m_denoInstalled = true;
+        logMessage(QString("✓ deno found: %1").arg(denoPath));
         
         if (m_pendingProcesses == 0) {
             QTimer::singleShot(100, this, &ToolsManager::updateButtonState);
@@ -498,19 +637,31 @@ void ToolsManager::updateButtonState()
     m_checkingTools = false;
     
     bool allInstalled = m_ytDlpInstalled && m_ffmpegInstalled;
-#ifdef Q_OS_MAC
+#if defined(Q_OS_MAC) || defined(Q_OS_WIN)
     allInstalled = allInstalled && m_denoInstalled;
 #endif
-    
-    if (allInstalled) {
-        setButtonText("Update dlp");
+
+    // yt-dlp y deno se instalan y actualizan solos al arrancar: el boton solo sirve para
+    // reintentar cuando falta algo y el intento automatico ya fallo.
+    if (isUpdatingTools()) {
+        setButtonText("Updating tools...");
         setButtonStyle("");
+        setButtonEnabled(false);
+    } else if (allInstalled) {
+        setButtonText("Tools ready");
+        setButtonStyle("");
+        setButtonEnabled(false);
+    } else if (!m_autoUpdateAttempted) {
+        // El auto-update arranca unos segundos despues de abrir la ventana.
+        setButtonText("Installing tools...");
+        setButtonStyle("");
+        setButtonEnabled(false);
     } else {
-        setButtonText("Install Tools");
+        setButtonText("Retry tools install");
         setButtonStyle("danger");
+        setButtonEnabled(true);
     }
-    
-    setButtonEnabled(true);
+
     emit toolsStatusChanged(allInstalled);
 }
 
@@ -531,65 +682,18 @@ void ToolsManager::installOrUpdateTools()
 void ToolsManager::onInstallUpdateClicked()
 {
     setButtonEnabled(false);
-    
-    bool allInstalled = m_ytDlpInstalled && m_ffmpegInstalled;
-    
+
+#if defined(Q_OS_WIN) || defined(Q_OS_MAC)
+    logMessage("=== Installing Tools ===");
+    if (!m_ffmpegInstalled) {
 #ifdef Q_OS_WIN
-    // Windows: Download executables from GitHub
-    if (allInstalled) {
-        logMessage("=== Updating Tools ===");
-        logMessage("Downloading latest yt-dlp.exe from GitHub...");
-        // Note: ffmpeg is not updated on Windows - only downloaded once
-    } else {
-        logMessage("=== Installing Tools ===");
-        if (!m_ytDlpInstalled) {
-            logMessage("Downloading yt-dlp.exe from GitHub...");
-        }
-        if (!m_ffmpegInstalled) {
-            logMessage("Downloading ffmpeg.exe from GitHub...");
-        }
-    }
-    
-    // Start downloads
-    if (!m_ytDlpInstalled || allInstalled) {
-        downloadYtDlpWindows();
-    }
-    if (!m_ffmpegInstalled) {
         downloadFfmpegWindows();
-    }
-    return;
-#endif
-    
-#ifdef Q_OS_MAC
-    // macOS: Download binaries to toolsmac directory
-    if (allInstalled) {
-        logMessage("=== Updating Tools ===");
-        logMessage("Downloading latest yt-dlp from GitHub...");
-        logMessage("Downloading Deno runtime for JS challenges...");
-        // Note: ffmpeg is not updated on macOS - only downloaded once
-    } else {
-        logMessage("=== Installing Tools ===");
-        if (!m_ytDlpInstalled) {
-            logMessage("Downloading yt-dlp from GitHub...");
-        }
-        if (!m_ffmpegInstalled) {
-            logMessage("Downloading ffmpeg from evermeet.cx...");
-        }
-        if (!m_denoInstalled) {
-            logMessage("Downloading Deno runtime for JS challenges...");
-        }
-    }
-    
-    // Start downloads
-    if (!m_ytDlpInstalled || allInstalled) {
-        downloadYtDlpMac();
-    }
-    if (!m_ffmpegInstalled) {
+#else
         downloadFfmpegMac();
+#endif
     }
-    if (!m_denoInstalled || allInstalled) {
-        downloadDenoMac();
-    }
+    // yt-dlp y deno: mismo camino verificado que el automatico.
+    startAutomaticUpdate();
     return;
 #endif
     
@@ -605,92 +709,6 @@ void ToolsManager::onInstallUpdateClicked()
 }
 
 // macOS Download Methods
-void ToolsManager::downloadYtDlpMac()
-{
-#ifdef Q_OS_MAC
-    // GitHub URL for latest yt-dlp for macOS
-    QString url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
-    QNetworkRequest request(url);
-    
-    // Set user agent
-    request.setRawHeader("User-Agent", "VideoDownloader/1.0");
-    
-    logMessage(QString("Downloading yt-dlp from: %1").arg(url));
-    
-    // Start download
-    QNetworkReply *reply = m_networkManager->get(request);
-    
-    connect(reply, &QNetworkReply::downloadProgress, [this](qint64 received, qint64 total) {
-        if (total > 0) {
-            int percentage = (received * 100) / total;
-            logMessage(QString("yt-dlp download progress: %1% (%2 / %3 bytes)")
-                       .arg(percentage)
-                       .arg(received)
-                       .arg(total));
-        }
-    });
-    
-    connect(reply, &QNetworkReply::finished, [this, reply]() {
-        if (reply->error() == QNetworkReply::NoError) {
-            // Save the downloaded file
-            QString appDir = QCoreApplication::applicationDirPath();
-            QString toolsDir = appDir + "/toolsmac";
-            
-            // Create toolsmac directory if it doesn't exist
-            QDir dir;
-            if (!dir.exists(toolsDir)) {
-                if (!dir.mkpath(toolsDir)) {
-                    logMessage("ERROR: Could not create toolsmac directory");
-                    setButtonEnabled(true);
-                    reply->deleteLater();
-                    return;
-                }
-            }
-            
-            QString ytDlpPath = toolsDir + "/yt-dlp";
-            
-            QFile file(ytDlpPath);
-            if (file.open(QIODevice::WriteOnly)) {
-                file.write(reply->readAll());
-                file.close();
-                
-                // Make executable
-                file.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner |
-                                   QFile::ReadGroup | QFile::ExeGroup |
-                                   QFile::ReadOther | QFile::ExeOther);
-                
-                logMessage("=== yt-dlp downloaded successfully ===");
-                logMessage(QString("Saved to: %1").arg(ytDlpPath));
-                
-                // Check installation after download
-                QTimer::singleShot(500, [this]() {
-                    checkToolsInstallation();
-                });
-            } else {
-                logMessage("ERROR: Could not save yt-dlp");
-                logMessage("Check write permissions in application directory");
-                setButtonEnabled(true);
-            }
-        } else {
-            logMessage("ERROR: Failed to download yt-dlp");
-            logMessage(QString("Error: %1").arg(reply->errorString()));
-            logMessage("Please check your internet connection");
-            setButtonEnabled(true);
-        }
-        
-        reply->deleteLater();
-    });
-#endif
-}
-
-void ToolsManager::updateYtDlpMac()
-{
-#ifdef Q_OS_MAC
-    // For updates, just download the latest version (same as install)
-    downloadYtDlpMac();
-#endif
-}
-
 void ToolsManager::downloadFfmpegMac()
 {
 #ifdef Q_OS_MAC
@@ -803,121 +821,6 @@ void ToolsManager::downloadFfmpegMac()
 #endif
 }
 
-void ToolsManager::downloadDenoMac()
-{
-#ifdef Q_OS_MAC
-    QString arch = QSysInfo::currentCpuArchitecture().toLower();
-    QString assetName = (arch.contains("arm") || arch.contains("aarch64"))
-        ? "deno-aarch64-apple-darwin.zip"
-        : "deno-x86_64-apple-darwin.zip";
-    QString url = "https://github.com/denoland/deno/releases/latest/download/" + assetName;
-    QNetworkRequest request(url);
-    
-    // Set user agent
-    request.setRawHeader("User-Agent", "VideoDownloader/1.0");
-    
-    logMessage(QString("Downloading deno from: %1").arg(url));
-    
-    // Start download
-    QNetworkReply *reply = m_networkManager->get(request);
-    
-    connect(reply, &QNetworkReply::downloadProgress, [this](qint64 received, qint64 total) {
-        if (total > 0) {
-            int percentage = (received * 100) / total;
-            logMessage(QString("deno download progress: %1% (%2 / %3 bytes)")
-                       .arg(percentage)
-                       .arg(received)
-                       .arg(total));
-        }
-    });
-    
-    connect(reply, &QNetworkReply::finished, [this, reply]() {
-        if (reply->error() == QNetworkReply::NoError) {
-            // Save the downloaded zip file temporarily
-            QString appDir = QCoreApplication::applicationDirPath();
-            QString toolsDir = appDir + "/toolsmac";
-            
-            // Create toolsmac directory if it doesn't exist
-            QDir dir;
-            if (!dir.exists(toolsDir)) {
-                if (!dir.mkpath(toolsDir)) {
-                    logMessage("ERROR: Could not create toolsmac directory");
-                    setButtonEnabled(true);
-                    reply->deleteLater();
-                    return;
-                }
-            }
-            
-            QString tempZipPath = toolsDir + "/deno_temp.zip";
-            QString denoPath = toolsDir + "/deno";
-            
-            // Save zip file
-            QFile zipFile(tempZipPath);
-            if (zipFile.open(QIODevice::WriteOnly)) {
-                zipFile.write(reply->readAll());
-                zipFile.close();
-                
-                // Extract deno binary using system unzip command
-                QProcess *unzipProcess = new QProcess(this);
-                connect(unzipProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-                        [this, unzipProcess, tempZipPath, denoPath](int exitCode, QProcess::ExitStatus exitStatus) {
-                    
-                    // Clean up zip file
-                    QFile::remove(tempZipPath);
-                    
-                    if (exitStatus == QProcess::NormalExit && exitCode == 0) {
-                        // Make deno executable
-                        QFile denoFile(denoPath);
-                        if (denoFile.exists()) {
-                            denoFile.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner |
-                                                   QFile::ReadGroup | QFile::ExeGroup |
-                                                   QFile::ReadOther | QFile::ExeOther);
-                            
-                            logMessage("=== deno downloaded and extracted successfully ===");
-                            logMessage(QString("Saved to: %1").arg(denoPath));
-                            
-                            // Check installation after extraction
-                            QTimer::singleShot(500, [this]() {
-                                checkToolsInstallation();
-                            });
-                        } else {
-                            logMessage("ERROR: deno binary not found after extraction");
-                            setButtonEnabled(true);
-                        }
-                    } else {
-                        logMessage("ERROR: Failed to extract deno zip file");
-                        setButtonEnabled(true);
-                    }
-                    
-                    unzipProcess->deleteLater();
-                });
-                
-                // Extract only the deno binary from the zip
-                unzipProcess->start("unzip", QStringList() << "-j" << tempZipPath << "deno" << "-d" << toolsDir);
-                
-                if (!unzipProcess->waitForStarted(5000)) {
-                    logMessage("ERROR: Could not start unzip process");
-                    QFile::remove(tempZipPath);
-                    setButtonEnabled(true);
-                    unzipProcess->deleteLater();
-                }
-            } else {
-                logMessage("ERROR: Could not save deno zip file");
-                logMessage("Check write permissions in application directory");
-                setButtonEnabled(true);
-            }
-        } else {
-            logMessage("ERROR: Failed to download deno");
-            logMessage(QString("Error: %1").arg(reply->errorString()));
-            logMessage("Please check your internet connection");
-            setButtonEnabled(true);
-        }
-        
-        reply->deleteLater();
-    });
-#endif
-}
-
 void ToolsManager::updateFfmpegMac()
 {
 #ifdef Q_OS_MAC
@@ -927,84 +830,6 @@ void ToolsManager::updateFfmpegMac()
 }
 
 // Windows Download Methods
-void ToolsManager::downloadYtDlpWindows()
-{
-#ifdef Q_OS_WIN
-    // GitHub URL for latest yt-dlp.exe
-    QString url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-    QNetworkRequest request(url);
-    
-    // Set user agent
-    request.setRawHeader("User-Agent", "VideoDownloader/1.0");
-    
-    logMessage(QString("Downloading yt-dlp from: %1").arg(url));
-    
-    // Start download
-    QNetworkReply *reply = m_networkManager->get(request);
-    
-    connect(reply, &QNetworkReply::downloadProgress, [this](qint64 received, qint64 total) {
-        if (total > 0) {
-            int percentage = (received * 100) / total;
-            logMessage(QString("yt-dlp download progress: %1% (%2 / %3 bytes)")
-                       .arg(percentage)
-                       .arg(received)
-                       .arg(total));
-        }
-    });
-    
-    connect(reply, &QNetworkReply::finished, [this, reply]() {
-        if (reply->error() == QNetworkReply::NoError) {
-            // Save the downloaded file
-            QString appDir = QCoreApplication::applicationDirPath();
-            QString toolsDir = appDir + "/tools";
-            
-            // Create tools directory if it doesn't exist
-            QDir dir;
-            if (!dir.exists(toolsDir)) {
-                if (!dir.mkpath(toolsDir)) {
-                    logMessage("ERROR: Could not create tools directory");
-                    setButtonEnabled(true);
-                    reply->deleteLater();
-                    return;
-                }
-            }
-            
-            QString ytDlpPath = toolsDir + "/yt-dlp.exe";
-            
-            QFile file(ytDlpPath);
-            if (file.open(QIODevice::WriteOnly)) {
-                file.write(reply->readAll());
-                file.close();
-                
-                // Make executable (though Windows doesn't need this)
-                file.setPermissions(QFile::ReadOwner | QFile::WriteOwner | QFile::ExeOwner |
-                                   QFile::ReadGroup | QFile::ExeGroup |
-                                   QFile::ReadOther | QFile::ExeOther);
-                
-                logMessage("=== yt-dlp.exe downloaded successfully ===");
-                logMessage(QString("Saved to: %1").arg(ytDlpPath));
-                
-                // Check installation after download
-                QTimer::singleShot(500, [this]() {
-                    checkToolsInstallation();
-                });
-            } else {
-                logMessage("ERROR: Could not save yt-dlp.exe");
-                logMessage("Check write permissions in application directory");
-                setButtonEnabled(true);
-            }
-        } else {
-            logMessage("ERROR: Failed to download yt-dlp.exe");
-            logMessage(QString("Error: %1").arg(reply->errorString()));
-            logMessage("Please check your internet connection");
-            setButtonEnabled(true);
-        }
-        
-        reply->deleteLater();
-    });
-#endif
-}
-
 void ToolsManager::downloadFfmpegWindows()
 {
 #ifdef Q_OS_WIN
@@ -1062,21 +887,18 @@ void ToolsManager::setButtonStyle(const QString &styleClass)
 
 QString ToolsManager::getYtDlpPath() const
 {
-#ifdef Q_OS_WIN
-    // Windows: Use tools subdirectory
-    QString appDir = QCoreApplication::applicationDirPath();
-    return appDir + "/tools/yt-dlp.exe";
-#elif defined(Q_OS_MAC)
-    // macOS: Check toolsmac directory first, then fallback to system PATH
-    QString appDir = QCoreApplication::applicationDirPath();
-    QString localPath = appDir + "/toolsmac/yt-dlp";
-    if (QFile::exists(localPath)) {
+#if defined(Q_OS_WIN) || defined(Q_OS_MAC)
+    // Carpeta de usuario (auto-update) -> copia de la instalacion/bundle
+    const QString localPath = localToolPath(ToolsUpdater::Tool::YtDlp);
+    if (!localPath.isEmpty()) {
         return localPath;
     }
-    // Fallback to system PATH
-    return "yt-dlp";
+#endif
+#ifdef Q_OS_WIN
+    // Sin ninguna copia todavia: donde la va a dejar el auto-update
+    return ToolsUpdater::toolsDir() + "/yt-dlp.exe";
 #else
-    // Linux: Use system PATH
+    // macOS/Linux: system PATH
     return "yt-dlp";
 #endif
 }
@@ -1104,17 +926,17 @@ QString ToolsManager::getFfmpegPath() const
 
 QString ToolsManager::getDenoPath() const
 {
-#ifdef Q_OS_MAC
-    // macOS: Check toolsmac directory first, then fallback to system PATH
-    QString appDir = QCoreApplication::applicationDirPath();
-    QString localPath = appDir + "/toolsmac/deno";
-    if (QFile::exists(localPath)) {
+#if defined(Q_OS_WIN) || defined(Q_OS_MAC)
+    // Carpeta de usuario (auto-update) -> copia de la instalacion/bundle
+    const QString localPath = localToolPath(ToolsUpdater::Tool::Deno);
+    if (!localPath.isEmpty()) {
         return localPath;
     }
-    // Fallback to system PATH
-    return "deno";
+#endif
+#ifdef Q_OS_WIN
+    return ToolsUpdater::toolsDir() + "/deno.exe";
 #else
-    // Other platforms: Use system PATH
+    // macOS/Linux: system PATH
     return "deno";
 #endif
 }

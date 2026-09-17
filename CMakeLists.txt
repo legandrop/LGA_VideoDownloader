@@ -80,10 +80,12 @@ set(SOURCES
     src/main.cpp
     src/ui/mainwindow.cpp
     src/ui/videopassworddialog.cpp
-    src/core/downloader.cpp
     src/core/downloadqueue.cpp
+    src/core/updateservice.cpp
     src/utils/colorutils.cpp
     src/utils/toolsmanager.cpp
+    src/utils/toolsupdater.cpp
+    src/utils/versioncompare.cpp
     src/utils/LgaRegistry.cpp
 )
 
@@ -91,9 +93,12 @@ set(SOURCES
 set(HEADERS
     include/videodownloader/mainwindow.h
     include/videodownloader/videopassworddialog.h
-    include/videodownloader/downloader.h
     include/videodownloader/colorutils.h
     include/videodownloader/toolsmanager.h
+    include/videodownloader/toolsupdater.h
+    include/videodownloader/updateservice.h
+    include/videodownloader/updateurls.h
+    include/videodownloader/versioncompare.h
     include/videodownloader/LgaRegistry.h
     include/videodownloader/downloadqueue.h
     include/videodownloader/downloaditem.h

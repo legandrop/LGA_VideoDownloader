@@ -181,6 +181,11 @@ bool runsFromDevTree()
 
 namespace LgaRegistry {
 
+bool isDevelopmentBuild()
+{
+    return runsFromDevTree();
+}
+
 QString directory()
 {
     const QString dirPath = resolveRegistryDir();

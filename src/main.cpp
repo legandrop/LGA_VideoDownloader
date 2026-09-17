@@ -11,6 +11,7 @@
 #include <QDir>
 #include <QFileInfo>
 #include <QStandardPaths>
+#include <QSettings>
 
 namespace {
 
@@ -98,6 +99,36 @@ void migrateLegacyAppDataDir()
     qInfo() << "Migracion AppData completada:" << legacyDir << "->" << currentDir;
 }
 
+// Borra el usuario y la contrasena de Vimeo que versiones anteriores guardaban EN TEXTO
+// PLANO en config.ini (grupo [vimeo]). La autenticacion ahora es por cookies del navegador
+// y esos datos ya no se leen: dejarlos en disco solo es riesgo. Se limpia tambien el
+// config.ini de la carpeta legacy VimeoDownloader, que la migracion conserva como rollback
+// y trae una copia de las mismas credenciales. El resto de la configuracion no se toca.
+// Idempotente: si no hay grupo [vimeo], no reescribe nada.
+void purgeLegacyAccountCredentials()
+{
+    const QStringList configs = {
+        QDir(appDataDirFor(QStringLiteral("VideoDownloader"))).filePath(QStringLiteral("config.ini")),
+        QDir(appDataDirFor(QStringLiteral("VimeoDownloader"))).filePath(QStringLiteral("config.ini")),
+    };
+    for (const QString &configPath : configs) {
+        if (!QFileInfo::exists(configPath)) {
+            continue;
+        }
+        QSettings settings(configPath, QSettings::IniFormat);
+        if (!settings.childGroups().contains(QStringLiteral("vimeo"))) {
+            continue;
+        }
+        settings.remove(QStringLiteral("vimeo"));
+        settings.sync();
+        if (settings.status() == QSettings::NoError) {
+            qInfo() << "Credenciales de cuenta guardadas eliminadas de" << configPath;
+        } else {
+            qWarning() << "No se pudieron eliminar las credenciales guardadas de" << configPath;
+        }
+    }
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -113,6 +144,8 @@ int main(int argc, char *argv[])
 
     // Debe correr ANTES de que MainWindow construya su QSettings.
     migrateLegacyAppDataDir();
+    // Despues de migrar, para limpiar tambien la copia recien movida.
+    purgeLegacyAccountCredentials();
 
     // Auto-registro en el registro compartido de LGA, para que las otras apps sepan donde esta
     // instalada esta y en que version. Va DESPUES de la migracion para no tocar AppData antes de

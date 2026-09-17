@@ -1,9 +1,15 @@
 #include "videodownloader/downloadqueue.h"
 #include "videodownloader/toolsmanager.h"
 
+#include <QDir>
 #include <QRegularExpression>
 #include <QMutexLocker>
 #include <QTimer>
+
+#ifdef Q_OS_UNIX
+#include <signal.h>
+#include <unistd.h>
+#endif
 
 DownloadQueue::DownloadQueue(QTextEdit *logOutput, QProgressBar *progressBar, QGroupBox *progressGroup, ToolsManager *toolsManager, QObject *parent)
     : QObject(parent)
@@ -28,11 +34,11 @@ DownloadQueue::~DownloadQueue()
     cleanupCurrentProcess();
 }
 
-void DownloadQueue::addDownload(const QString &url, const QString &username, const QString &password, const QString &downloadDir)
+void DownloadQueue::addDownload(const QString &url, const QString &cookiesBrowser, const QString &cookiesFile, const QString &downloadDir)
 {
     QMutexLocker locker(&m_queueMutex);
 
-    DownloadItem item(url, username, password, downloadDir);
+    DownloadItem item(url, cookiesBrowser, cookiesFile, downloadDir);
     m_queue.enqueue(item);
     m_totalCount++;
 
@@ -138,7 +144,7 @@ void DownloadQueue::cancelCurrentDownload()
     if (m_currentProcess && m_currentProcess->state() == QProcess::Running) {
         logMessage("=== Cancelling Current Download ===");
         m_currentDownload.status = DownloadStatus::Cancelled;
-        m_currentProcess->kill();
+        killCurrentProcessTree();
         m_currentProcess->waitForFinished(3000);
     }
 }
@@ -182,13 +188,48 @@ void DownloadQueue::processNextDownload()
     startDownloadProcess(m_currentDownload);
 }
 
+bool DownloadQueue::hasActiveProcess() const
+{
+    return m_currentProcess && m_currentProcess->state() != QProcess::NotRunning;
+}
+
+int DownloadQueue::activeDownloadCount() const
+{
+    return m_queue.size() + (m_hasCurrentDownload ? 1 : 0);
+}
+
+void DownloadQueue::stopAllForShutdown()
+{
+    QMutexLocker locker(&m_queueMutex);
+    m_queue.clear();
+    m_isPaused = true;
+    m_hasCurrentDownload = false;
+    if (m_currentProcess) {
+        // Sin senales: que no dispare onDownloadFinished ni encadene la proxima descarga.
+        m_currentProcess->disconnect(this);
+    }
+    cleanupCurrentProcess();
+    logMessage("=== Downloads stopped to install an update ===");
+}
+
 void DownloadQueue::startDownloadProcess(const DownloadItem &item)
 {
     // Clean up any existing process
     cleanupCurrentProcess();
-    
+    m_stderrBuffer.clear();
+
+    // Punto unico de swap de tools: aca no queda ningun yt-dlp de esta cola corriendo, asi
+    // que si el auto-update dejo algo verificado en staging se activa antes de usarlo.
+    if (m_toolsManager) {
+        m_toolsManager->applyStagedTools();
+    }
+
     // Create new process
     m_currentProcess = new QProcess(this);
+#ifdef Q_OS_UNIX
+    // Grupo de procesos propio: asi killCurrentProcessTree() alcanza a los hijos de yt-dlp.
+    m_currentProcess->setChildProcessModifier([]() { ::setpgid(0, 0); });
+#endif
     
     // Connect signals
     connect(m_currentProcess, &QProcess::readyReadStandardOutput, this, &DownloadQueue::onDownloadOutput);
@@ -199,10 +240,13 @@ void DownloadQueue::startDownloadProcess(const DownloadItem &item)
     // Prepare yt-dlp arguments
     QStringList arguments;
     
-    // Add credentials only if both username and password are provided (for Vimeo)
-    if (!item.username.isEmpty() && !item.password.isEmpty()) {
-        arguments << "-u" << item.username;
-        arguments << "-p" << item.password;
+    // Autenticacion: cookies de una sesion ya iniciada en el navegador, o un cookies.txt.
+    // Ya no se usa -u/-p: pedirle a cada usuario el mail y la contrasena de su cuenta es
+    // inseguro, y ademas YouTube no acepta login por contrasena desde yt-dlp.
+    if (!item.cookiesFile.isEmpty()) {
+        arguments << "--cookies" << item.cookiesFile;
+    } else if (!item.cookiesBrowser.isEmpty()) {
+        arguments << "--cookies-from-browser" << item.cookiesBrowser;
     }
 
     // Add video password if provided
@@ -231,22 +275,19 @@ void DownloadQueue::startDownloadProcess(const DownloadItem &item)
         logMessage("WARNING: ffmpeg path not found or using system ffmpeg");
     }
     
-    // Add cookies from browser for YouTube (helps avoid bot detection)
-    // Only use on macOS where it works reliably, skip on Windows due to DPAPI issues
-    if (item.url.contains("youtube.com") || item.url.contains("youtu.be")) {
-#ifndef Q_OS_WIN32
-        arguments << "--cookies-from-browser" << "chrome";
-#ifdef Q_OS_MAC
+    // YouTube exige un runtime de JavaScript para resolver sus desafios (firma y "n").
+    // yt-dlp solo busca deno en el PATH por defecto, asi que se le pasa la ruta explicita
+    // del deno que distribuye la app. Antes esto solo se hacia en macOS: en Windows nunca
+    // se pasaba y yt-dlp avisaba "No supported JavaScript runtime could be found".
+    if (item.url.contains("youtube.com", Qt::CaseInsensitive) || item.url.contains("youtu.be", Qt::CaseInsensitive)) {
         if (m_toolsManager && m_toolsManager->isDenoInstalled()) {
             QString denoPath = m_toolsManager->getDenoPath();
             if (!denoPath.isEmpty()) {
                 arguments << "--js-runtimes" << QString("deno:%1").arg(denoPath);
             }
         } else {
-            logMessage("WARNING: Deno runtime not found; YouTube downloads may fail due to JS challenges.");
+            logMessage("WARNING: Deno runtime not found; YouTube downloads may fail or miss formats. It installs automatically at startup; if that failed, use 'Retry tools install' in Settings.");
         }
-#endif
-#endif
     }
     
     arguments << item.url;
@@ -262,15 +303,22 @@ void DownloadQueue::startDownloadProcess(const DownloadItem &item)
     // Log start
     logMessage(QString("=== Starting Download %1 of %2 ===").arg(m_completedCount + 1).arg(m_totalCount));
     logMessage(QString("URL: %1").arg(item.url));
-    logMessage(QString("User: %1").arg(item.username));
+    if (!item.cookiesFile.isEmpty()) {
+        logMessage(QString("Login: cookies file %1").arg(item.cookiesFile));
+    } else if (!item.cookiesBrowser.isEmpty()) {
+        logMessage(QString("Login: cookies from %1").arg(item.cookiesBrowser));
+    } else {
+        logMessage("Login: none (public videos only)");
+    }
     logMessage(QString("Download Folder: %1").arg(item.downloadDir));
     logMessage("---");
-    
+
     // Start process
     QString ytDlpPath = m_toolsManager->getYtDlpPath();
     QString commandLog = arguments.join(" ");
-    if (!item.password.isEmpty()) {
-        commandLog = commandLog.replace(item.password, "***");
+    // La contrasena de VIDEO (no de la cuenta) no debe quedar en el log.
+    if (!item.videoPassword.isEmpty()) {
+        commandLog = commandLog.replace(item.videoPassword, "***");
     }
     logMessage(QString("Executing: %1 %2").arg(ytDlpPath).arg(commandLog));
     m_currentProcess->start(ytDlpPath, arguments);
@@ -372,18 +420,78 @@ void DownloadQueue::onDownloadError()
 {
     if (!m_currentProcess) return;
     
-    QByteArray data = m_currentProcess->readAllStandardError();
-    QString output = QString::fromUtf8(data).trimmed();
-    
-    if (!output.isEmpty()) {
-        logMessage("ERROR: " + output);
-        m_currentDownload.errorMessage += output + "\n";
+    // stderr de yt-dlp NO es solo errores: ahi van tambien los WARNING y los [debug], y cada
+    // linea ya trae su propio prefijo. Antes se le anteponia "ERROR: " a todo el bloque, y un
+    // WARNING inofensivo se leia en el log como "ERROR: WARNING: ...". Se loguea linea por
+    // linea tal cual; el fragmento sin salto de linea final se guarda hasta el proximo chunk.
+    m_stderrBuffer += QString::fromUtf8(m_currentProcess->readAllStandardError());
+    int newlineIndex;
+    while ((newlineIndex = m_stderrBuffer.indexOf('\n')) >= 0) {
+        QString line = m_stderrBuffer.left(newlineIndex).trimmed();
+        m_stderrBuffer.remove(0, newlineIndex + 1);
+        if (!line.isEmpty()) {
+            logMessage(line);
+            m_currentDownload.errorMessage += line + "\n";
+        }
+    }
+}
+
+void DownloadQueue::flushStderrBuffer()
+{
+    QString rest = m_stderrBuffer.trimmed();
+    m_stderrBuffer.clear();
+    if (!rest.isEmpty()) {
+        logMessage(rest);
+        m_currentDownload.errorMessage += rest + "\n";
+    }
+}
+
+void DownloadQueue::logFailureHint(const DownloadItem &item)
+{
+    // Traduce los errores conocidos de yt-dlp a una indicacion accionable para el usuario.
+    // Los textos se comparan contra la salida real de yt-dlp 2026.08 en Windows.
+    const QString &err = item.errorMessage;
+    const QString browser = item.cookiesBrowser.isEmpty() ? QStringLiteral("the browser") : item.cookiesBrowser;
+    QString hint;
+
+    if (err.contains("Could not copy Chrome cookie database", Qt::CaseInsensitive)) {
+        // Chromium bloquea su base de cookies mientras el navegador (o su proceso en segundo plano) esta abierto.
+        hint = QString("Could not read the cookies because %1 is open. Close %1 completely "
+                       "(also from the system tray) and retry, or switch to Firefox or a cookies.txt file.").arg(browser);
+    } else if (err.contains("Failed to decrypt with DPAPI", Qt::CaseInsensitive)
+               || err.contains("app-bound", Qt::CaseInsensitive)) {
+        // Chrome/Edge/Brave en Windows cifran las cookies con "app-bound encryption", que yt-dlp no puede descifrar.
+        hint = QString("%1 encrypts its cookies on Windows and they cannot be read. "
+                       "Use Firefox (sign in there) or export a cookies.txt file.").arg(browser);
+    } else if (err.contains("could not find", Qt::CaseInsensitive) && err.contains("cookies database", Qt::CaseInsensitive)) {
+        hint = QString("No cookies found for %1. Is it installed and has it been opened at least once?").arg(browser);
+    } else if (err.contains("Sign in to confirm your age", Qt::CaseInsensitive)
+               || err.contains("Sign in to confirm you", Qt::CaseInsensitive)
+               || err.contains("only works when logged-in", Qt::CaseInsensitive)
+               || err.contains("--cookies-from-browser or --cookies", Qt::CaseInsensitive)) {
+        if (item.cookiesBrowser.isEmpty() && item.cookiesFile.isEmpty()) {
+            hint = "This video requires a signed-in account. In Settings, choose a browser where you are "
+                   "signed in (Firefox works best on Windows) or a cookies.txt file.";
+        } else {
+            hint = "This video requires a signed-in account, but the selected cookies have no valid session. "
+                   "Sign in to the site in that browser (or export a fresh cookies.txt) and retry.";
+        }
+    } else if (err.contains("Requested format is not available", Qt::CaseInsensitive)) {
+        hint = "The requested format is not available. yt-dlp and Deno update at startup: restart the app and retry.";
+    }
+
+    if (!hint.isEmpty()) {
+        logMessage("HINT: " + hint);
     }
 }
 
 void DownloadQueue::onDownloadFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
     if (!m_hasCurrentDownload) return;
+
+    // Vaciar lo que quede de stderr antes de evaluar el resultado
+    onDownloadError();
+    flushStderrBuffer();
 
     // Deactivate progress bar and hide percentage text
     m_progressBar->setTextVisible(false);
@@ -418,6 +526,7 @@ void DownloadQueue::onDownloadFinished(int exitCode, QProcess::ExitStatus exitSt
                 m_currentDownload.errorMessage = QString("Process finished with error code: %1").arg(exitCode);
             }
             logMessage(QString("ERROR: yt-dlp finished with error code: %1").arg(exitCode));
+            logFailureHint(m_currentDownload);
             emit downloadFailed(m_currentDownload, m_currentDownload.errorMessage);
         }
     }
@@ -458,11 +567,35 @@ void DownloadQueue::logMessage(const QString &message)
     }
 }
 
+void DownloadQueue::killCurrentProcessTree()
+{
+    if (!m_currentProcess || m_currentProcess->state() == QProcess::NotRunning) {
+        return;
+    }
+    const qint64 pid = m_currentProcess->processId();
+#ifdef Q_OS_WIN
+    if (pid > 0) {
+        const QString taskkill = QDir(qEnvironmentVariable("SystemRoot", QStringLiteral("C:/Windows")))
+                                     .filePath(QStringLiteral("System32/taskkill.exe"));
+        QProcess::execute(taskkill, {QStringLiteral("/T"), QStringLiteral("/F"), QStringLiteral("/PID"),
+                                     QString::number(pid)});
+    }
+#elif defined(Q_OS_UNIX)
+    if (pid > 0) {
+        ::kill(-static_cast<pid_t>(pid), SIGKILL); // grupo entero (setpgid al lanzar)
+    }
+#endif
+    // Respaldo por si el arbol no se pudo matar (taskkill ausente, pid ya reciclado).
+    if (m_currentProcess->state() != QProcess::NotRunning) {
+        m_currentProcess->kill();
+    }
+}
+
 void DownloadQueue::cleanupCurrentProcess()
 {
     if (m_currentProcess) {
         if (m_currentProcess->state() == QProcess::Running) {
-            m_currentProcess->kill();
+            killCurrentProcessTree();
             m_currentProcess->waitForFinished(3000);
         }
         m_currentProcess->deleteLater();

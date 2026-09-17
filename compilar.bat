@@ -41,8 +41,10 @@ if exist ..\tools\*.* (
     echo Copiando herramientas desde carpeta tools del proyecto...
     REM Solo binarios, igual que deploy.bat: `tools\` tambien aloja utilidades
     REM del repo que no son parte de la app.
-    copy /Y ..\tools\*.exe tools\
-    copy /Y ..\tools\*.dll tools\
+    REM /D copia solo si el del repo es MAS NUEVO: el boton "Update dlp" baja un
+    REM yt-dlp.exe mas reciente a build\tools y un copy /Y lo pisaba en cada build.
+    xcopy /D /Y /I /Q ..\tools\*.exe tools\
+    xcopy /D /Y /I /Q ..\tools\*.dll tools\
 ) else (
     echo Carpeta tools del proyecto no encontrada o vacía.
 )

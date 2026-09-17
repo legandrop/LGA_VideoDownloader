@@ -1,8 +1,8 @@
 #include "videodownloader/mainwindow.h"
-#include "videodownloader/downloader.h"
 #include "videodownloader/colorutils.h"
 #include "videodownloader/toolsmanager.h"
 #include "videodownloader/downloadqueue.h"
+#include "videodownloader/updateservice.h"
 #include "videodownloader/videopassworddialog.h"
 #include <QApplication>
 #include <QVBoxLayout>
@@ -27,16 +27,22 @@
 #include <QRegularExpression>
 #include <QCoreApplication>
 #include <QFile>
+#include <QFileInfo>
 #include <QNetworkAccessManager>
 #include <QNetworkRequest>
 #include <QNetworkReply>
 #include <QTimer>
 #include <QMouseEvent>
 #include <QEvent>
+#include <QDebug>
 
 
 // Constante para mantener consistencia de ancho del grupo settings
 constexpr int SETTINGS_GROUP_WIDTH = 520;
+
+// Retraso del auto-update (tools y app) despues de construir la ventana: deja que la UI
+// termine de aparecer antes de meter trafico de red y procesos.
+constexpr int AUTO_UPDATE_DELAY_MS = 2000;
 
 
 MainWindow::MainWindow(QWidget *parent)
@@ -64,15 +70,16 @@ MainWindow::MainWindow(QWidget *parent)
     , m_credentialsLayout(nullptr)
     , m_folderLayout(nullptr)
     , m_toolsLayout(nullptr)
-    , m_userInput(nullptr)
-    , m_passwordInput(nullptr)
-    , m_saveCredentialsButton(nullptr)
+    , m_cookiesLabel(nullptr)
+    , m_cookiesSourceCombo(nullptr)
     , m_downloadFolderInput(nullptr)
     , m_browseFolderButton(nullptr)
     , m_toolsButton(nullptr)
     , m_settings(nullptr)
     , m_toolsManager(nullptr)
     , m_downloadQueue(nullptr)
+    , m_updateService(nullptr)
+    , m_updateLinkButton(nullptr)
     , m_maxWindowWidth(550) // Ancho mínimo para evitar problemas cuando settings inicia colapsado
 {
     // Inicializar configuración
@@ -100,6 +107,29 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_downloadQueue, &DownloadQueue::queueStatusChanged, this, &MainWindow::onQueueStatusChanged);
     connect(m_downloadQueue, &DownloadQueue::downloadAddedToQueue, this, &MainWindow::onDownloadAddedToQueue);
     connect(m_downloadQueue, &DownloadQueue::videoPasswordRequired, this, &MainWindow::onVideoPasswordRequired);
+
+    // El swap de tools espera a que no haya un yt-dlp corriendo.
+    m_toolsManager->setProcessActiveProbe([this]() {
+        return m_downloadQueue && m_downloadQueue->hasActiveProcess();
+    });
+
+    // Update de la app: el hook corta la cola y mata yt-dlp con sus hijos antes del instalador.
+    m_updateService = new UpdateService(this);
+    m_updateService->setBeforeInstallHook([this]() {
+        if (m_downloadQueue) {
+            m_downloadQueue->stopAllForShutdown();
+        }
+    });
+    connect(m_updateService, &UpdateService::stateChanged, this, &MainWindow::refreshUpdateLink);
+    connect(m_toolsManager, &ToolsManager::toolVersionsChanged, this, &MainWindow::refreshUpdateLink);
+    refreshUpdateLink();
+
+    // yt-dlp y deno se instalan/actualizan solos y en silencio; la app solo chequea.
+    QTimer::singleShot(AUTO_UPDATE_DELAY_MS, this, [this]() {
+        m_toolsManager->startAutomaticUpdate();
+        m_toolsManager->refreshToolVersions();
+        m_updateService->checkForUpdates();
+    });
     
     // Configurar ventana
     // La version sale de la macro del CMakeLists, nunca de un literal: hardcodeada
@@ -220,23 +250,32 @@ void MainWindow::setupUI()
     // Agregar padding interno consistente con otras secciones cuando esté expandido
     m_settingsLayout->setContentsMargins(10, 10, 10, 4);
     
-    // First row: Username | Password | Save
+    // Primera fila: Login | origen de cookies.
+    // Reemplaza a usuario/contrasena: la app ya no le pide a nadie las credenciales de su
+    // cuenta, usa la sesion ya iniciada en un navegador. UI minima a proposito: el diseno
+    // definitivo de esta fila se resuelve aparte. El dato de cada item es el nombre que
+    // espera --cookies-from-browser; "file" abre un selector de cookies.txt.
     m_credentialsLayout = new QHBoxLayout();
-    m_userInput = new QLineEdit(this);
-    m_userInput->setPlaceholderText("Vimeo Username...");
-    m_userInput->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_cookiesLabel = new QLabel("Login:", this);
+    m_cookiesSourceCombo = new QComboBox(this);
+    m_cookiesSourceCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    m_cookiesSourceCombo->addItem("None (public videos only)", QString());
+    m_cookiesSourceCombo->addItem("Firefox session (recommended on Windows)", QStringLiteral("firefox"));
+    m_cookiesSourceCombo->addItem("Chrome session", QStringLiteral("chrome"));
+    m_cookiesSourceCombo->addItem("Edge session", QStringLiteral("edge"));
+    m_cookiesSourceCombo->addItem("Brave session", QStringLiteral("brave"));
+    m_cookiesSourceCombo->addItem("Opera session", QStringLiteral("opera"));
+    m_cookiesSourceCombo->addItem("Vivaldi session", QStringLiteral("vivaldi"));
+#ifdef Q_OS_MAC
+    m_cookiesSourceCombo->addItem("Safari session", QStringLiteral("safari"));
+#endif
+    m_cookiesSourceCombo->addItem("cookies.txt file...", QStringLiteral("file"));
+    m_cookiesSourceCombo->setToolTip("Downloads use the account you are already signed in to in this browser.\n"
+                                     "Chromium browsers (Chrome, Edge, Brave) must be fully closed on Windows,\n"
+                                     "and may still fail because they encrypt their cookies.");
 
-    m_passwordInput = new QLineEdit(this);
-    m_passwordInput->setEchoMode(QLineEdit::Password);
-    m_passwordInput->setPlaceholderText("Vimeo Password...");
-    m_passwordInput->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    m_saveCredentialsButton = new QPushButton("Save", this);
-    m_saveCredentialsButton->setFixedWidth(110);
-
-    m_credentialsLayout->addWidget(m_userInput);
-    m_credentialsLayout->addWidget(m_passwordInput);
-    m_credentialsLayout->addWidget(m_saveCredentialsButton);
+    m_credentialsLayout->addWidget(m_cookiesLabel);
+    m_credentialsLayout->addWidget(m_cookiesSourceCombo);
 
     // Agregar padding interno consistente con otros grupos
     m_credentialsLayout->setContentsMargins(10, 4, 10, 4);
@@ -268,6 +307,15 @@ void MainWindow::setupUI()
     spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
     spacer->setFixedHeight(0);
 
+    // provisional: lo reemplaza el rediseño. Version de la app y estado del update; al
+    // hacer click chequea o instala segun el estado. Las versiones de las tools van en el
+    // tooltip. Es un boton plano y no un link para poder accionarlo por accesibilidad.
+    m_updateLinkButton = new QPushButton(this);
+    m_updateLinkButton->setFlat(true);
+    m_updateLinkButton->setCursor(Qt::PointingHandCursor);
+    connect(m_updateLinkButton, &QPushButton::clicked, this, &MainWindow::onUpdateLinkClicked);
+
+    m_toolsLayout->addWidget(m_updateLinkButton);
     m_toolsLayout->addWidget(spacer);
     m_toolsLayout->addWidget(m_toolsButton);
 
@@ -294,9 +342,6 @@ void MainWindow::setupStyles()
     style()->unpolish(m_downloadButton);
     style()->polish(m_downloadButton);
 
-    style()->unpolish(m_saveCredentialsButton);
-    style()->polish(m_saveCredentialsButton);
-
     style()->unpolish(m_browseFolderButton);
     style()->polish(m_browseFolderButton);
 
@@ -313,7 +358,7 @@ void MainWindow::setupConnections()
     connect(m_urlInput, &QLineEdit::textChanged, this, &MainWindow::onUrlChanged);
     connect(m_urlInput, &QLineEdit::returnPressed, this, &MainWindow::onDownloadClicked);
     connect(m_downloadButton, &QPushButton::clicked, this, &MainWindow::onDownloadClicked);
-    connect(m_saveCredentialsButton, &QPushButton::clicked, this, &MainWindow::onSaveCredentialsClicked);
+    connect(m_cookiesSourceCombo, QOverload<int>::of(&QComboBox::activated), this, &MainWindow::onCookiesSourceChanged);
     connect(m_browseFolderButton, &QPushButton::clicked, this, &MainWindow::onBrowseFolderClicked);
     connect(m_cancelButton, &QPushButton::clicked, this, &MainWindow::onCancelClicked);
 
@@ -327,8 +372,6 @@ void MainWindow::setupConnections()
 void MainWindow::onDownloadClicked()
 {
     QString url = m_urlInput->text().trimmed();
-    QString user = m_settings->value("vimeo/username", "").toString();
-    QString password = m_settings->value("vimeo/password", "").toString();
     QString downloadDir = m_settings->value("download/folder", "").toString();
     
     // 1. Validate URL is not empty
@@ -343,12 +386,20 @@ void MainWindow::onDownloadClicked()
         return;
     }
     
-    // 3. Check Vimeo credentials ONLY for Vimeo URLs
-    if (isVimeoUrl(url) && (user.isEmpty() || password.isEmpty())) {
-        QMessageBox::warning(this, "Error", "Please save Vimeo credentials first for Vimeo downloads.");
-        return;
+    // 3. Origen de cookies. No se bloquea si falta: hay videos publicos, y si el sitio
+    //    exige sesion, el log explica que elegir (ver DownloadQueue::logFailureHint).
+    QString cookiesBrowser = m_settings->value("auth/cookiesBrowser", QString()).toString();
+    QString cookiesFile = m_settings->value("auth/cookiesFile", "").toString();
+    if (cookiesBrowser == QLatin1String("file")) {
+        if (cookiesFile.isEmpty() || !QFileInfo::exists(cookiesFile)) {
+            QMessageBox::warning(this, "Error", "The selected cookies.txt file does not exist. Please choose it again in Settings.");
+            return;
+        }
+        cookiesBrowser.clear();
+    } else {
+        cookiesFile.clear();
     }
-    
+
     // 4. Validate download folder exists
     if (downloadDir.isEmpty()) {
         QMessageBox::warning(this, "Error", "Please set a download folder first.");
@@ -366,12 +417,8 @@ void MainWindow::onDownloadClicked()
         return;
     }
     
-    // For YouTube URLs, use empty credentials (yt-dlp doesn't need them)
-    QString finalUser = isVimeoUrl(url) ? user : "";
-    QString finalPassword = isVimeoUrl(url) ? password : "";
-    
     // Add to download queue
-    m_downloadQueue->addDownload(url, finalUser, finalPassword, downloadDir);
+    m_downloadQueue->addDownload(url, cookiesBrowser, cookiesFile, downloadDir);
     
     // Clear URL input for next download
     m_urlInput->clear();
@@ -463,21 +510,36 @@ void MainWindow::onCancelClicked()
     }
 }
 
-void MainWindow::onSaveCredentialsClicked()
+void MainWindow::onCookiesSourceChanged(int index)
 {
-    QString user = m_userInput->text().trimmed();
-    QString password = m_passwordInput->text().trimmed();
-    
-    if (user.isEmpty() || password.isEmpty()) {
-        QMessageBox::warning(this, "Warning", "Please enter both username and password.");
-        return;
+    QString source = m_cookiesSourceCombo->itemData(index).toString();
+
+    if (source == QLatin1String("file")) {
+        QString startDir = QFileInfo(m_settings->value("auth/cookiesFile", "").toString()).absolutePath();
+        QString file = QFileDialog::getOpenFileName(this, "Select cookies.txt (Netscape format)", startDir,
+                                                    "Cookies files (*.txt);;All files (*)");
+        if (file.isEmpty()) {
+            // Cancelado: volver a mostrar lo que estaba guardado
+            loadSettings();
+            return;
+        }
+        m_settings->setValue("auth/cookiesFile", file);
+        m_cookiesSourceCombo->setToolTip(file);
+        m_logOutput->append(QString("Login saved: cookies file %1").arg(file));
+    } else if (source.isEmpty()) {
+        m_logOutput->append("Login saved: none (public videos only)");
+    } else {
+        m_logOutput->append(QString("Login saved: cookies from %1").arg(source));
+#ifdef Q_OS_WIN
+        if (source != QLatin1String("firefox")) {
+            m_logOutput->append("Note: on Windows this browser must be fully closed while downloading, "
+                                "and its encrypted cookies may not be readable. Firefox is the reliable option.");
+        }
+#endif
     }
-    
-    m_settings->setValue("vimeo/username", user);
-    m_settings->setValue("vimeo/password", password);
+
+    m_settings->setValue("auth/cookiesBrowser", source);
     m_settings->sync();
-    
-    m_logOutput->append("Vimeo credentials saved successfully.");
     onUrlChanged();
 }
 
@@ -502,17 +564,28 @@ void MainWindow::onBrowseFolderClicked()
 
 void MainWindow::loadSettings()
 {
-    QString user = m_settings->value("vimeo/username", "").toString();
-    QString password = m_settings->value("vimeo/password", "").toString();
+    // Sin eleccion explicita no se usan cookies, en las dos plataformas: un navegador por
+    // defecto fallaba en Windows (Chromium no es legible) y en macOS se aplicaba tambien a Vimeo.
+    QString cookiesSource = m_settings->value("auth/cookiesBrowser", QString()).toString();
     QString downloadFolder = m_settings->value("download/folder", "").toString();
 
+    int cookiesIndex = m_cookiesSourceCombo->findData(cookiesSource);
+    if (cookiesIndex < 0) {
+        // Valor guardado que este combo no ofrece (config vieja, "safari" traido de macOS,
+        // edicion a mano): se normaliza a "None" en el config para no pasarle a yt-dlp algo
+        // distinto de lo que la UI muestra.
+        qWarning() << "Origen de cookies guardado no valido, se normaliza a ninguno:" << cookiesSource;
+        m_settings->setValue("auth/cookiesBrowser", QString());
+        m_settings->sync();
+        cookiesSource.clear();
+        cookiesIndex = 0;
+    }
+    m_cookiesSourceCombo->setCurrentIndex(cookiesIndex);
+    if (cookiesSource == QLatin1String("file")) {
+        m_cookiesSourceCombo->setToolTip(m_settings->value("auth/cookiesFile", "").toString());
+    }
+
     // Only set text if values exist, otherwise keep placeholders
-    if (!user.isEmpty()) {
-        m_userInput->setText(user);
-    }
-    if (!password.isEmpty()) {
-        m_passwordInput->setText(password);
-    }
     if (!downloadFolder.isEmpty()) {
         m_downloadFolderInput->setText(downloadFolder);
     }
@@ -535,16 +608,14 @@ bool MainWindow::shouldShowSettingsExpanded()
 
 void MainWindow::setInitialSettingsState()
 {
-    // Determinar estado inicial basado en credenciales, carpeta de destino y herramientas
-    QString user = m_settings->value("vimeo/username", "").toString();
-    QString password = m_settings->value("vimeo/password", "").toString();
+    // Determinar estado inicial basado en la carpeta de destino (las herramientas llegan por signal).
+    // El login ya no fuerza la expansion: es opcional y hay videos publicos.
     QString downloadDir = m_settings->value("download/folder", "").toString();
 
-    bool credentialsEmpty = user.isEmpty() || password.isEmpty();
     bool downloadDirEmpty = downloadDir.isEmpty();
 
-    // Settings inicia expandido si no hay credenciales o no hay carpeta de destino
-    m_settingsExpanded = credentialsEmpty || downloadDirEmpty;
+    // Settings inicia expandido si no hay carpeta de destino
+    m_settingsExpanded = downloadDirEmpty;
 
     // Configurar estado visual inicial
     if (m_settingsExpanded) {
@@ -559,12 +630,12 @@ void MainWindow::setInitialSettingsState()
         m_settingsLayout->setContentsMargins(3, 2, 3, 3);
         m_settingsLayout->setSpacing(8);
         // Show all settings widgets
-        m_userInput->show();
-        m_passwordInput->show();
-        m_saveCredentialsButton->show();
+        m_cookiesLabel->show();
+        m_cookiesSourceCombo->show();
         m_downloadFolderInput->show();
         m_browseFolderButton->show();
         m_toolsButton->show();
+        m_updateLinkButton->show(); // provisional: lo reemplaza el rediseño
     } else {
         m_settingsGroup->setTitle("Settings >");
         m_settingsGroup->setProperty("collapsed", true);
@@ -576,12 +647,12 @@ void MainWindow::setInitialSettingsState()
         m_settingsLayout->setContentsMargins(0, 0, 0, 0);
         m_settingsLayout->setSpacing(0);
         // Hide all settings widgets initially
-        m_userInput->hide();
-        m_passwordInput->hide();
-        m_saveCredentialsButton->hide();
+        m_cookiesLabel->hide();
+        m_cookiesSourceCombo->hide();
         m_downloadFolderInput->hide();
         m_browseFolderButton->hide();
         m_toolsButton->hide();
+        m_updateLinkButton->hide(); // provisional: lo reemplaza el rediseño
     }
 
     // Force style refresh to apply new property
@@ -607,12 +678,12 @@ void MainWindow::onToolsStatusChangedForInitialState(bool allInstalled)
         m_settingsLayout->setSpacing(8);
 
         // Show all settings widgets
-        m_userInput->show();
-        m_passwordInput->show();
-        m_saveCredentialsButton->show();
+        m_cookiesLabel->show();
+        m_cookiesSourceCombo->show();
         m_downloadFolderInput->show();
         m_browseFolderButton->show();
         m_toolsButton->show();
+        m_updateLinkButton->show(); // provisional: lo reemplaza el rediseño
 
         // Force style refresh to apply new property
         m_settingsGroup->style()->unpolish(m_settingsGroup);
@@ -697,14 +768,14 @@ void MainWindow::detectOperatingSystem()
     m_logOutput->append("=== System Information ===");
     m_logOutput->append("Operating System: macOS");
     m_logOutput->append("Tools installation method: Download from GitHub");
-    m_logOutput->append("Tools location: Application bundle");
+    m_logOutput->append("Tools location: user data folder (updated automatically)");
     m_logOutput->append("Supported platforms: Vimeo, YouTube");
     m_logOutput->append("===========================");
 #elif defined(Q_OS_WIN)
     m_logOutput->append("=== System Information ===");
     m_logOutput->append("Operating System: Windows");
     m_logOutput->append("Tools installation method: Download from GitHub");
-    m_logOutput->append("Tools location: Application directory");
+    m_logOutput->append("Tools location: user data folder (updated automatically)");
     m_logOutput->append("Supported platforms: Vimeo, YouTube");
     m_logOutput->append("===========================");
 #else
@@ -716,6 +787,85 @@ void MainWindow::detectOperatingSystem()
 #endif
 }
 
+// provisional: lo reemplaza el rediseño
+void MainWindow::refreshUpdateLink()
+{
+    if (!m_updateLinkButton || !m_updateService) {
+        return;
+    }
+    const QString version = m_updateService->currentVersion();
+    QString text;
+    switch (m_updateService->state()) {
+    case UpdateService::State::Checking:
+        text = QString("v%1 · Checking for updates...").arg(version);
+        break;
+    case UpdateService::State::UpdateAvailable:
+        text = QString("v%1 · Update to %2").arg(version, m_updateService->availableVersion());
+        break;
+    case UpdateService::State::Downloading:
+        text = QString("v%1 · Downloading update...").arg(version);
+        break;
+    case UpdateService::State::Installing:
+        text = QString("v%1 · Installing update...").arg(version);
+        break;
+    case UpdateService::State::InstallFailed:
+        text = QString("v%1 · Update failed, check again").arg(version);
+        break;
+    case UpdateService::State::CheckFailed:
+        text = QString("v%1 · Update check failed, retry").arg(version);
+        break;
+    case UpdateService::State::UpToDate:
+        text = QString("v%1 · Up to date").arg(version);
+        break;
+    case UpdateService::State::Idle:
+        text = QString("v%1 · Check for updates").arg(version);
+        break;
+    }
+    m_updateLinkButton->setText(text);
+
+    const QMap<QString, QString> tools = m_toolsManager ? m_toolsManager->toolVersions() : QMap<QString, QString>();
+    auto toolText = [&tools](const QString &key) {
+        const QString value = tools.value(key);
+        return value.isEmpty() ? QString("not found") : value;
+    };
+    QString tip = QString("LGA Video Downloader %1\nyt-dlp %2\ndeno %3\nffmpeg %4\nDownloads powered by yt-dlp (github.com/yt-dlp/yt-dlp)")
+                      .arg(version, toolText("yt-dlp"), toolText("deno"), toolText("ffmpeg"));
+    if (!m_updateService->errorString().isEmpty()) {
+        tip += "\n\n" + m_updateService->errorString();
+    }
+    const QString blocked = m_updateService->installBlockedReason();
+    if (!blocked.isEmpty()) {
+        tip += "\n" + blocked;
+    }
+    m_updateLinkButton->setToolTip(tip);
+}
+
+// provisional: lo reemplaza el rediseño
+void MainWindow::onUpdateLinkClicked()
+{
+    const UpdateService::State state = m_updateService->state();
+    if (state == UpdateService::State::Checking || state == UpdateService::State::Downloading
+        || state == UpdateService::State::Installing) {
+        return;
+    }
+    if (state != UpdateService::State::UpdateAvailable) {
+        m_updateService->checkForUpdates();
+        return;
+    }
+    const int active = m_downloadQueue ? m_downloadQueue->activeDownloadCount() : 0;
+    if (active > 0 && UpdateService::installsInPlace()) {
+        const auto answer = QMessageBox::question(this, "Update",
+            QString("Updating will stop %1 active download(s). Continue?").arg(active),
+            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
+        if (answer != QMessageBox::Yes) {
+            return;
+        }
+    }
+    m_updateService->installAppUpdate();
+    if (m_updateService->state() == UpdateService::State::InstallFailed) {
+        QMessageBox::warning(this, "Update", m_updateService->errorString());
+    }
+}
 
 bool MainWindow::eventFilter(QObject *obj, QEvent *event)
 {
@@ -784,12 +934,12 @@ void MainWindow::onSettingsToggleClicked()
         m_settingsLayout->setContentsMargins(3, 2, 3, 3); // Márgenes consistentes con CSS
         m_settingsLayout->setSpacing(8); // Espaciado normal
         // Show all settings widgets
-        m_userInput->show();
-        m_passwordInput->show();
-        m_saveCredentialsButton->show();
+        m_cookiesLabel->show();
+        m_cookiesSourceCombo->show();
         m_downloadFolderInput->show();
         m_browseFolderButton->show();
         m_toolsButton->show();
+        m_updateLinkButton->show(); // provisional: lo reemplaza el rediseño
     } else {
         m_settingsGroup->setTitle("Settings >");
         m_settingsGroup->setProperty("collapsed", true); // Collapsed
@@ -800,12 +950,12 @@ void MainWindow::onSettingsToggleClicked()
         m_settingsLayout->setContentsMargins(0, 0, 0, 0); // Sin márgenes cuando colapsado
         m_settingsLayout->setSpacing(0); // No spacing between widgets
         // Hide all settings widgets
-        m_userInput->hide();
-        m_passwordInput->hide();
-        m_saveCredentialsButton->hide();
+        m_cookiesLabel->hide();
+        m_cookiesSourceCombo->hide();
         m_downloadFolderInput->hide();
         m_browseFolderButton->hide();
         m_toolsButton->hide();
+        m_updateLinkButton->hide(); // provisional: lo reemplaza el rediseño
     }
 
     // Force style refresh to apply new property

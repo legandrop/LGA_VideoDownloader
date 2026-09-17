@@ -214,6 +214,22 @@ if [ "$CREATE_DMG" = "true" ]; then
     bash ./create_dmg.sh --no-open
 fi
 
+# SHA256SUMS del release: el auto-update de la app no instala nada sin su hash. Formato
+# sha256sum ("hash  nombre"). Al publicar, el SHA256SUMS del release tiene que llevar TAMBIEN
+# las lineas del instalador de Windows (installer/SHA256SUMS de instalador.bat).
+if [ "$CREATE_ZIP" = "true" ] || [ "$CREATE_DMG" = "true" ]; then
+    (
+        cd deploy
+        rm -f SHA256SUMS
+        for artifact in "${ARTIFACT_NAME}_Mac_v${APP_VERSION}.zip" "${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"; do
+            if [ -f "$artifact" ]; then
+                shasum -a 256 "$artifact" >> SHA256SUMS
+            fi
+        done
+    )
+    echo "SHA256SUMS creado: deploy/SHA256SUMS"
+fi
+
 echo
 echo "Implementación completada. La aplicación portable está en la carpeta '"deploy/${APP_NAME}.app"'."
 echo

@@ -85,6 +85,12 @@ QString directory();
  */
 bool registerThisApp(const QString& appName, const QString& version);
 
+/**
+ * Si el binario corre desde una salida de desarrollo (mismo criterio que registerThisApp).
+ * Lo usa ademas el auto-update de la app para no reemplazar un build por un instalador.
+ */
+bool isDevelopmentBuild();
+
 /** Guarda la carpeta `.nuke` que el usuario eligio, para que la vean las demas apps LGA. */
 bool saveNukeDirectory(const QString& nukeDir);
 

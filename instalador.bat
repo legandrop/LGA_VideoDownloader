@@ -22,6 +22,16 @@ if defined DEPLOY_STALE (
     exit /b 1
 )
 
+REM La version sale de VERSION, el espejo derivado del project() de CMakeLists.txt
+REM (lo escribe sync_version). Define el AppVersion y el nombre del instalador, que
+REM es lo que busca el auto-update de la app: VideoDownloader_Setup_v<version>.exe.
+set "APP_VERSION="
+set /p APP_VERSION=<VERSION
+if not defined APP_VERSION (
+    echo Error: no se pudo leer la version del archivo VERSION
+    exit /b 1
+)
+
 REM Verificar si Inno Setup está instalado
 set "INNO_PATH=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
 if not exist "%INNO_PATH%" (
@@ -48,15 +58,14 @@ echo ; ARCHIVO GENERADO por instalador.bat - no editar a mano, se pisa en cada c
 echo [Setup] >> VideoDownloader_installer.iss
 echo AppId=VideoDownloader >> VideoDownloader_installer.iss
 echo AppName=VideoDownloader >> VideoDownloader_installer.iss
-REM Mantener sincronizado con el project() de CMakeLists.txt.
-echo AppVersion=0.89 >> VideoDownloader_installer.iss
+echo AppVersion=%APP_VERSION% >> VideoDownloader_installer.iss
 echo DefaultDirName=C:\Portable\LGA\VideoDownloader >> VideoDownloader_installer.iss
 echo DefaultGroupName=VideoDownloader >> VideoDownloader_installer.iss
 echo UninstallDisplayIcon={app}\VideoDownloader.exe >> VideoDownloader_installer.iss
 echo Compression=lzma2 >> VideoDownloader_installer.iss
 echo SolidCompression=yes >> VideoDownloader_installer.iss
 echo OutputDir=installer >> VideoDownloader_installer.iss
-echo OutputBaseFilename=VideoDownloader_Setup >> VideoDownloader_installer.iss
+echo OutputBaseFilename=VideoDownloader_Setup_v%APP_VERSION% >> VideoDownloader_installer.iss
 echo PrivilegesRequired=lowest >> VideoDownloader_installer.iss
 echo UsePreviousAppDir=no >> VideoDownloader_installer.iss
 echo DirExistsWarning=no >> VideoDownloader_installer.iss
@@ -78,7 +87,8 @@ echo [Tasks] >> VideoDownloader_installer.iss
 echo Name: "desktopicon"; Description: "Crear un icono en el escritorio"; GroupDescription: "Iconos adicionales:" >> VideoDownloader_installer.iss
 echo. >> VideoDownloader_installer.iss
 echo [Run] >> VideoDownloader_installer.iss
-echo Filename: "{app}\VideoDownloader.exe"; Description: "Ejecutar VideoDownloader"; Flags: nowait postinstall skipifsilent >> VideoDownloader_installer.iss
+REM Sin skipifsilent: el auto-update corre el instalador en /SILENT y tiene que relanzar la app.
+echo Filename: "{app}\VideoDownloader.exe"; Description: "Ejecutar VideoDownloader"; Flags: nowait postinstall >> VideoDownloader_installer.iss
 
 REM Añadir código Pascal para preguntar sobre eliminar configuración durante desinstalación
 echo. >> VideoDownloader_installer.iss
@@ -124,6 +134,8 @@ echo   ResultCode: Integer; >> VideoDownloader_installer.iss
 echo begin >> VideoDownloader_installer.iss
 echo   if CurUninstallStep = usPostUninstall then >> VideoDownloader_installer.iss
 echo   begin >> VideoDownloader_installer.iss
+REM yt-dlp y deno que baja el auto-update viven en LocalAppData: son cache, se borran sin preguntar.
+echo     DelTree(ExpandConstant('{localappdata}\LGA\VideoDownloader\tools'), True, True, True); >> VideoDownloader_installer.iss
 echo     ConfigPath := ExpandConstant('{userappdata}\LGA\VideoDownloader'); >> VideoDownloader_installer.iss
 echo     if DirExists(ConfigPath) then >> VideoDownloader_installer.iss
 echo     begin >> VideoDownloader_installer.iss
@@ -151,15 +163,25 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
+REM SHA256SUMS del release: el auto-update de la app no instala nada sin su hash. Formato
+REM sha256sum ("hash  nombre"). Al publicar, el SHA256SUMS del release lleva TAMBIEN las
+REM lineas del .zip/.dmg de macOS (deploy/SHA256SUMS de deploy.sh).
+powershell -NoProfile -Command "$n='VideoDownloader_Setup_v%APP_VERSION%.exe'; $h=(Get-FileHash -Algorithm SHA256 ('installer\'+$n)).Hash.ToLower(); [IO.File]::WriteAllText('installer\SHA256SUMS', $h+'  '+$n+[char]10)"
+if %ERRORLEVEL% neq 0 (
+    echo Error al generar installer\SHA256SUMS.
+    exit /b 1
+)
+echo SHA256SUMS: installer\SHA256SUMS
+
 echo.
 echo Instalador creado exitosamente en la carpeta 'installer'.
-echo Archivo: installer\VideoDownloader_Setup.exe 
+echo Archivo: installer\VideoDownloader_Setup_v%APP_VERSION%.exe 
 echo. 
 
 choice /C YN /M "¿Desea ejecutar el instalador ahora mismo?"
 if %ERRORLEVEL%==1 (
     echo Ejecutando el instalador...
-    start "" "installer\VideoDownloader_Setup.exe"
+    start "" "installer\VideoDownloader_Setup_v%APP_VERSION%.exe"
 ) else (
     echo Instalador no ejecutado.
 )
