@@ -6,6 +6,7 @@
 #include "videodownloader/queueview.h"
 #include "videodownloader/tabheader.h"
 
+#include "videodownloader/apppaths.h"
 #include "videodownloader/downloadqueue.h"
 #include "videodownloader/linkparser.h"
 #include "videodownloader/nativehost.h"
@@ -252,6 +253,39 @@ int runParseCheck(const QStringList &args)
         fprintf(stdout, "link %s\n", qPrintable(link));
     }
     fprintf(stdout, "ignored %d: %s\n", result.ignoredWords, qPrintable(result.ignoredText));
+    return 0;
+}
+
+int runMigrateCheck(const QStringList &args)
+{
+    const int index = args.indexOf(QStringLiteral("--qa-migrate"));
+    const QString legacyDir = args.value(index + 1);
+    const QString targetDir = args.value(index + 2);
+    if (legacyDir.isEmpty() || targetDir.isEmpty()) {
+        fprintf(stderr, "qa-migrate: needs <legacy folder> <target folder>\n");
+        return 2;
+    }
+    const QStringList lines = AppPaths::migrateToolsFolder(legacyDir, targetDir);
+    for (const QString &line : lines) {
+        fprintf(stdout, "moved %s\n", qPrintable(line));
+    }
+    // Estado de las dos carpetas despues de migrar, para comparar en la prueba.
+    const auto dump = [](const char *tag, const QString &dir) {
+        if (!QDir(dir).exists()) {
+            fprintf(stdout, "%s <gone>\n", tag);
+            return;
+        }
+        const QFileInfoList entries = QDir(dir).entryInfoList(
+            QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden, QDir::Name);
+        for (const QFileInfo &entry : entries) {
+            fprintf(stdout, "%s %s %lld\n", tag, qPrintable(entry.fileName()),
+                    entry.isDir() ? -1LL : entry.size());
+        }
+    };
+    dump("legacy", legacyDir);
+    dump("legacy-staging", legacyDir + QStringLiteral("/.staging"));
+    dump("target", targetDir);
+    dump("target-staging", targetDir + QStringLiteral("/.staging"));
     return 0;
 }
 

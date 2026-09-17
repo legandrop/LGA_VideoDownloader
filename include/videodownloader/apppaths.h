@@ -27,6 +27,13 @@ QString userDataDir(const QString &name);
 // true si en Windows la carpeta de `name` tuvo que caer a LOCALAPPDATA.
 bool usesFallback(const QString &name);
 
+// Migra una carpeta de tools a otra (Windows). Mueve lo que este en staging verificado y las
+// tools instaladas que sean MAS NUEVAS que las del destino, decidiendo por el `--version` del
+// binario y no por tools.json. Solo borra la carpeta de origen si no quedo NADA atras. Es el
+// motor de migrateLegacyWindowsData() y lo usa `--qa-migrate` para probarlo con carpetas
+// cualquiera. Devuelve lineas para el log visible.
+QStringList migrateToolsFolder(const QString &legacyDir, const QString &targetDir);
+
 // Windows: mueve a `<app>/tools` las tools de LOCALAPPDATA que sean mas nuevas y borra la
 // carpeta vieja entera (y `session-cookies` si quedo vacia). Si algo no se puede mover o
 // borrar, queda para el proximo arranque. En macOS no hace nada. Devuelve lineas para el log

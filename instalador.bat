@@ -164,6 +164,7 @@ echo   begin >> VideoDownloader_installer.iss
 REM Restos de versiones anteriores, que bajaban yt-dlp y deno a LocalAppData (y de una
 REM instalacion en carpeta no escribible, donde siguen yendo ahi): son cache, se borran sin preguntar.
 echo     DelTree(ExpandConstant('{localappdata}\LGA\VideoDownloader\tools'), True, True, True); >> VideoDownloader_installer.iss
+echo     DelTree(ExpandConstant('{localappdata}\LGA\VideoDownloader\session-cookies'), True, True, True); >> VideoDownloader_installer.iss
 echo     ConfigPath := ExpandConstant('{userappdata}\LGA\VideoDownloader'); >> VideoDownloader_installer.iss
 echo     if DirExists(ConfigPath) then >> VideoDownloader_installer.iss
 echo     begin >> VideoDownloader_installer.iss
