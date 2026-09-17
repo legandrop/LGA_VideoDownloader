@@ -1,6 +1,7 @@
 #include "videodownloader/mainwindow.h"
-#include "videodownloader/colorutils.h"
 #include "videodownloader/LgaRegistry.h"
+#include "videodownloader/theme.h"
+#include "videodownloader/uishot.h"
 
 #include <QApplication>
 #include <QFile>
@@ -142,6 +143,13 @@ int main(int argc, char *argv[])
     app.setOrganizationName("LGA");
     app.setOrganizationDomain("lga.com");
 
+    // Captura de QA (--ui-shot): sale antes de migrar settings, registrarse o tocar red, asi
+    // dibujar un estado no tiene ningun efecto sobre la instalacion del usuario.
+    if (app.arguments().contains(QStringLiteral("--ui-shot"))) {
+        Theme::apply(app);
+        return runUiShot(app.arguments());
+    }
+
     // Debe correr ANTES de que MainWindow construya su QSettings.
     migrateLegacyAppDataDir();
     // Despues de migrar, para limpiar tambien la copia recien movida.
@@ -156,44 +164,14 @@ int main(int argc, char *argv[])
     LgaRegistry::registerThisApp(QStringLiteral("VideoDownloader"),
                                  QStringLiteral(VIDEODOWNLOADER_VERSION));
 
-    // Cargar fuentes Inter si están disponibles
-    QDir fontsDir(":/fonts");
-    if (fontsDir.exists()) {
-        QStringList fontFiles = fontsDir.entryList(QStringList() << "*.ttf", QDir::Files);
-        for (const QString &fontFile : fontFiles) {
-            QFontDatabase::addApplicationFont(":/fonts/" + fontFile);
-        }
+    // Inter embebida, Fusion, paleta oscura y la hoja de estilo real (Theme::styleSheet()).
+    // `resources/styles/dark_theme.qss` quedo desactualizado y no se carga.
+    Theme::apply(app);
+
+    if (app.arguments().contains(QStringLiteral("--qa-walkthrough"))) {
+        return runWalkthrough(app.arguments());
     }
-    
-    // Cargar y aplicar el tema oscuro.
-    //
-    // OJO: este open() FALLA a proposito y la app usa el fallback de abajo.
-    // El .qrc declara prefix="/styles" con el archivo en "styles/", asi que el
-    // recurso real es :/styles/styles/dark_theme.qss y esta ruta no existe.
-    // `dark_theme.qss` quedo desactualizado: sus reglas de QGroupBox/QLineEdit
-    // rompen el layout. El estilo REAL de la app es ColorUtils::getStyleSheet().
-    // Si alguna vez se quiere revivir el .qss, hay que arreglar el .qss primero
-    // y recien despues el prefix del .qrc; no al reves.
-    QFile styleFile(":/styles/dark_theme.qss");
-    if (styleFile.open(QFile::ReadOnly | QFile::Text)) {
-        QTextStream stream(&styleFile);
-        QString styleSheet = stream.readAll();
-        
-        // Reemplazar variables de color con valores reales
-        styleSheet.replace("bg_principal", ColorUtils::BG_PRINCIPAL);
-        styleSheet.replace("txt_principal", ColorUtils::TXT_PRINCIPAL);
-        styleSheet.replace("boton_gris_oscuro", ColorUtils::BOTON_GRIS_OSCURO);
-        styleSheet.replace("boton_gris_oscu_hover", ColorUtils::BOTON_GRIS_OSCU_HOVER);
-        styleSheet.replace("border_principal", ColorUtils::BORDER_PRINCIPAL);
-        
-        app.setStyleSheet(styleSheet);
-        styleFile.close();
-    } else {
-        qDebug() << "No se pudo cargar el archivo de estilos";
-        // Aplicar estilo básico como fallback
-        app.setStyleSheet(ColorUtils::getStyleSheet());
-    }
-    
+
     // Crear y mostrar la ventana principal
     MainWindow window;
     window.show();

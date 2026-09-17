@@ -1,13 +1,16 @@
 <RCC>
-    <!-- NO cambiar este prefix a "/". Con prefix="/styles" el recurso real es
-         :/styles/styles/dark_theme.qss, y main.cpp abre :/styles/dark_theme.qss,
-         asi que el archivo NUNCA carga y la app usa ColorUtils::getStyleSheet().
-         Eso es lo correcto: dark_theme.qss quedo desactualizado y sus reglas de
-         QGroupBox/QLineEdit rompen el layout. El fallback es el estilo real. -->
+    <!-- dark_theme.qss quedo desactualizado y ya no se carga: el estilo real es
+         Theme::styleSheet() (src/ui/theme.cpp). -->
     <qresource prefix="/styles">
         <file>styles/dark_theme.qss</file>
     </qresource>
     <qresource prefix="/icons">
         <!-- Iconos se añadirán aquí cuando estén disponibles -->
+    </qresource>
+    <!-- Inter embebida (la carga Theme::apply). Inter-SemiBold es el peso 600. -->
+    <qresource prefix="/">
+        <file>fonts/Inter-Regular.ttf</file>
+        <file>fonts/Inter-Medium.ttf</file>
+        <file>fonts/Inter-SemiBold.ttf</file>
     </qresource>
 </RCC>

@@ -37,10 +37,8 @@ QString localToolPath(ToolsUpdater::Tool tool)
 
 } // namespace
 
-ToolsManager::ToolsManager(QTextEdit *logOutput, QPushButton *toolsButton, QObject *parent)
+ToolsManager::ToolsManager(QObject *parent)
     : QObject(parent)
-    , m_logOutput(logOutput)
-    , m_toolsButton(toolsButton)
     , m_ytDlpInstalled(false)
     , m_ffmpegInstalled(false)
     , m_denoInstalled(false)
@@ -50,9 +48,6 @@ ToolsManager::ToolsManager(QTextEdit *logOutput, QPushButton *toolsButton, QObje
     , m_toolsUpdater(nullptr)
     , m_autoUpdateAttempted(false)
 {
-    // Connect button signal
-    connect(m_toolsButton, &QPushButton::clicked, this, &ToolsManager::onInstallUpdateClicked);
-
     // Initialize network manager
     m_networkManager = new QNetworkAccessManager(this);
 
@@ -60,7 +55,7 @@ ToolsManager::ToolsManager(QTextEdit *logOutput, QPushButton *toolsButton, QObje
     connect(m_toolsUpdater, &ToolsUpdater::logMessage, this, &ToolsManager::logMessage);
     connect(m_toolsUpdater, &ToolsUpdater::runningChanged, this, [this](bool running) {
         emit toolsUpdateRunningChanged(running);
-        if (running) {
+        if (running && !m_checkingTools) {
             updateButtonState();
         }
     });
@@ -641,25 +636,21 @@ void ToolsManager::updateButtonState()
     allInstalled = allInstalled && m_denoInstalled;
 #endif
 
-    // yt-dlp y deno se instalan y actualizan solos al arrancar: el boton solo sirve para
-    // reintentar cuando falta algo y el intento automatico ya fallo.
+    // yt-dlp y deno se instalan y actualizan solos al arrancar: el reintento manual solo
+    // se ofrece cuando falta algo y el intento automatico ya fallo.
     if (isUpdatingTools()) {
-        setButtonText("Updating tools...");
-        setButtonStyle("");
-        setButtonEnabled(false);
+        setStatus(allInstalled ? Status::Updating : Status::Installing);
     } else if (allInstalled) {
-        setButtonText("Tools ready");
-        setButtonStyle("");
-        setButtonEnabled(false);
+        setStatus(Status::Ready);
     } else if (!m_autoUpdateAttempted) {
         // El auto-update arranca unos segundos despues de abrir la ventana.
-        setButtonText("Installing tools...");
-        setButtonStyle("");
-        setButtonEnabled(false);
+        setStatus(Status::Installing);
+    } else if (areToolsInstalled()) {
+        // Solo falta deno (o quedo en staging hasta la proxima descarga): se puede descargar,
+        // y el aviso de YouTube sale en el log de cada descarga. No es "faltan las tools".
+        setStatus(Status::Ready);
     } else {
-        setButtonText("Retry tools install");
-        setButtonStyle("danger");
-        setButtonEnabled(true);
+        setStatus(Status::Missing);
     }
 
     emit toolsStatusChanged(allInstalled);
@@ -676,12 +667,21 @@ bool ToolsManager::areToolsInstalled() const
 
 void ToolsManager::installOrUpdateTools()
 {
-    onInstallUpdateClicked();
+    retryInstall();
 }
 
-void ToolsManager::onInstallUpdateClicked()
+void ToolsManager::setStatus(Status status)
 {
-    setButtonEnabled(false);
+    if (m_status == status) {
+        return;
+    }
+    m_status = status;
+    emit statusChanged(status);
+}
+
+void ToolsManager::retryInstall()
+{
+    setStatus(Status::Installing);
 
 #if defined(Q_OS_WIN) || defined(Q_OS_MAC)
     logMessage("=== Installing Tools ===");
@@ -704,7 +704,7 @@ void ToolsManager::onInstallUpdateClicked()
     logMessage("  sudo apt install yt-dlp ffmpeg  # Ubuntu/Debian");
     logMessage("  sudo yum install yt-dlp ffmpeg  # CentOS/RHEL");
     logMessage("  sudo pacman -S yt-dlp ffmpeg    # Arch Linux");
-    setButtonEnabled(true);
+    updateButtonState();
 #endif
 }
 
@@ -745,7 +745,7 @@ void ToolsManager::downloadFfmpegMac()
             if (!dir.exists(toolsDir)) {
                 if (!dir.mkpath(toolsDir)) {
                     logMessage("ERROR: Could not create toolsmac directory");
-                    setButtonEnabled(true);
+                    updateButtonState();
                     reply->deleteLater();
                     return;
                 }
@@ -785,11 +785,11 @@ void ToolsManager::downloadFfmpegMac()
                             });
                         } else {
                             logMessage("ERROR: ffmpeg binary not found after extraction");
-                            setButtonEnabled(true);
+                            updateButtonState();
                         }
                     } else {
                         logMessage("ERROR: Failed to extract ffmpeg zip file");
-                        setButtonEnabled(true);
+                        updateButtonState();
                     }
                     
                     unzipProcess->deleteLater();
@@ -801,19 +801,19 @@ void ToolsManager::downloadFfmpegMac()
                 if (!unzipProcess->waitForStarted(5000)) {
                     logMessage("ERROR: Could not start unzip process");
                     QFile::remove(tempZipPath);
-                    setButtonEnabled(true);
+                    updateButtonState();
                     unzipProcess->deleteLater();
                 }
             } else {
                 logMessage("ERROR: Could not save ffmpeg zip file");
                 logMessage("Check write permissions in application directory");
-                setButtonEnabled(true);
+                updateButtonState();
             }
         } else {
             logMessage("ERROR: Failed to download ffmpeg");
             logMessage(QString("Error: %1").arg(reply->errorString()));
             logMessage("Please check your internet connection");
-            setButtonEnabled(true);
+            updateButtonState();
         }
         
         reply->deleteLater();
@@ -850,39 +850,14 @@ void ToolsManager::downloadFfmpegWindows()
     logMessage("Please download ffmpeg manually from: https://ffmpeg.org/download.html");
     logMessage("Extract ffmpeg.exe to the same directory as this application");
     
-    setButtonEnabled(true);
+    updateButtonState();
 #endif
 }
 
 // Helper Methods
 void ToolsManager::logMessage(const QString &message)
 {
-    if (m_logOutput) {
-        m_logOutput->append(message);
-    }
-}
-
-void ToolsManager::setButtonEnabled(bool enabled)
-{
-    if (m_toolsButton) {
-        m_toolsButton->setEnabled(enabled);
-    }
-}
-
-void ToolsManager::setButtonText(const QString &text)
-{
-    if (m_toolsButton) {
-        m_toolsButton->setText(text);
-    }
-}
-
-void ToolsManager::setButtonStyle(const QString &styleClass)
-{
-    if (m_toolsButton) {
-        m_toolsButton->setProperty("class", styleClass);
-        m_toolsButton->style()->unpolish(m_toolsButton);
-        m_toolsButton->style()->polish(m_toolsButton);
-    }
+    emit logLine(message);
 }
 
 QString ToolsManager::getYtDlpPath() const

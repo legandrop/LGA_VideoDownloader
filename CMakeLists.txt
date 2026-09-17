@@ -79,10 +79,18 @@ endif()
 set(SOURCES
     src/main.cpp
     src/ui/mainwindow.cpp
+    src/ui/theme.cpp
+    src/ui/uiwidgets.cpp
+    src/ui/tabheader.cpp
+    src/ui/addvideoscard.cpp
+    src/ui/queueview.cpp
+    src/ui/logview.cpp
+    src/ui/helpdialog.cpp
     src/ui/videopassworddialog.cpp
+    src/qa/uishot.cpp
     src/core/downloadqueue.cpp
     src/core/updateservice.cpp
-    src/utils/colorutils.cpp
+    src/utils/browserdetect.cpp
     src/utils/toolsmanager.cpp
     src/utils/toolsupdater.cpp
     src/utils/versioncompare.cpp
@@ -93,7 +101,16 @@ set(SOURCES
 set(HEADERS
     include/videodownloader/mainwindow.h
     include/videodownloader/videopassworddialog.h
-    include/videodownloader/colorutils.h
+    include/videodownloader/theme.h
+    include/videodownloader/uiwidgets.h
+    include/videodownloader/tabheader.h
+    include/videodownloader/addvideoscard.h
+    include/videodownloader/queueview.h
+    include/videodownloader/logview.h
+    include/videodownloader/helpdialog.h
+    include/videodownloader/uishot.h
+    include/videodownloader/browserdetect.h
+    include/videodownloader/loglevel.h
     include/videodownloader/toolsmanager.h
     include/videodownloader/toolsupdater.h
     include/videodownloader/updateservice.h

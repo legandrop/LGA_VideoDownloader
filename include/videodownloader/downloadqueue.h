@@ -1,42 +1,52 @@
 #ifndef DOWNLOADQUEUE_H
 #define DOWNLOADQUEUE_H
 
+#include <QElapsedTimer>
+#include <QList>
 #include <QObject>
-#include <QQueue>
 #include <QProcess>
-#include <QTextEdit>
-#include <QProgressBar>
-#include <QGroupBox>
-#include <QTimer>
-#include <QMutex>
 
 #include "downloaditem.h"
+#include "loglevel.h"
 
 class ToolsManager;
 
+// Cola de descargas sin widgets: guarda los items en orden, lanza yt-dlp de a uno y avisa
+// cada cambio por senales. La UI (QueueView, LogView) solo escucha.
 class DownloadQueue : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit DownloadQueue(QTextEdit *logOutput, QProgressBar *progressBar, QGroupBox *progressGroup, ToolsManager *toolsManager, QObject *parent = nullptr);
+    explicit DownloadQueue(ToolsManager *toolsManager, QObject *parent = nullptr);
     ~DownloadQueue();
 
-    // Queue management
-    void addDownload(const QString &url, const QString &cookiesBrowser, const QString &cookiesFile, const QString &downloadDir);
+    // Encola un link valido y devuelve su id. La cola arranca sola.
+    int addDownload(const QString &url, const DownloadOptions &options);
+    // Registra un texto que no es un link soportado como item fallido (no lanza nada).
+    int addInvalidLink(const QString &text);
+
+    // Cancela el item: si es el actual mata yt-dlp, si esta en cola lo marca cancelado.
+    void cancelItem(int id);
+    // Saca de la lista un item que no esta descargando.
+    void removeItem(int id);
+    // Vuelve a encolar un item terminado (fallido o cancelado) con las cookies indicadas.
+    void retryItem(int id, const DownloadOptions &options);
+    void retryFailed(const DownloadOptions &options);
+    void clearFinished();
+    void cancelAll();
+
+    // Reintenta el item actual con la contrasena de VIDEO (no de la cuenta).
     void retryDownloadWithVideoPassword(const QString &videoPassword);
-    void startQueue();
-    void pauseQueue();
-    void clearQueue();
-    void resetQueue(); // Complete reset including counters
-    void cancelCurrentDownload();
-    
-    // Status getters
-    bool isRunning() const { return m_isRunning; }
-    bool isPaused() const { return m_isPaused; }
-    int getCurrentIndex() const { return m_completedCount; }
-    int getTotalCount() const { return m_totalCount; }
-    int getQueueSize() const { return m_queue.size(); }
+    // El usuario no dio la contrasena: el item actual queda fallido y sigue la cola.
+    void abandonPasswordRequest();
+
+    // Arranca lo pendiente si no hay nada corriendo (por ejemplo cuando las tools quedan listas).
+    void kick();
+
+    QList<DownloadItem> items() const { return m_items; }
+    const DownloadItem *item(int id) const;
+
     // Hay un proceso de yt-dlp vivo (el swap de tools tiene que esperar).
     bool hasActiveProcess() const;
     // Descargas que se perderian al cerrar: la actual mas las encoladas.
@@ -45,18 +55,11 @@ public:
     // y el proceso real de yt-dlp, que en Windows es hijo del lanzador onefile).
     void stopAllForShutdown();
 
-    // Current download info
-    DownloadItem getCurrentDownload() const;
-    QList<DownloadItem> getCompletedDownloads() const { return m_completedDownloads; }
-
 signals:
-    void downloadStarted(const DownloadItem &item);
-    void downloadProgress(int percentage);
-    void downloadCompleted(const DownloadItem &item);
-    void downloadFailed(const DownloadItem &item, const QString &error);
-    void queueFinished();
-    void queueStatusChanged(int current, int total);
-    void downloadAddedToQueue(int totalCount);
+    void itemAdded(const DownloadItem &item);
+    void itemUpdated(const DownloadItem &item);
+    void itemRemoved(int id);
+    void logLine(const QString &text, LogLevel level);
     void videoPasswordRequired(const DownloadItem &item);
 
 private slots:
@@ -66,42 +69,38 @@ private slots:
     void onDownloadError();
 
 private:
-    void updateProgressLabel();
-    void logMessage(const QString &message);
-    void startDownloadProcess(const DownloadItem &item);
+    DownloadItem *findItem(int id);
+    int indexOf(int id) const;
+    DownloadItem *currentItem();
+    void startDownloadProcess(DownloadItem &item);
+    void handleStdoutLine(const QString &line);
+    void finishCurrent();
     void cleanupCurrentProcess();
     // Mata yt-dlp CON sus hijos: el ejecutable onefile relanza el yt-dlp real como hijo, y
     // este a su vez lanza ffmpeg y deno. Matar solo el padre dejaba la descarga huerfana.
     void killCurrentProcessTree();
-    void logFailureHint(const DownloadItem &item);
+    void classifyFailure(DownloadItem &item) const;
     void flushStderrBuffer();
+    void log(const QString &text, LogLevel level = LogLevel::Info);
+    void emitUpdated(const DownloadItem &item, bool throttle = false);
 
-    // UI references
-    QTextEdit *m_logOutput;
-    QProgressBar *m_progressBar;
-    QGroupBox *m_progressGroup;
     ToolsManager *m_toolsManager;
-    
-    // Queue management
-    QQueue<DownloadItem> m_queue;
-    QList<DownloadItem> m_completedDownloads;
-    DownloadItem m_currentDownload;
-    
-    // Process management
-    QProcess *m_currentProcess;
-    QString m_stderrBuffer; // Linea incompleta de stderr pendiente del proximo chunk
-    QMutex m_queueMutex;
-    
-    // Status tracking
-    bool m_isRunning;
-    bool m_isPaused;
-    int m_completedCount;
-    int m_totalCount;
-    bool m_hasCurrentDownload;
-    
-    // Fragment-based progress tracking for YouTube downloads
-    int m_totalFragments;
-    int m_currentFragment;
+    QList<DownloadItem> m_items;
+    int m_nextId = 1;
+    int m_currentId = -1;
+    bool m_waitingForTools = false;
+    bool m_stopped = false;
+
+    QProcess *m_currentProcess = nullptr;
+    QString m_stdoutBuffer;  // linea incompleta de stdout pendiente del proximo chunk
+    QString m_stderrBuffer;  // idem stderr
+
+    // Progreso de varios streams (video + audio se bajan por separado y despues se unen).
+    int m_streamCount = 1;
+    int m_streamIndex = 0;
+    qint64 m_streamDoneBase = 0;   // bytes de los streams ya terminados
+    qint64 m_lastStreamTotal = 0;
+    QElapsedTimer m_progressThrottle;
 };
 
 #endif // DOWNLOADQUEUE_H

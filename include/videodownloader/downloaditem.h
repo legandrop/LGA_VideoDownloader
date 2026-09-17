@@ -12,67 +12,83 @@ enum class DownloadStatus {
     Cancelled
 };
 
-struct DownloadItem {
-    QString url;
-    // Autenticacion por cookies, nunca por usuario/contrasena de la cuenta.
-    // cookiesBrowser: nombre que entiende --cookies-from-browser (firefox, chrome, ...).
-    // cookiesFile: ruta a un cookies.txt en formato Netscape (--cookies).
-    // Como mucho uno de los dos viene cargado.
-    QString cookiesBrowser;
-    QString cookiesFile;
-    QString videoPassword;
+// Que archivo se pide: video MP4 (video + audio unidos) o solo el audio en M4A.
+enum class OutputFormat {
+    VideoMp4,
+    AudioM4a
+};
+
+// Calidad del video. Compatible prioriza H.264 (abre en cualquier editor); Best toma la
+// resolucion mas alta aunque venga en AV1/VP9.
+enum class VideoQuality {
+    Compatible,
+    Best
+};
+
+// Motivo de un fallo, traducido de la salida de yt-dlp para mostrar una solucion concreta.
+enum class FailureKind {
+    None,
+    NeedsSignIn,        // edad, privado, miembros, Vimeo con sesion
+    CookiesUnreadable,  // el navegador elegido no deja leer sus cookies
+    InvalidLink,        // no es un link de Vimeo ni de YouTube
+    Unavailable,        // video borrado o inexistente
+    Network,
+    ToolsMissing,
+    PasswordRequired,
+    Generic
+};
+
+// Opciones con las que se encola un link. Las cookies: como mucho uno de los dos cargado.
+struct DownloadOptions {
+    QString cookiesBrowser;  // nombre que entiende --cookies-from-browser (firefox, chrome, ...)
+    QString cookiesFile;     // ruta a un cookies.txt en formato Netscape (--cookies)
     QString downloadDir;
-    QString title;
-    DownloadStatus status;
-    QDateTime addedTime;
+    OutputFormat format = OutputFormat::VideoMp4;
+    VideoQuality quality = VideoQuality::Compatible;
+};
+
+struct DownloadItem {
+    int id = 0;
+    QString url;
+    DownloadOptions options;
+    QString videoPassword;
+
+    DownloadStatus status = DownloadStatus::Pending;
+    QDateTime addedTime = QDateTime::currentDateTime();
     QDateTime startTime;
     QDateTime finishTime;
-    int progress;
+
+    // Datos que llegan de yt-dlp mientras descarga (vacios o -1 hasta que se conocen).
+    QString title;
+    QString resolution;      // "1920x1080"
+    QString extension;       // "mp4" / "m4a"
+    QString filePath;        // archivo final, despues de unir y mover
+    int progress = 0;        // 0..100, total de todos los streams
+    qint64 totalBytes = -1;  // suma estimada de los streams
+    qint64 doneBytes = -1;
+    double speedBytes = -1;  // bytes por segundo
+    int etaSeconds = -1;
+    bool finishing = false;  // streams bajados, ffmpeg uniendo o convirtiendo
+
+    // Fallo: salida cruda de yt-dlp (stderr) y la version entendible para la tarjeta.
     QString errorMessage;
-    
-    DownloadItem()
-        : status(DownloadStatus::Pending)
-        , addedTime(QDateTime::currentDateTime())
-        , progress(0)
-    {}
+    FailureKind failure = FailureKind::None;
+    QString errorHeadline;
+    QString errorDetail;
 
-    DownloadItem(const QString &url, const QString &browser, const QString &cookiesTxt, const QString &dir)
-        : url(url)
-        , cookiesBrowser(browser)
-        , cookiesFile(cookiesTxt)
-        , videoPassword("")
-        , downloadDir(dir)
-        , status(DownloadStatus::Pending)
-        , addedTime(QDateTime::currentDateTime())
-        , progress(0)
-    {}
-
-    DownloadItem(const QString &url, const QString &browser, const QString &cookiesTxt, const QString &videoPass, const QString &dir)
-        : url(url)
-        , cookiesBrowser(browser)
-        , cookiesFile(cookiesTxt)
-        , videoPassword(videoPass)
-        , downloadDir(dir)
-        , status(DownloadStatus::Pending)
-        , addedTime(QDateTime::currentDateTime())
-        , progress(0)
-    {}
-    
     bool isFinished() const {
-        return status == DownloadStatus::Completed || 
-               status == DownloadStatus::Failed || 
+        return status == DownloadStatus::Completed ||
+               status == DownloadStatus::Failed ||
                status == DownloadStatus::Cancelled;
     }
-    
-    QString getStatusString() const {
-        switch (status) {
-            case DownloadStatus::Pending: return "Pending";
-            case DownloadStatus::Downloading: return "Downloading";
-            case DownloadStatus::Completed: return "Completed";
-            case DownloadStatus::Failed: return "Failed";
-            case DownloadStatus::Cancelled: return "Cancelled";
-            default: return "Unknown";
-        }
+
+    bool isYouTube() const {
+        return url.contains(QLatin1String("youtube.com"), Qt::CaseInsensitive)
+            || url.contains(QLatin1String("youtu.be"), Qt::CaseInsensitive);
+    }
+
+    bool isVimeo() const {
+        return url.contains(QLatin1String("vimeo.com"), Qt::CaseInsensitive);
     }
 };
 

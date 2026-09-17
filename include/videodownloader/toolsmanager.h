@@ -2,8 +2,6 @@
 #define TOOLSMANAGER_H
 
 #include <QObject>
-#include <QTextEdit>
-#include <QPushButton>
 #include <QProcess>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
@@ -19,7 +17,16 @@ class ToolsManager : public QObject
     Q_OBJECT
 
 public:
-    explicit ToolsManager(QTextEdit *logOutput, QPushButton *toolsButton, QObject *parent = nullptr);
+    // Estado de las tools para la UI (chip de la barra superior).
+    enum class Status {
+        Checking,    // arranque, todavia no se sabe
+        Ready,
+        Installing,  // falta alguna y el auto-update la esta bajando
+        Updating,    // estan todas y el auto-update busca versiones nuevas
+        Missing      // falta alguna y el intento automatico ya fallo
+    };
+
+    explicit ToolsManager(QObject *parent = nullptr);
     ~ToolsManager();
 
     // Public interface
@@ -41,6 +48,9 @@ public:
     ToolsUpdater *toolsUpdater() const { return m_toolsUpdater; }
     void startAutomaticUpdate();
     bool isUpdatingTools() const;
+    Status status() const { return m_status; }
+    // Reintento manual cuando falta alguna tool y el automatico fallo.
+    void retryInstall();
     // Punto UNICO de swap de lo verificado en staging. Solo sin procesos de yt-dlp vivos:
     // lo llaman el arranque, DownloadQueue antes de lanzar cada proceso y el fin del
     // auto-update si la cola esta quieta. Devuelve true si reemplazo algo.
@@ -58,9 +68,9 @@ signals:
     void installationFinished(bool success);
     void toolsUpdateRunningChanged(bool running);
     void toolVersionsChanged();
-
-private slots:
-    void onInstallUpdateClicked();
+    void statusChanged(ToolsManager::Status status);
+    // Linea para el log visible (en ingles).
+    void logLine(const QString &line);
 
 private:
     // Detection methods
@@ -68,6 +78,7 @@ private:
     void checkFfmpegInstallation();
     void checkDenoInstallation();
     void updateButtonState();
+    void setStatus(Status status);
 
     // Installation methods - macOS (ffmpeg; yt-dlp y deno los maneja ToolsUpdater)
     void downloadFfmpegMac();
@@ -78,15 +89,10 @@ private:
 
     // Helper methods
     void logMessage(const QString &message);
-    void setButtonEnabled(bool enabled);
-    void setButtonText(const QString &text);
-    void setButtonStyle(const QString &styleClass);
     QString getBrewPath() const;
     
-    // UI references
-    QTextEdit *m_logOutput;
-    QPushButton *m_toolsButton;
-    
+    Status m_status = Status::Checking;
+
     // Tool status
     bool m_ytDlpInstalled;
     bool m_ffmpegInstalled;

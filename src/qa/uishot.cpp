@@ -1,0 +1,479 @@
+#include "videodownloader/uishot.h"
+#include "videodownloader/addvideoscard.h"
+#include "videodownloader/helpdialog.h"
+#include "videodownloader/logview.h"
+#include "videodownloader/mainwindow.h"
+#include "videodownloader/queueview.h"
+#include "videodownloader/tabheader.h"
+
+#include "videodownloader/downloadqueue.h"
+#include "videodownloader/toolsmanager.h"
+
+#include <QAbstractButton>
+#include <QApplication>
+#include <QDir>
+#include <QElapsedTimer>
+#include <QFile>
+#include <QPushButton>
+#include <QSettings>
+#include <QStandardPaths>
+#include <QTimer>
+
+#include <cstdio>
+#include <QFileInfo>
+#include <QFontInfo>
+#include <QImage>
+#include <QJsonArray>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QLabel>
+#include <QLayout>
+#include <QPainter>
+#include <QPixmap>
+#include <QSaveFile>
+
+// Captura de QA sin escritorio: construye la ventana real en modo Capture, la carga con
+// datos de prueba (fixture, no descargas reales) y la dibuja a un PNG con QWidget::render.
+// Nunca llama show() sobre una ventana de nivel superior, asi que no aparece nada en
+// pantalla ni se toma el foco.
+
+namespace {
+
+const QStringList kStates = {
+    QStringLiteral("empty"), QStringLiteral("downloading"), QStringLiteral("error"), QStringLiteral("tools"),
+    QStringLiteral("help"), QStringLiteral("help-update"), QStringLiteral("help-downloading"),
+};
+
+constexpr int SHOT_WIDTH = 1200;
+constexpr int SHOT_HEIGHT = 748;
+
+DownloadOptions fixtureOptions(const QString &cookies)
+{
+    DownloadOptions options;
+    options.downloadDir = QStringLiteral("D:/Downloads/Video");
+    options.cookiesBrowser = cookies;
+    return options;
+}
+
+DownloadItem fixtureItem(int id, const QString &url, DownloadStatus status, const QString &title)
+{
+    DownloadItem item;
+    item.id = id;
+    item.url = url;
+    item.status = status;
+    item.title = title;
+    item.options = fixtureOptions(QStringLiteral("firefox"));
+    return item;
+}
+
+void addLog(LogView *log, const char *time, LogLevel level, const QString &text)
+{
+    log->append(text, level, QTime::fromString(QLatin1String(time), QStringLiteral("HH:mm:ss")));
+}
+
+QList<BrowserDetect::Browser> fixtureBrowsers()
+{
+#ifdef Q_OS_WIN
+    return {{QStringLiteral("firefox"), QStringLiteral("Firefox"), true, true},
+            {QStringLiteral("chrome"), QStringLiteral("Chrome"), false, false},
+            {QStringLiteral("edge"), QStringLiteral("Edge"), false, false}};
+#else
+    return {{QStringLiteral("safari"), QStringLiteral("Safari"), true, false},
+            {QStringLiteral("firefox"), QStringLiteral("Firefox"), true, false},
+            {QStringLiteral("chrome"), QStringLiteral("Chrome"), true, false}};
+#endif
+}
+
+void loadDownloading(MainWindow &window)
+{
+    QueueView *queue = window.queueView();
+    DownloadItem done = fixtureItem(1, QStringLiteral("https://vimeo.com/76979871"), DownloadStatus::Completed,
+                                    QStringLiteral("Color Grading Session – Part 2"));
+    done.totalBytes = 412LL * 1024 * 1024;
+    done.resolution = QStringLiteral("1920x1080");
+    done.extension = QStringLiteral("mp4");
+    done.progress = 100;
+    queue->upsertItem(done);
+
+    DownloadItem running = fixtureItem(2, QStringLiteral("https://www.youtube.com/watch?v=jNQXAC9IVRw"),
+                                       DownloadStatus::Downloading, QStringLiteral("Studio Tour 2026"));
+    running.progress = 62;
+    running.doneBytes = 734LL * 1024 * 1024;
+    running.totalBytes = qint64(1.18 * 1024 * 1024 * 1024);
+    running.speedBytes = 18.4 * 1024 * 1024;
+    running.etaSeconds = 26;
+    running.resolution = QStringLiteral("2560x1440");
+    running.extension = QStringLiteral("mp4");
+    queue->upsertItem(running);
+
+    queue->upsertItem(fixtureItem(3, QStringLiteral("https://vimeo.com/123456789"), DownloadStatus::Pending,
+                                  QStringLiteral("Director Interview – Final Cut")));
+    queue->upsertItem(fixtureItem(4, QStringLiteral("https://www.youtube.com/watch?v=aB3xK9"), DownloadStatus::Pending,
+                                  QStringLiteral("Lighting Breakdown")));
+
+    LogView *log = window.logView();
+    addLog(log, "10:41:15", LogLevel::Info, QStringLiteral("Added 4 links to the queue"));
+    addLog(log, "10:41:16", LogLevel::Info, QStringLiteral("Fetching info · https://vimeo.com/76979871 · cookies: the Firefox session"));
+    addLog(log, "10:41:18", LogLevel::Info, QStringLiteral("Format: 1920x1080 mp4 · Color Grading Session – Part 2"));
+    addLog(log, "10:43:02", LogLevel::Done, QStringLiteral("Saved Color_Grading_Session_Part_2.mp4 (412 MiB)"));
+    addLog(log, "10:43:03", LogLevel::Info, QStringLiteral("Fetching info · https://www.youtube.com/watch?v=jNQXAC9IVRw · cookies: the Firefox session"));
+    addLog(log, "10:43:05", LogLevel::Warning, QStringLiteral("WARNING: [youtube] No H.264 format at 2160p; using 2560x1440"));
+    addLog(log, "10:43:06", LogLevel::Info, QStringLiteral("Format: 2560x1440 mp4 · Studio Tour 2026"));
+}
+
+void loadError(MainWindow &window)
+{
+    QueueView *queue = window.queueView();
+    DownloadItem failed = fixtureItem(1, QStringLiteral("https://www.youtube.com/watch?v=aB3xK9"), DownloadStatus::Failed, QString());
+    failed.options.cookiesBrowser.clear();
+    failed.failure = FailureKind::NeedsSignIn;
+    failed.errorHeadline = QStringLiteral("Sign in to confirm your age");
+    failed.errorDetail = QStringLiteral("YouTube only shows this video to signed-in users. Sign in to YouTube in Firefox, "
+                                        "choose it in Use cookies from, and retry.");
+    failed.errorMessage = QStringLiteral("ERROR: [youtube] aB3xK9: Sign in to confirm your age.");
+    queue->upsertItem(failed);
+
+    DownloadItem done = fixtureItem(2, QStringLiteral("https://vimeo.com/76979871"), DownloadStatus::Completed,
+                                    QStringLiteral("Director Interview – Final Cut"));
+    done.options.cookiesBrowser.clear();
+    done.totalBytes = 268LL * 1024 * 1024;
+    done.resolution = QStringLiteral("1920x1080");
+    done.extension = QStringLiteral("mp4");
+    done.progress = 100;
+    queue->upsertItem(done);
+
+    LogView *log = window.logView();
+    addLog(log, "10:52:30", LogLevel::Info, QStringLiteral("Added 2 links to the queue"));
+    addLog(log, "10:52:31", LogLevel::Info, QStringLiteral("Fetching info · https://www.youtube.com/watch?v=aB3xK9 · cookies: no browser session"));
+    addLog(log, "10:52:33", LogLevel::Error, QStringLiteral("ERROR: [youtube] aB3xK9: Sign in to confirm your age. This video may be inappropriate for some users."));
+    addLog(log, "10:52:33", LogLevel::Error, QStringLiteral("Sign in to confirm your age · YouTube only shows this video to signed-in users, and no browser session was used."));
+    addLog(log, "10:52:34", LogLevel::Info, QStringLiteral("Fetching info · https://vimeo.com/76979871 · cookies: no browser session"));
+    addLog(log, "10:54:10", LogLevel::Done, QStringLiteral("Saved Director_Interview_Final_Cut.mp4 (268 MiB)"));
+}
+
+void loadTools(MainWindow &window)
+{
+    window.tabHeader()->setToolsNotice(QStringLiteral("Installing download tools…"), QStringLiteral("neutral"), QString());
+    QueueView *queue = window.queueView();
+    queue->setWaitingForTools(true);
+    DownloadItem waiting = fixtureItem(1, QStringLiteral("https://www.youtube.com/watch?v=jNQXAC9IVRw"), DownloadStatus::Pending, QString());
+    queue->upsertItem(waiting);
+
+    LogView *log = window.logView();
+    addLog(log, "09:12:01", LogLevel::Info, QStringLiteral("LGA Video Downloader v" VIDEODOWNLOADER_VERSION " started"));
+    addLog(log, "09:12:01", LogLevel::Error, QStringLiteral("\u2717 yt-dlp.exe not found"));
+    addLog(log, "09:12:03", LogLevel::Info, QStringLiteral("yt-dlp: downloading 2026.08.19 (17.0 MiB)"));
+    addLog(log, "09:12:05", LogLevel::Info, QStringLiteral("Added 1 link to the queue"));
+    addLog(log, "09:12:05", LogLevel::Warning, QStringLiteral("Waiting for the download tools to finish installing"));
+}
+
+void loadEmpty(MainWindow &window)
+{
+    LogView *log = window.logView();
+    addLog(log, "10:40:02", LogLevel::Info, QStringLiteral("LGA Video Downloader v" VIDEODOWNLOADER_VERSION " started"));
+    addLog(log, "10:40:02", LogLevel::Done, QStringLiteral("\u2713 yt-dlp.exe found: C:\\Users\\lega\\AppData\\Local\\LGA\\VideoDownloader\\tools\\yt-dlp.exe"));
+    addLog(log, "10:40:02", LogLevel::Done, QStringLiteral("\u2713 ffmpeg.exe found in tools directory"));
+}
+
+QJsonObject geometryOf(QWidget *widget, QWidget *root)
+{
+    const QPoint origin = widget->mapTo(root, QPoint(0, 0));
+    return QJsonObject{{QStringLiteral("x"), origin.x()}, {QStringLiteral("y"), origin.y()},
+                       {QStringLiteral("w"), widget->width()}, {QStringLiteral("h"), widget->height()}};
+}
+
+} // namespace
+
+int runWalkthrough(const QStringList &args)
+{
+    // Recorrido real sin escritorio: la app completa (tools, cola, red, settings del usuario)
+    // con la plataforma offscreen. Pega los links en la tarjeta real, aprieta el Download
+    // real y guarda capturas hasta que la cola termina.
+    const int index = args.indexOf(QStringLiteral("--qa-walkthrough"));
+    const QString linksPath = args.value(index + 1);
+    const QString outDir = args.value(index + 2);
+    if (index < 0 || linksPath.isEmpty() || outDir.isEmpty() || !QFileInfo(linksPath).isFile() || !QDir(outDir).exists()) {
+        fprintf(stderr, "usage: --qa-walkthrough <links.txt> <existing-out-dir>\n");
+        return 2;
+    }
+    if (QGuiApplication::platformName() != QLatin1String("offscreen")) {
+        fprintf(stderr, "qa-walkthrough: run with QT_QPA_PLATFORM=offscreen\n");
+        return 2;
+    }
+    QFile linksFile(linksPath);
+    if (!linksFile.open(QIODevice::ReadOnly | QIODevice::Text)) {
+        return 2;
+    }
+    const QString links = QString::fromUtf8(linksFile.readAll());
+
+    // --qa-isolated <carpeta>: modo de prueba de QStandardPaths. Config y tools van a
+    // carpetas "qttest" propias, asi no se tocan los del usuario y se usan las tools que
+    // vienen con el build. La carpeta indicada es el destino de las descargas.
+    const int isolatedIndex = args.indexOf(QStringLiteral("--qa-isolated"));
+    if (isolatedIndex >= 0) {
+        const QString downloadDir = args.value(isolatedIndex + 1);
+        if (downloadDir.isEmpty() || !QDir(downloadDir).exists()) {
+            fprintf(stderr, "qa-walkthrough: --qa-isolated needs an existing download folder\n");
+            return 2;
+        }
+        QStandardPaths::setTestModeEnabled(true);
+        MainWindow::setAutomaticUpdatesEnabled(false);
+        QSettings settings(MainWindow::configPath(), QSettings::IniFormat);
+        settings.setValue(QStringLiteral("download/folder"), downloadDir);
+        settings.sync();
+        fprintf(stdout, "isolated config %s\n", qPrintable(MainWindow::configPath()));
+    }
+
+    MainWindow window;
+    window.resize(1200, 860);
+    window.show();
+
+    int shot = 0;
+    const auto save = [&window, &outDir, &shot](const QString &tag) {
+        const QString path = QDir(outDir).filePath(QStringLiteral("%1_%2.png").arg(++shot, 3, 10, QLatin1Char('0')).arg(tag));
+        window.grab().save(path);
+        fprintf(stdout, "shot %s\n", qPrintable(path));
+        fflush(stdout);
+    };
+
+    bool clicked = false;
+    int idleChecks = 0;
+    QElapsedTimer clock;
+    clock.start();
+    QTimer poll;
+    QObject::connect(&poll, &QTimer::timeout, &window, [&]() {
+        DownloadQueue *queue = window.downloadQueue();
+        const ToolsManager *tools = window.toolsManager();
+        if (!clicked) {
+            // Espera a que la ventana termine de arrancar (tools chequeadas) antes de pegar.
+            if (clock.elapsed() < 3000 || !tools || tools->status() == ToolsManager::Status::Checking) {
+                return;
+            }
+            save(QStringLiteral("start"));
+            window.addCard()->setLinksText(links);
+            save(QStringLiteral("pasted"));
+            for (QPushButton *button : window.addCard()->findChildren<QPushButton *>()) {
+                if (button->text() == QLatin1String("Download")) {
+                    button->click();
+                    clicked = true;
+                }
+            }
+            save(QStringLiteral("clicked"));
+            return;
+        }
+        save(QStringLiteral("progress"));
+        const bool idle = queue && queue->activeDownloadCount() == 0;
+        idleChecks = idle ? idleChecks + 1 : 0;
+        if (idleChecks >= 2 || clock.elapsed() > 10 * 60 * 1000) {
+            save(idle ? QStringLiteral("final") : QStringLiteral("timeout"));
+            QJsonArray items;
+            for (const DownloadItem &item : queue->items()) {
+                items.append(QJsonObject{{QStringLiteral("url"), item.url}, {QStringLiteral("status"), int(item.status)},
+                                         {QStringLiteral("title"), item.title}, {QStringLiteral("file"), item.filePath},
+                                         {QStringLiteral("headline"), item.errorHeadline},
+                                         {QStringLiteral("detail"), item.errorDetail},
+                                         {QStringLiteral("bytes"), item.totalBytes}});
+            }
+            QFile out(QDir(outDir).filePath(QStringLiteral("items.json")));
+            if (out.open(QIODevice::WriteOnly)) {
+                out.write(QJsonDocument(items).toJson());
+            }
+            QFile log(QDir(outDir).filePath(QStringLiteral("log.txt")));
+            if (log.open(QIODevice::WriteOnly)) {
+                log.write(window.logView()->canvas()->plainText().toUtf8());
+            }
+            QCoreApplication::exit(idle ? 0 : 3);
+        }
+    });
+    poll.start(2500);
+    return QCoreApplication::exec();
+}
+
+int runUiShot(const QStringList &args)
+{
+    const int index = args.indexOf(QStringLiteral("--ui-shot"));
+    if (index < 0 || index + 2 >= args.size()) {
+        fprintf(stderr, "usage: --ui-shot <%s> <out.png> [--dpr <1..3>] [--size WxH]\n", qPrintable(kStates.join('|')));
+        return 2;
+    }
+    const QString state = args.at(index + 1);
+    const QString outPath = QFileInfo(args.at(index + 2)).absoluteFilePath();
+    qreal dpr = 1.0;
+    const int dprIndex = args.indexOf(QStringLiteral("--dpr"));
+    if (dprIndex >= 0) {
+        bool ok = false;
+        dpr = args.value(dprIndex + 1).toDouble(&ok);
+        if (!ok || dpr < 1.0 || dpr > 3.0) {
+            fprintf(stderr, "ui-shot: invalid --dpr\n");
+            return 2;
+        }
+    }
+    int shotWidth = SHOT_WIDTH;
+    int shotHeight = SHOT_HEIGHT;
+    const int sizeIndex = args.indexOf(QStringLiteral("--size"));
+    if (sizeIndex >= 0) {
+        const QStringList parts = args.value(sizeIndex + 1).split(QLatin1Char('x'));
+        bool okW = false, okH = false;
+        shotWidth = parts.value(0).toInt(&okW);
+        shotHeight = parts.value(1).toInt(&okH);
+        if (parts.size() != 2 || !okW || !okH || shotWidth < 900 || shotHeight < 640 || shotWidth > 4000 || shotHeight > 3000) {
+            fprintf(stderr, "ui-shot: invalid --size (WxH, minimum 900x640)\n");
+            return 2;
+        }
+    }
+    if (!kStates.contains(state)) {
+        fprintf(stderr, "ui-shot: unknown state '%s'\n", qPrintable(state));
+        return 2;
+    }
+    if (!outPath.endsWith(QLatin1String(".png"), Qt::CaseInsensitive) || QFileInfo::exists(outPath)
+        || !QFileInfo(outPath).dir().exists()) {
+        fprintf(stderr, "ui-shot: output must be a new .png in an existing folder\n");
+        return 2;
+    }
+
+    MainWindow window(MainWindow::Mode::Capture);
+    window.setAttribute(Qt::WA_DontShowOnScreen, true);
+    window.resize(shotWidth, shotHeight);
+
+    AddVideosCard *card = window.addCard();
+    card->setBrowsers(fixtureBrowsers());
+    card->setDownloadFolder(QStringLiteral("D:/Downloads/Video"));
+    window.queueView()->setFirefoxAvailable(true);
+
+    const bool help = state.startsWith(QLatin1String("help"));
+    if (state == QLatin1String("empty")) {
+        card->setCookiesSource(QStringLiteral("firefox"), QString());
+        loadEmpty(window);
+    } else if (state == QLatin1String("downloading") || help) {
+        card->setCookiesSource(QStringLiteral("firefox"), QString());
+        loadDownloading(window);
+    } else if (state == QLatin1String("error")) {
+        card->setCookiesSource(QString(), QString());
+        loadError(window);
+    } else if (state == QLatin1String("tools")) {
+        card->setCookiesSource(QStringLiteral("firefox"), QString());
+        loadTools(window);
+    }
+
+    HelpDialog *dialog = nullptr;
+    if (help) {
+        window.tabHeader()->setUpdateNotice(state == QLatin1String("help") ? QString() : state == QLatin1String("help-update") ? QStringLiteral("Update available · v0.90") : QStringLiteral("Downloading update…"));
+        auto *scrim = new Scrim(window.centralWidget());
+        scrim->setVisible(true);
+        dialog = new HelpDialog(window.centralWidget());
+        // Hijo comun dentro de la ventana, no una ventana propia: se dibuja con el mismo render.
+        dialog->setWindowFlags(Qt::Widget);
+        dialog->setToolVersions({{QStringLiteral("yt-dlp"), QStringLiteral("2026.08.19")},
+                                 {QStringLiteral("ffmpeg"), QStringLiteral("7.1-full_build")},
+                                 {QStringLiteral("deno"), QStringLiteral("2.9.6")}});
+        UpdateView view;
+        view.currentVersion = QStringLiteral(VIDEODOWNLOADER_VERSION);
+        view.lastChecked = QDateTime(QDate::currentDate(), QTime(10, 40));
+        if (state == QLatin1String("help")) {
+            view.state = UpdateService::State::UpToDate;
+        } else if (state == QLatin1String("help-update")) {
+            view.state = UpdateService::State::UpdateAvailable;
+            view.availableVersion = QStringLiteral("0.90");
+        } else {
+            view.state = UpdateService::State::Downloading;
+            view.availableVersion = QStringLiteral("0.90");
+            view.received = 18LL * 1024 * 1024;
+            view.total = 42LL * 1024 * 1024;
+        }
+        dialog->setUpdateView(view);
+        dialog->setVisible(true);
+    }
+
+    // Resolver layouts: render() activa los layouts de widgets nunca mostrados, pero los
+    // eventos de layout pendientes se procesan antes para no capturar un estado intermedio.
+    for (int pass = 0; pass < 3; ++pass) {
+        QCoreApplication::sendPostedEvents();
+        QPixmap warmup(1, 1);
+        window.render(&warmup);
+        if (dialog) {
+            dialog->adjustSize();
+            dialog->move((shotWidth - dialog->width()) / 2, (shotHeight - dialog->height()) / 2);
+        }
+    }
+    QCoreApplication::sendPostedEvents();
+
+    QPixmap pixmap(QSize(shotWidth, shotHeight) * dpr);
+    pixmap.setDevicePixelRatio(dpr);
+    pixmap.fill(QColor(QLatin1String("#161616")));
+    window.render(&pixmap, QPoint(), QRegion(), QWidget::DrawWindowBackground | QWidget::DrawChildren);
+
+    QImage image = pixmap.toImage().convertToFormat(QImage::Format_RGB32);
+    if (!image.save(outPath, "PNG")) {
+        fprintf(stderr, "ui-shot: could not save %s\n", qPrintable(outPath));
+        return 1;
+    }
+    const QImage check(outPath);
+    if (check.size() != QSize(shotWidth, shotHeight) * dpr) {
+        fprintf(stderr, "ui-shot: saved image has unexpected size\n");
+        return 1;
+    }
+
+    // Descriptor para verificar la captura: geometria de las piezas y fuentes resueltas.
+    QJsonObject descriptor;
+    descriptor.insert(QStringLiteral("state"), state);
+    descriptor.insert(QStringLiteral("dpr"), dpr);
+    descriptor.insert(QStringLiteral("logical"), QJsonArray{shotWidth, shotHeight});
+    descriptor.insert(QStringLiteral("physical"), QJsonArray{check.width(), check.height()});
+    descriptor.insert(QStringLiteral("pid"), qint64(QCoreApplication::applicationPid()));
+    descriptor.insert(QStringLiteral("version"), QStringLiteral(VIDEODOWNLOADER_VERSION));
+    descriptor.insert(QStringLiteral("fixture"), true);
+    QJsonObject geometry;
+    geometry.insert(QStringLiteral("tabHeader"), geometryOf(window.tabHeader(), &window));
+    geometry.insert(QStringLiteral("addCard"), geometryOf(window.addCard(), &window));
+    geometry.insert(QStringLiteral("queueView"), geometryOf(window.queueView(), &window));
+    geometry.insert(QStringLiteral("logView"), geometryOf(window.logView(), &window));
+    QJsonArray tiles;
+    for (QWidget *tile : window.queueView()->findChildren<QWidget *>(QStringLiteral("tile"))) {
+        if (tile->isVisibleTo(&window)) {
+            tiles.append(geometryOf(tile, &window));
+        }
+    }
+    geometry.insert(QStringLiteral("tiles"), tiles);
+    if (dialog) {
+        geometry.insert(QStringLiteral("helpDialog"), geometryOf(dialog, &window));
+    }
+    descriptor.insert(QStringLiteral("geometry"), geometry);
+    // Arbol completo de widgets visibles (clase, nombre, rectangulo en coordenadas de la
+    // ventana) para medir espaciados sin adivinar desde los pixeles.
+    QJsonArray tree;
+    for (QWidget *widget : window.findChildren<QWidget *>()) {
+        if (!widget->isVisibleTo(&window)) {
+            continue;
+        }
+        QJsonObject entry = geometryOf(widget, &window);
+        entry.insert(QStringLiteral("class"), QString::fromLatin1(widget->metaObject()->className()));
+        entry.insert(QStringLiteral("name"), widget->objectName());
+        if (auto *labelWidget = qobject_cast<QLabel *>(widget)) {
+            entry.insert(QStringLiteral("text"), labelWidget->text().left(60));
+        } else if (auto *button = qobject_cast<QAbstractButton *>(widget)) {
+            entry.insert(QStringLiteral("text"), button->text());
+        }
+        tree.append(entry);
+    }
+    descriptor.insert(QStringLiteral("widgets"), tree);
+    QJsonObject fonts;
+    const auto fontOf = [](const QFont &font) {
+        const QFontInfo info(font);
+        return QJsonObject{{QStringLiteral("family"), info.family()}, {QStringLiteral("pixelSize"), info.pixelSize()},
+                           {QStringLiteral("weight"), info.weight()}, {QStringLiteral("exactMatch"), info.exactMatch()}};
+    };
+    if (auto *title = window.addCard()->findChild<QLabel *>(QStringLiteral("cardTitle"))) {
+        fonts.insert(QStringLiteral("cardTitle"), fontOf(title->font()));
+    }
+    fonts.insert(QStringLiteral("log"), fontOf(window.logView()->canvas()->font()));
+    fonts.insert(QStringLiteral("app"), fontOf(QApplication::font()));
+    descriptor.insert(QStringLiteral("fonts"), fonts);
+
+    QSaveFile json(outPath + QStringLiteral(".json"));
+    if (json.open(QIODevice::WriteOnly)) {
+        json.write(QJsonDocument(descriptor).toJson());
+        json.commit();
+    }
+    fprintf(stdout, "ui-shot ok %s\n", qPrintable(outPath));
+    return 0;
+}

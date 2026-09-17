@@ -1,117 +1,186 @@
 #include "videodownloader/mainwindow.h"
-#include "videodownloader/colorutils.h"
-#include "videodownloader/toolsmanager.h"
+#include "videodownloader/addvideoscard.h"
 #include "videodownloader/downloadqueue.h"
+#include "videodownloader/logview.h"
+#include "videodownloader/queueview.h"
+#include "videodownloader/tabheader.h"
+#include "videodownloader/toolsmanager.h"
 #include "videodownloader/updateservice.h"
 #include "videodownloader/videopassworddialog.h"
+
 #include <QApplication>
-#include <QVBoxLayout>
-#include <QHBoxLayout>
-#include <QLabel>
-#include <QLineEdit>
-#include <QPushButton>
-#include <QProgressBar>
-#include <QTextEdit>
-#include <QGroupBox>
-#include <QMessageBox>
-#include <QUrl>
+#include <QClipboard>
 #include <QDesktopServices>
-#include <QFileDialog>
-#include <QStandardPaths>
-#include <QTimer>
-#include <QScreen>
-#include <QStyle>
-#include <QStandardPaths>
 #include <QDir>
-#include <QProcess>
-#include <QRegularExpression>
-#include <QCoreApplication>
-#include <QFile>
+#include <QFileDialog>
 #include <QFileInfo>
-#include <QNetworkAccessManager>
-#include <QNetworkRequest>
-#include <QNetworkReply>
+#include <QMessageBox>
+#include <QProcess>
+#include <QScreen>
+#include <QSettings>
+#include <QStandardPaths>
 #include <QTimer>
-#include <QMouseEvent>
-#include <QEvent>
-#include <QDebug>
+#include <QUrl>
+#include <QVBoxLayout>
 
-
-// Constante para mantener consistencia de ancho del grupo settings
-constexpr int SETTINGS_GROUP_WIDTH = 520;
+namespace {
 
 // Retraso del auto-update (tools y app) despues de construir la ventana: deja que la UI
 // termine de aparecer antes de meter trafico de red y procesos.
 constexpr int AUTO_UPDATE_DELAY_MS = 2000;
 
+// Ancho del diseno aprobado. El alto es mayor que el del artboard (748 sin la barra del
+// sistema): con las tarjetas de cola, a 748 solo entran dos items y medio; a 860 entran cuatro.
+constexpr int DEFAULT_WIDTH = 1200;
+constexpr int DEFAULT_HEIGHT = 860;
+constexpr int MIN_WIDTH = 900;
+constexpr int MIN_HEIGHT = 640;
 
-MainWindow::MainWindow(QWidget *parent)
-    : QMainWindow(parent)
-    , m_centralWidget(nullptr)
-    , m_mainLayout(nullptr)
-    , m_inputGroup(nullptr)
-    , m_inputLayout(nullptr)
-    , m_urlLayout(nullptr)
-    , m_urlInput(nullptr)
-    , m_downloadButton(nullptr)
-    , m_progressGroup(nullptr)
-    , m_progressLayout(nullptr)
-    , m_progressButtonLayout(nullptr)
-    , m_progressBar(nullptr)
-    , m_progressLabel(nullptr)
-    , m_cancelButton(nullptr)
-    , m_logGroup(nullptr)
-    , m_logLayout(nullptr)
-    , m_logOutput(nullptr)
-    , m_logExpanded(false)
-    , m_settingsGroup(nullptr)
-    , m_settingsLayout(nullptr)
-    , m_settingsExpanded(false)
-    , m_credentialsLayout(nullptr)
-    , m_folderLayout(nullptr)
-    , m_toolsLayout(nullptr)
-    , m_cookiesLabel(nullptr)
-    , m_cookiesSourceCombo(nullptr)
-    , m_downloadFolderInput(nullptr)
-    , m_browseFolderButton(nullptr)
-    , m_toolsButton(nullptr)
-    , m_settings(nullptr)
-    , m_toolsManager(nullptr)
-    , m_downloadQueue(nullptr)
-    , m_updateService(nullptr)
-    , m_updateLinkButton(nullptr)
-    , m_maxWindowWidth(550) // Ancho mínimo para evitar problemas cuando settings inicia colapsado
+bool g_automaticUpdates = true;
+
+} // namespace
+
+void MainWindow::setAutomaticUpdatesEnabled(bool enabled)
 {
-    // Inicializar configuración
-    m_settings = new QSettings(getConfigPath(), QSettings::IniFormat, this);
-    
-    setupUI();
-    setupStyles();
-    setupConnections();
-    loadSettings();
-    detectOperatingSystem();
-    
-    // Initialize tools manager
-    m_toolsManager = new ToolsManager(m_logOutput, m_toolsButton, this);
-    connect(m_toolsManager, &ToolsManager::toolsStatusChanged, this, &MainWindow::onToolsStatusChanged);
-    connect(m_toolsManager, &ToolsManager::toolsStatusChanged, this, &MainWindow::onToolsStatusChangedForInitialState);
-    m_toolsManager->checkToolsInstallation();
+    g_automaticUpdates = enabled;
+}
 
-    // Set initial settings state based on credentials (tools status will be handled by signal)
-    setInitialSettingsState();
-    
-    // Initialize download queue
-    m_downloadQueue = new DownloadQueue(m_logOutput, m_progressBar, m_progressGroup, m_toolsManager, this);
-    connect(m_downloadQueue, &DownloadQueue::downloadStarted, this, &MainWindow::onDownloadStarted);
-    connect(m_downloadQueue, &DownloadQueue::downloadCompleted, this, &MainWindow::onDownloadCompleted);
-    connect(m_downloadQueue, &DownloadQueue::queueStatusChanged, this, &MainWindow::onQueueStatusChanged);
-    connect(m_downloadQueue, &DownloadQueue::downloadAddedToQueue, this, &MainWindow::onDownloadAddedToQueue);
+MainWindow::MainWindow(Mode mode, QWidget *parent)
+    : QMainWindow(parent)
+    , m_mode(mode)
+{
+    if (m_mode == Mode::Capture) {
+        // Settings propios y descartables: la captura nunca lee ni escribe los del usuario.
+        m_captureSettingsPath = QDir::temp().filePath(
+            QStringLiteral("lga_videodownloader_uishot_%1.ini").arg(QCoreApplication::applicationPid()));
+        QFile::remove(m_captureSettingsPath);
+        m_settings = new QSettings(m_captureSettingsPath, QSettings::IniFormat, this);
+    } else {
+        m_settings = new QSettings(configPath(), QSettings::IniFormat, this);
+    }
+
+    // La version sale de la macro del CMakeLists, nunca de un literal.
+    setWindowTitle(QStringLiteral("LGA Video Downloader v" VIDEODOWNLOADER_VERSION));
+    setupUi();
+
+    if (m_mode == Mode::Normal) {
+        loadSettings();
+        m_browsers = BrowserDetect::detectInstalled();
+        m_addCard->setBrowsers(m_browsers);
+        m_addCard->setCookiesSource(m_settings->value(QStringLiteral("auth/cookiesBrowser")).toString(),
+                                    m_settings->value(QStringLiteral("auth/cookiesFile")).toString());
+        // Si lo guardado ya no se ofrece (Chrome en Windows, un navegador desinstalado), se
+        // normaliza a None para no pasarle a yt-dlp algo distinto de lo que muestra la UI.
+        if (m_addCard->cookiesSource() != m_settings->value(QStringLiteral("auth/cookiesBrowser")).toString()) {
+            m_settings->setValue(QStringLiteral("auth/cookiesBrowser"), m_addCard->cookiesSource());
+        }
+        bool firefox = false;
+        for (const BrowserDetect::Browser &browser : std::as_const(m_browsers)) {
+            firefox = firefox || (browser.key == QLatin1String("firefox") && browser.supported);
+        }
+        m_queueView->setFirefoxAvailable(firefox);
+        log(QStringLiteral("LGA Video Downloader v" VIDEODOWNLOADER_VERSION " started"));
+        setupServices();
+    }
+
+    const QRect available = QApplication::primaryScreen() ? QApplication::primaryScreen()->availableGeometry()
+                                                          : QRect(0, 0, DEFAULT_WIDTH, DEFAULT_HEIGHT);
+    setMinimumSize(MIN_WIDTH, MIN_HEIGHT);
+    resize(qMin(DEFAULT_WIDTH, available.width() - 40), qMin(DEFAULT_HEIGHT, available.height() - 60));
+    if (m_mode == Mode::Normal) {
+        move(available.center() - rect().center());
+    }
+}
+
+MainWindow::~MainWindow()
+{
+    if (!m_captureSettingsPath.isEmpty()) {
+        delete m_settings;
+        m_settings = nullptr;
+        QFile::remove(m_captureSettingsPath);
+    }
+}
+
+void MainWindow::setupUi()
+{
+    auto *central = new QWidget(this);
+    central->setObjectName(QStringLiteral("centralWidget"));
+    setCentralWidget(central);
+
+    auto *layout = new QVBoxLayout(central);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(0);
+
+    m_tabHeader = new TabHeader(central);
+    layout->addWidget(m_tabHeader);
+
+    auto *content = new QWidget(central);
+    content->setObjectName(QStringLiteral("content"));
+    auto *contentLayout = new QVBoxLayout(content);
+    contentLayout->setContentsMargins(16, 14, 16, 16);
+    contentLayout->setSpacing(12);
+
+    m_addCard = new AddVideosCard(content);
+    m_queueView = new QueueView(content);
+    m_logView = new LogView(content);
+    contentLayout->addWidget(m_addCard);
+    contentLayout->addWidget(m_queueView, 1);
+    contentLayout->addWidget(m_logView);
+    layout->addWidget(content, 1);
+
+    connect(m_tabHeader, &TabHeader::helpClicked, this, &MainWindow::openHelp);
+    connect(m_tabHeader, &TabHeader::updateNoticeClicked, this, &MainWindow::openHelp);
+    connect(m_tabHeader, &TabHeader::toolsNoticeClicked, this, [this]() {
+        if (m_toolsManager && m_toolsManager->status() == ToolsManager::Status::Missing) {
+            m_toolsManager->retryInstall();
+        }
+    });
+
+    connect(m_addCard, &AddVideosCard::downloadRequested, this, &MainWindow::onDownloadRequested);
+    connect(m_addCard, &AddVideosCard::browseRequested, this, &MainWindow::onBrowseRequested);
+    connect(m_addCard, &AddVideosCard::cookiesSourceActivated, this, &MainWindow::onCookiesSourceActivated);
+    connect(m_addCard, &AddVideosCard::formatChanged, this, [this](OutputFormat format) {
+        m_settings->setValue(QStringLiteral("download/format"),
+                             format == OutputFormat::AudioM4a ? QStringLiteral("m4a") : QStringLiteral("mp4"));
+    });
+    connect(m_addCard, &AddVideosCard::qualityChanged, this, [this](VideoQuality quality) {
+        m_settings->setValue(QStringLiteral("download/quality"),
+                             quality == VideoQuality::Best ? QStringLiteral("best") : QStringLiteral("compatible"));
+    });
+}
+
+void MainWindow::setupServices()
+{
+    m_toolsManager = new ToolsManager(this);
+    connect(m_toolsManager, &ToolsManager::logLine, this, [this](const QString &line) {
+        log(line, classifyLogLine(line));
+    });
+    connect(m_toolsManager, &ToolsManager::statusChanged, this, &MainWindow::onToolsStatusChanged);
+
+    m_downloadQueue = new DownloadQueue(m_toolsManager, this);
+    connect(m_downloadQueue, &DownloadQueue::itemAdded, m_queueView, &QueueView::upsertItem);
+    connect(m_downloadQueue, &DownloadQueue::itemUpdated, m_queueView, &QueueView::upsertItem);
+    connect(m_downloadQueue, &DownloadQueue::itemRemoved, m_queueView, &QueueView::removeItem);
+    connect(m_downloadQueue, &DownloadQueue::logLine, this, &MainWindow::log);
     connect(m_downloadQueue, &DownloadQueue::videoPasswordRequired, this, &MainWindow::onVideoPasswordRequired);
+
+    connect(m_queueView, &QueueView::cancelRequested, m_downloadQueue, &DownloadQueue::cancelItem);
+    connect(m_queueView, &QueueView::removeRequested, m_downloadQueue, &DownloadQueue::removeItem);
+    connect(m_queueView, &QueueView::retryRequested, this, &MainWindow::onRetryRequested);
+    connect(m_queueView, &QueueView::retryWithBrowserRequested, this, &MainWindow::onRetryWithBrowser);
+    connect(m_queueView, &QueueView::showRequested, this, &MainWindow::onShowRequested);
+    connect(m_queueView, &QueueView::copyErrorRequested, this, &MainWindow::onCopyErrorRequested);
+    connect(m_queueView, &QueueView::clearFinishedRequested, m_downloadQueue, &DownloadQueue::clearFinished);
+    connect(m_queueView, &QueueView::cancelAllRequested, m_downloadQueue, &DownloadQueue::cancelAll);
+    connect(m_queueView, &QueueView::retryFailedRequested, this, [this]() {
+        m_downloadQueue->retryFailed(currentOptions());
+    });
 
     // El swap de tools espera a que no haya un yt-dlp corriendo.
     m_toolsManager->setProcessActiveProbe([this]() {
         return m_downloadQueue && m_downloadQueue->hasActiveProcess();
     });
+    m_toolsManager->checkToolsInstallation();
 
     // Update de la app: el hook corta la cola y mata yt-dlp con sus hijos antes del instalador.
     m_updateService = new UpdateService(this);
@@ -120,920 +189,379 @@ MainWindow::MainWindow(QWidget *parent)
             m_downloadQueue->stopAllForShutdown();
         }
     });
-    connect(m_updateService, &UpdateService::stateChanged, this, &MainWindow::refreshUpdateLink);
-    connect(m_toolsManager, &ToolsManager::toolVersionsChanged, this, &MainWindow::refreshUpdateLink);
-    refreshUpdateLink();
+    connect(m_updateService, &UpdateService::stateChanged, this, [this](UpdateService::State state) {
+        if (state == UpdateService::State::UpToDate || state == UpdateService::State::UpdateAvailable) {
+            m_lastUpdateCheck = QDateTime::currentDateTime();
+        }
+        if (state == UpdateService::State::UpdateAvailable) {
+            log(QStringLiteral("Update available: v%1").arg(m_updateService->availableVersion()));
+        } else if (state == UpdateService::State::InstallFailed || state == UpdateService::State::CheckFailed) {
+            log(QStringLiteral("Update: %1").arg(m_updateService->errorString()), LogLevel::Warning);
+        }
+        refreshUpdateNotice();
+    });
+    connect(m_updateService, &UpdateService::installProgress, this, [this](qint64 received, qint64 total) {
+        m_installReceived = received;
+        m_installTotal = total;
+        if (m_helpDialog) {
+            m_helpDialog->setUpdateView(currentUpdateView());
+        }
+    });
+    connect(m_toolsManager, &ToolsManager::toolVersionsChanged, this, [this]() {
+        if (m_helpDialog) {
+            m_helpDialog->setToolVersions(m_toolsManager->toolVersions());
+        }
+    });
 
     // yt-dlp y deno se instalan/actualizan solos y en silencio; la app solo chequea.
     QTimer::singleShot(AUTO_UPDATE_DELAY_MS, this, [this]() {
-        m_toolsManager->startAutomaticUpdate();
         m_toolsManager->refreshToolVersions();
+        if (!g_automaticUpdates) {
+            log(QStringLiteral("Automatic updates are off for this run"), LogLevel::Warning);
+            return;
+        }
+        m_toolsManager->startAutomaticUpdate();
         m_updateService->checkForUpdates();
     });
-    
-    // Configurar ventana
-    // La version sale de la macro del CMakeLists, nunca de un literal: hardcodeada
-    // aca quedaba desfasada en cuanto alguien bumpeaba el proyecto.
-    setWindowTitle(QStringLiteral("LGA_VideoDownloader v" VIDEODOWNLOADER_VERSION));
-
-    // Ajustar tamaño inicial y establecer ancho máximo
-    adjustWindowSize();
-    // Después del ajuste inicial, aseguramos que el ancho máximo esté establecido
-    // y que todos los widgets estén completamente inicializados
-    QTimer::singleShot(500, this, [this]() {
-        adjustWindowSize();
-    });
-    
-    // Centrar ventana en pantalla
-    move(QApplication::primaryScreen()->geometry().center() - frameGeometry().center());
+    onToolsStatusChanged();
 }
 
-MainWindow::~MainWindow()
+void MainWindow::log(const QString &text, LogLevel level)
 {
-    // Los widgets se limpian automáticamente por Qt
-}
-
-void MainWindow::setupUI()
-{
-    // Widget central
-    m_centralWidget = new QWidget(this);
-    m_centralWidget->setObjectName("centralWidget");
-    setCentralWidget(m_centralWidget);
-    
-    // Layout principal
-    m_mainLayout = new QVBoxLayout(m_centralWidget);
-    m_mainLayout->setSpacing(16);
-    m_mainLayout->setContentsMargins(16, 20, 12, 20);
-
-    // Establecer restricción fija para evitar redimensionamiento automático
-    // pero permitir ajustes manuales cuando cambie la visibilidad de widgets internos (como el log)
-    m_mainLayout->setSizeConstraint(QLayout::SetFixedSize);
-    
-    // Video URL Group
-    m_inputGroup = new QGroupBox("Video URL", this);
-    // Política de tamaño que permite ajuste mínimo pero mantiene estabilidad
-    m_inputGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
-    m_inputLayout = new QVBoxLayout(m_inputGroup);
-    m_inputLayout->setSpacing(8);
-    
-    // Layout horizontal para URL y botón
-    m_urlLayout = new QHBoxLayout();
-    m_urlInput = new QLineEdit(this);
-    m_urlInput->setPlaceholderText("https://vimeo.com/... or https://youtube.com/...");
-    m_urlInput->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    m_downloadButton = new QPushButton("Download", this);
-    m_downloadButton->setEnabled(true); // Lo vamos a dejar SIEMPRE EN TRUE. NO CAMBIAR!!!!!
-    m_downloadButton->setFixedWidth(110);
-
-    m_urlLayout->addWidget(m_urlInput);
-    m_urlLayout->addWidget(m_downloadButton);
-    
-    m_inputLayout->addLayout(m_urlLayout);
-    
-    // Progress Group
-    m_progressGroup = new QGroupBox("Progress (0/0)", this);
-    // Política de tamaño que permite ajuste mínimo pero mantiene estabilidad
-    m_progressGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
-    m_progressLayout = new QVBoxLayout(m_progressGroup);
-    m_progressLayout->setSpacing(8);
-    
-    // Progress bar and cancel button in same line (like URL layout)
-    m_progressButtonLayout = new QHBoxLayout();
-    m_progressBar = new QProgressBar(this);
-    m_progressBar->setRange(0, 100);
-    m_progressBar->setValue(0);
-    m_progressBar->setTextVisible(false); // Hide percentage text when inactive
-    m_progressBar->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    m_cancelButton = new QPushButton("Cancel", this);
-    m_cancelButton->setObjectName("cancelButton");
-    m_cancelButton->setFixedWidth(110); // Same width as download button
-    // No danger class - same color as other buttons
-
-    m_progressButtonLayout->addWidget(m_progressBar);
-    m_progressButtonLayout->addWidget(m_cancelButton);
-    
-    // Store reference to the group box title for updates
-    m_progressLabel = nullptr; // We'll use the group box title instead
-    
-    m_progressLayout->addLayout(m_progressButtonLayout);
-    
-    // Log Group - restored to original with clickable title (starts collapsed)
-    m_logGroup = new QGroupBox("Log >", this);
-    m_logGroup->setObjectName("logGroupBox");
-    m_logGroup->setProperty("collapsed", true); // Set collapsed property for CSS
-    m_logGroup->setCursor(Qt::PointingHandCursor);
-    m_logGroup->setFixedHeight(35); // Altura aumentada en 10px más
-    m_logLayout = new QVBoxLayout(m_logGroup);
-    m_logLayout->setContentsMargins(0, 0, 0, 0); // Sin márgenes cuando colapsado
-    m_logLayout->setSpacing(0); // No spacing between widgets
-    
-    m_logOutput = new QTextEdit(this);
-    m_logOutput->setReadOnly(true);
-    m_logOutput->setMinimumHeight(200);
-    m_logOutput->setMaximumHeight(250);
-    m_logOutput->setFont(QFont("Courier", 10));
-    m_logOutput->hide(); // Start hidden
-    
-    m_logLayout->addWidget(m_logOutput);
-    
-    // Settings Group - clickable like log group (starts expanded)
-    m_settingsGroup = new QGroupBox("Settings ⌄", this);
-    m_settingsGroup->setObjectName("settingsGroupBox");
-    m_settingsGroup->setProperty("collapsed", false); // Not collapsed initially
-    m_settingsGroup->setCursor(Qt::PointingHandCursor);
-    // Política de tamaño que permite ajuste mínimo pero mantiene estabilidad
-    m_settingsGroup->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Minimum);
-    m_settingsLayout = new QVBoxLayout(m_settingsGroup);
-    m_settingsLayout->setSpacing(8);
-    // Agregar padding interno consistente con otras secciones cuando esté expandido
-    m_settingsLayout->setContentsMargins(10, 10, 10, 4);
-    
-    // Primera fila: Login | origen de cookies.
-    // Reemplaza a usuario/contrasena: la app ya no le pide a nadie las credenciales de su
-    // cuenta, usa la sesion ya iniciada en un navegador. UI minima a proposito: el diseno
-    // definitivo de esta fila se resuelve aparte. El dato de cada item es el nombre que
-    // espera --cookies-from-browser; "file" abre un selector de cookies.txt.
-    m_credentialsLayout = new QHBoxLayout();
-    m_cookiesLabel = new QLabel("Login:", this);
-    m_cookiesSourceCombo = new QComboBox(this);
-    m_cookiesSourceCombo->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    m_cookiesSourceCombo->addItem("None (public videos only)", QString());
-    m_cookiesSourceCombo->addItem("Firefox session (recommended on Windows)", QStringLiteral("firefox"));
-    m_cookiesSourceCombo->addItem("Chrome session", QStringLiteral("chrome"));
-    m_cookiesSourceCombo->addItem("Edge session", QStringLiteral("edge"));
-    m_cookiesSourceCombo->addItem("Brave session", QStringLiteral("brave"));
-    m_cookiesSourceCombo->addItem("Opera session", QStringLiteral("opera"));
-    m_cookiesSourceCombo->addItem("Vivaldi session", QStringLiteral("vivaldi"));
-#ifdef Q_OS_MAC
-    m_cookiesSourceCombo->addItem("Safari session", QStringLiteral("safari"));
-#endif
-    m_cookiesSourceCombo->addItem("cookies.txt file...", QStringLiteral("file"));
-    m_cookiesSourceCombo->setToolTip("Downloads use the account you are already signed in to in this browser.\n"
-                                     "Chromium browsers (Chrome, Edge, Brave) must be fully closed on Windows,\n"
-                                     "and may still fail because they encrypt their cookies.");
-
-    m_credentialsLayout->addWidget(m_cookiesLabel);
-    m_credentialsLayout->addWidget(m_cookiesSourceCombo);
-
-    // Agregar padding interno consistente con otros grupos
-    m_credentialsLayout->setContentsMargins(10, 4, 10, 4);
-    
-    // Second row: Download Folder | Browse
-    m_folderLayout = new QHBoxLayout();
-    m_downloadFolderInput = new QLineEdit(this);
-    m_downloadFolderInput->setPlaceholderText("Download Folder...");
-    m_downloadFolderInput->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-
-    m_browseFolderButton = new QPushButton("Browse", this);
-    m_browseFolderButton->setFixedWidth(110);
-
-    m_folderLayout->addWidget(m_downloadFolderInput);
-    m_folderLayout->addWidget(m_browseFolderButton);
-
-    // Agregar padding interno consistente con otros grupos
-    m_folderLayout->setContentsMargins(10, 4, 10, 4);
-    
-    // Third row: tools button aligned right
-    m_toolsLayout = new QHBoxLayout();
-    m_toolsButton = new QPushButton("Checking Tools...", this);
-    m_toolsButton->setObjectName("toolsButton");
-    m_toolsButton->setEnabled(false);
-    m_toolsButton->setFixedWidth(110);
-
-    // Usar un widget spacer fijo en lugar de addStretch() para evitar recálculos
-    QWidget *spacer = new QWidget(this);
-    spacer->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
-    spacer->setFixedHeight(0);
-
-    // provisional: lo reemplaza el rediseño. Version de la app y estado del update; al
-    // hacer click chequea o instala segun el estado. Las versiones de las tools van en el
-    // tooltip. Es un boton plano y no un link para poder accionarlo por accesibilidad.
-    m_updateLinkButton = new QPushButton(this);
-    m_updateLinkButton->setFlat(true);
-    m_updateLinkButton->setCursor(Qt::PointingHandCursor);
-    connect(m_updateLinkButton, &QPushButton::clicked, this, &MainWindow::onUpdateLinkClicked);
-
-    m_toolsLayout->addWidget(m_updateLinkButton);
-    m_toolsLayout->addWidget(spacer);
-    m_toolsLayout->addWidget(m_toolsButton);
-
-    // Agregar padding interno consistente con otros grupos
-    m_toolsLayout->setContentsMargins(10, 4, 10, 10);
-    
-    m_settingsLayout->addLayout(m_credentialsLayout);
-    m_settingsLayout->addLayout(m_folderLayout);
-    m_settingsLayout->addLayout(m_toolsLayout);
-    
-    // Agregar todos los grupos al layout principal
-    m_mainLayout->addWidget(m_inputGroup);
-    m_mainLayout->addWidget(m_progressGroup);
-    m_mainLayout->addWidget(m_settingsGroup);
-    m_mainLayout->addWidget(m_logGroup);
-    
-    // Agregar un spacer al final para empujar todo hacia arriba cuando el log está colapsado
-    m_mainLayout->addStretch();
-}
-
-void MainWindow::setupStyles()
-{
-    // Forzar actualización de estilos para todos los botones
-    style()->unpolish(m_downloadButton);
-    style()->polish(m_downloadButton);
-
-    style()->unpolish(m_browseFolderButton);
-    style()->polish(m_browseFolderButton);
-
-    style()->unpolish(m_toolsButton);
-    style()->polish(m_toolsButton);
-
-    style()->unpolish(m_cancelButton);
-    style()->polish(m_cancelButton);
-}
-
-void MainWindow::setupConnections()
-{
-    // Connect UI signals
-    connect(m_urlInput, &QLineEdit::textChanged, this, &MainWindow::onUrlChanged);
-    connect(m_urlInput, &QLineEdit::returnPressed, this, &MainWindow::onDownloadClicked);
-    connect(m_downloadButton, &QPushButton::clicked, this, &MainWindow::onDownloadClicked);
-    connect(m_cookiesSourceCombo, QOverload<int>::of(&QComboBox::activated), this, &MainWindow::onCookiesSourceChanged);
-    connect(m_browseFolderButton, &QPushButton::clicked, this, &MainWindow::onBrowseFolderClicked);
-    connect(m_cancelButton, &QPushButton::clicked, this, &MainWindow::onCancelClicked);
-
-    // Install event filter for log group box to capture clicks
-    m_logGroup->installEventFilter(this);
-
-    // Install event filter for settings group box to capture clicks
-    m_settingsGroup->installEventFilter(this);
-}
-
-void MainWindow::onDownloadClicked()
-{
-    QString url = m_urlInput->text().trimmed();
-    QString downloadDir = m_settings->value("download/folder", "").toString();
-    
-    // 1. Validate URL is not empty
-    if (url.isEmpty()) {
-        QMessageBox::warning(this, "Error", "Please enter a valid URL.");
-        return;
-    }
-    
-    // 2. Validate video URL (Vimeo or YouTube)
-    if (!isValidVideoUrl(url)) {
-        QMessageBox::warning(this, "Error", "Please enter a valid Vimeo or YouTube URL.");
-        return;
-    }
-    
-    // 3. Origen de cookies. No se bloquea si falta: hay videos publicos, y si el sitio
-    //    exige sesion, el log explica que elegir (ver DownloadQueue::logFailureHint).
-    QString cookiesBrowser = m_settings->value("auth/cookiesBrowser", QString()).toString();
-    QString cookiesFile = m_settings->value("auth/cookiesFile", "").toString();
-    if (cookiesBrowser == QLatin1String("file")) {
-        if (cookiesFile.isEmpty() || !QFileInfo::exists(cookiesFile)) {
-            QMessageBox::warning(this, "Error", "The selected cookies.txt file does not exist. Please choose it again in Settings.");
-            return;
-        }
-        cookiesBrowser.clear();
-    } else {
-        cookiesFile.clear();
-    }
-
-    // 4. Validate download folder exists
-    if (downloadDir.isEmpty()) {
-        QMessageBox::warning(this, "Error", "Please set a download folder first.");
-        return;
-    }
-    
-    if (!isValidDownloadPath(downloadDir)) {
-        QMessageBox::warning(this, "Error", "Download folder does not exist or is not accessible. Please select a valid folder.");
-        return;
-    }
-    
-    // 5. Check that both tools are installed
-    if (!m_toolsManager->areToolsInstalled()) {
-        QMessageBox::warning(this, "Error", "Required tools (yt-dlp and ffmpeg) are not installed. Please install them first using the Tools button.");
-        return;
-    }
-    
-    // Add to download queue
-    m_downloadQueue->addDownload(url, cookiesBrowser, cookiesFile, downloadDir);
-    
-    // Clear URL input for next download
-    m_urlInput->clear();
-}
-
-void MainWindow::onUrlChanged()
-{
-    // Note: This function used to enable/disable the download button based on validation
-    // Now the download button is always enabled and validation happens in onDownloadClicked()
-    // This function is kept for potential future UI updates but currently does nothing
-}
-
-void MainWindow::onToolsStatusChanged(bool allInstalled)
-{
-    // Tools status changed - update UI
-    onUrlChanged();
-}
-
-void MainWindow::onDownloadStarted()
-{
-    // Note: Download button remains enabled - user can queue multiple downloads
-    // m_downloadButton->setEnabled(false); // REMOVED - button always enabled
-}
-
-void MainWindow::onDownloadCompleted()
-{
-    // Download completed - update UI state
-    onUrlChanged();
-}
-
-void MainWindow::onQueueStatusChanged(int current, int total)
-{
-    // Update progress group title
-    m_progressGroup->setTitle(QString("Progress (%1/%2)").arg(current).arg(total));
-}
-
-void MainWindow::onDownloadAddedToQueue(int totalCount)
-{
-    // When a download is added, only update the total count, keep current number unchanged
-    QString currentTitle = m_progressGroup->title();
-    QRegularExpression regex("Progress \\((\\d+)/(\\d+)\\)");
-    QRegularExpressionMatch match = regex.match(currentTitle);
-
-    int currentNumber = 0;
-    if (match.hasMatch()) {
-        currentNumber = match.captured(1).toInt();
-    }
-
-    // Update only the total count, keep current number
-    m_progressGroup->setTitle(QString("Progress (%1/%2)").arg(currentNumber).arg(totalCount));
-}
-
-void MainWindow::onVideoPasswordRequired(const DownloadItem &item)
-{
-    // Show video password dialog
-    VideoPasswordDialog dialog(item.url, this);
-    int result = dialog.exec();
-
-    if (result == QDialog::Accepted) {
-        QString videoPassword = dialog.getVideoPassword();
-        if (!videoPassword.isEmpty()) {
-            // Retry download with video password
-            m_downloadQueue->retryDownloadWithVideoPassword(videoPassword);
-            return;
-        }
-    }
-
-    // If dialog was cancelled or password was empty, mark download as failed
-    // We need to manually handle the failure since we intercepted the normal flow
-    m_logOutput->append("ERROR: Video password not provided or download cancelled");
-
-    // Manually trigger the next download processing
-    QTimer::singleShot(1000, [this]() {
-        if (m_downloadQueue) {
-            // Reset current download state and continue
-            QMetaObject::invokeMethod(m_downloadQueue, "processNextDownload", Qt::QueuedConnection);
-        }
-    });
-}
-
-void MainWindow::onCancelClicked()
-{
-    if (m_downloadQueue) {
-        // Reset entire queue and all counters
-        m_downloadQueue->resetQueue();
-        
-        // Update UI state
-        onUrlChanged();
-    }
-}
-
-void MainWindow::onCookiesSourceChanged(int index)
-{
-    QString source = m_cookiesSourceCombo->itemData(index).toString();
-
-    if (source == QLatin1String("file")) {
-        QString startDir = QFileInfo(m_settings->value("auth/cookiesFile", "").toString()).absolutePath();
-        QString file = QFileDialog::getOpenFileName(this, "Select cookies.txt (Netscape format)", startDir,
-                                                    "Cookies files (*.txt);;All files (*)");
-        if (file.isEmpty()) {
-            // Cancelado: volver a mostrar lo que estaba guardado
-            loadSettings();
-            return;
-        }
-        m_settings->setValue("auth/cookiesFile", file);
-        m_cookiesSourceCombo->setToolTip(file);
-        m_logOutput->append(QString("Login saved: cookies file %1").arg(file));
-    } else if (source.isEmpty()) {
-        m_logOutput->append("Login saved: none (public videos only)");
-    } else {
-        m_logOutput->append(QString("Login saved: cookies from %1").arg(source));
-#ifdef Q_OS_WIN
-        if (source != QLatin1String("firefox")) {
-            m_logOutput->append("Note: on Windows this browser must be fully closed while downloading, "
-                                "and its encrypted cookies may not be readable. Firefox is the reliable option.");
-        }
-#endif
-    }
-
-    m_settings->setValue("auth/cookiesBrowser", source);
-    m_settings->sync();
-    onUrlChanged();
-}
-
-
-void MainWindow::onBrowseFolderClicked()
-{
-    QString currentFolder = m_settings->value("download/folder", QStandardPaths::writableLocation(QStandardPaths::DesktopLocation)).toString();
-    
-    QString folder = QFileDialog::getExistingDirectory(this, "Select Download Folder", currentFolder);
-    
-    if (!folder.isEmpty()) {
-        m_downloadFolderInput->setText(folder);
-        
-        // Auto-save the selected folder
-        m_settings->setValue("download/folder", folder);
-        m_settings->sync();
-        
-        m_logOutput->append(QString("Download folder saved: %1").arg(folder));
-        onUrlChanged();
-    }
+    m_logView->append(text, level);
 }
 
 void MainWindow::loadSettings()
 {
-    // Sin eleccion explicita no se usan cookies, en las dos plataformas: un navegador por
-    // defecto fallaba en Windows (Chromium no es legible) y en macOS se aplicaba tambien a Vimeo.
-    QString cookiesSource = m_settings->value("auth/cookiesBrowser", QString()).toString();
-    QString downloadFolder = m_settings->value("download/folder", "").toString();
-
-    int cookiesIndex = m_cookiesSourceCombo->findData(cookiesSource);
-    if (cookiesIndex < 0) {
-        // Valor guardado que este combo no ofrece (config vieja, "safari" traido de macOS,
-        // edicion a mano): se normaliza a "None" en el config para no pasarle a yt-dlp algo
-        // distinto de lo que la UI muestra.
-        qWarning() << "Origen de cookies guardado no valido, se normaliza a ninguno:" << cookiesSource;
-        m_settings->setValue("auth/cookiesBrowser", QString());
-        m_settings->sync();
-        cookiesSource.clear();
-        cookiesIndex = 0;
+    QString folder = m_settings->value(QStringLiteral("download/folder")).toString();
+    if (folder.isEmpty() || !isValidDownloadPath(folder)) {
+        // Sin carpeta valida se propone Descargas: el usuario no tiene que configurar nada
+        // antes de su primer link.
+        folder = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+        if (folder.isEmpty()) {
+            folder = QDir::homePath();
+        }
+        m_settings->setValue(QStringLiteral("download/folder"), folder);
     }
-    m_cookiesSourceCombo->setCurrentIndex(cookiesIndex);
-    if (cookiesSource == QLatin1String("file")) {
-        m_cookiesSourceCombo->setToolTip(m_settings->value("auth/cookiesFile", "").toString());
-    }
-
-    // Only set text if values exist, otherwise keep placeholders
-    if (!downloadFolder.isEmpty()) {
-        m_downloadFolderInput->setText(downloadFolder);
-    }
+    m_addCard->setDownloadFolder(folder);
+    m_addCard->setFormat(m_settings->value(QStringLiteral("download/format")).toString() == QLatin1String("m4a")
+                             ? OutputFormat::AudioM4a : OutputFormat::VideoMp4);
+    m_addCard->setQuality(m_settings->value(QStringLiteral("download/quality")).toString() == QLatin1String("best")
+                              ? VideoQuality::Best : VideoQuality::Compatible);
 }
 
-bool MainWindow::shouldShowSettingsExpanded()
+DownloadOptions MainWindow::currentOptions() const
 {
-    // Settings debe abrir expandido si:
-    
-    // 1. La carpeta de destino está vacía o no es válida
-    QString downloadDir = m_settings->value("download/folder", "").toString();
-    bool downloadDirInvalid = downloadDir.isEmpty() || !isValidDownloadPath(downloadDir);
-
-    // 2. O si las herramientas no están instaladas
-    bool toolsNotInstalled = m_toolsManager && !m_toolsManager->areToolsInstalled();
-
-    // Note: No longer checking for Vimeo credentials here since they're only needed for Vimeo URLs
-    return downloadDirInvalid || toolsNotInstalled;
-}
-
-void MainWindow::setInitialSettingsState()
-{
-    // Determinar estado inicial basado en la carpeta de destino (las herramientas llegan por signal).
-    // El login ya no fuerza la expansion: es opcional y hay videos publicos.
-    QString downloadDir = m_settings->value("download/folder", "").toString();
-
-    bool downloadDirEmpty = downloadDir.isEmpty();
-
-    // Settings inicia expandido si no hay carpeta de destino
-    m_settingsExpanded = downloadDirEmpty;
-
-    // Configurar estado visual inicial
-    if (m_settingsExpanded) {
-        m_settingsGroup->setTitle("Settings ⌄");
-        m_settingsGroup->setProperty("collapsed", false);
-        m_settingsGroup->setFixedHeight(QWIDGETSIZE_MAX);
-        m_settingsGroup->setMinimumHeight(0);
-        m_settingsGroup->setMaximumHeight(QWIDGETSIZE_MAX);
-        // Mantener ancho consistente cuando está expandido
-        m_settingsGroup->setMinimumWidth(SETTINGS_GROUP_WIDTH);
-        m_settingsGroup->setMaximumWidth(SETTINGS_GROUP_WIDTH);
-        m_settingsLayout->setContentsMargins(3, 2, 3, 3);
-        m_settingsLayout->setSpacing(8);
-        // Show all settings widgets
-        m_cookiesLabel->show();
-        m_cookiesSourceCombo->show();
-        m_downloadFolderInput->show();
-        m_browseFolderButton->show();
-        m_toolsButton->show();
-        m_updateLinkButton->show(); // provisional: lo reemplaza el rediseño
+    DownloadOptions options;
+    options.downloadDir = m_settings->value(QStringLiteral("download/folder")).toString();
+    options.format = m_addCard->format();
+    options.quality = m_addCard->quality();
+    const QString source = m_addCard->cookiesSource();
+    if (source == QLatin1String("file")) {
+        options.cookiesFile = m_settings->value(QStringLiteral("auth/cookiesFile")).toString();
     } else {
-        m_settingsGroup->setTitle("Settings >");
-        m_settingsGroup->setProperty("collapsed", true);
-        m_settingsGroup->setFixedHeight(35);
-        // Establecer ancho mínimo fijo para evitar que otros grupos se contraigan
-        // Basado en el tamaño típico cuando está expandido con todos los controles
-        m_settingsGroup->setMinimumWidth(SETTINGS_GROUP_WIDTH); // Ancho conservador para settings expandido
-        m_settingsGroup->setMaximumWidth(SETTINGS_GROUP_WIDTH);
-        m_settingsLayout->setContentsMargins(0, 0, 0, 0);
-        m_settingsLayout->setSpacing(0);
-        // Hide all settings widgets initially
-        m_cookiesLabel->hide();
-        m_cookiesSourceCombo->hide();
-        m_downloadFolderInput->hide();
-        m_browseFolderButton->hide();
-        m_toolsButton->hide();
-        m_updateLinkButton->hide(); // provisional: lo reemplaza el rediseño
+        options.cookiesBrowser = source;
     }
-
-    // Force style refresh to apply new property
-    m_settingsGroup->style()->unpolish(m_settingsGroup);
-    m_settingsGroup->style()->polish(m_settingsGroup);
+    return options;
 }
 
-void MainWindow::onToolsStatusChangedForInitialState(bool allInstalled)
+void MainWindow::onDownloadRequested()
 {
-    // Si las herramientas no están instaladas, asegurar que settings esté expandido
-    if (!allInstalled && !m_settingsExpanded) {
-        m_settingsExpanded = true;
-
-        m_settingsGroup->setTitle("Settings ⌄");
-        m_settingsGroup->setProperty("collapsed", false);
-        m_settingsGroup->setFixedHeight(QWIDGETSIZE_MAX);
-        m_settingsGroup->setMinimumHeight(0);
-        m_settingsGroup->setMaximumHeight(QWIDGETSIZE_MAX);
-        // Mantener ancho consistente cuando está expandido
-        m_settingsGroup->setMinimumWidth(SETTINGS_GROUP_WIDTH);
-        m_settingsGroup->setMaximumWidth(SETTINGS_GROUP_WIDTH);
-        m_settingsLayout->setContentsMargins(3, 2, 3, 3);
-        m_settingsLayout->setSpacing(8);
-
-        // Show all settings widgets
-        m_cookiesLabel->show();
-        m_cookiesSourceCombo->show();
-        m_downloadFolderInput->show();
-        m_browseFolderButton->show();
-        m_toolsButton->show();
-        m_updateLinkButton->show(); // provisional: lo reemplaza el rediseño
-
-        // Force style refresh to apply new property
-        m_settingsGroup->style()->unpolish(m_settingsGroup);
-        m_settingsGroup->style()->polish(m_settingsGroup);
-
-        // Adjust window size after expanding settings
-        QTimer::singleShot(100, this, &MainWindow::adjustWindowSize);
-    }
-}
-
-bool MainWindow::isValidVideoUrl(const QString &url) const
-{
-    if (url.isEmpty()) {
-        return false;
-    }
-    
-    // Check for Vimeo URLs
-    if (url.contains("vimeo.com", Qt::CaseInsensitive)) {
-        return true;
-    }
-    
-    // Check for YouTube URLs
-    if (url.contains("youtube.com", Qt::CaseInsensitive) || 
-        url.contains("youtu.be", Qt::CaseInsensitive)) {
-        return true;
-    }
-    
-    return false;
-}
-
-bool MainWindow::isVimeoUrl(const QString &url) const
-{
-    if (url.isEmpty()) {
-        return false;
-    }
-    
-    return url.contains("vimeo.com", Qt::CaseInsensitive);
-}
-
-bool MainWindow::isValidDownloadPath(const QString &path) const
-{
-    if (path.isEmpty()) {
-        return false;
-    }
-    
-    QDir dir(path);
-    return dir.exists() && dir.isReadable();
-}
-
-QString MainWindow::getConfigPath() const
-{
-    // Crear la carpeta de configuración siguiendo el patrón de PipeSync
-    QString appDataPath;
-    
-#ifdef Q_OS_WIN
-    // Windows: %APPDATA%\LGA\VideoDownloader\config.ini
-    appDataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    appDataPath = appDataPath.replace("/VideoDownloader", "").replace("\\VideoDownloader", "");
-    appDataPath += "/VideoDownloader";
-#elif defined(Q_OS_MAC)
-    // macOS: ~/Library/Application Support/LGA/VideoDownloader/config.ini
-    appDataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
-    appDataPath = appDataPath.replace("/VideoDownloader", "");
-    appDataPath += "/VideoDownloader";
-#else
-    // Linux: ~/.config/LGA/VideoDownloader/config.ini
-    appDataPath = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
-    appDataPath += "/LGA/VideoDownloader";
-#endif
-    
-    QDir dir(appDataPath);
-    if (!dir.exists()) {
-        dir.mkpath(".");
-    }
-    
-    return appDataPath + "/config.ini";
-}
-
-void MainWindow::detectOperatingSystem()
-{
-#ifdef Q_OS_MAC
-    m_logOutput->append("=== System Information ===");
-    m_logOutput->append("Operating System: macOS");
-    m_logOutput->append("Tools installation method: Download from GitHub");
-    m_logOutput->append("Tools location: user data folder (updated automatically)");
-    m_logOutput->append("Supported platforms: Vimeo, YouTube");
-    m_logOutput->append("===========================");
-#elif defined(Q_OS_WIN)
-    m_logOutput->append("=== System Information ===");
-    m_logOutput->append("Operating System: Windows");
-    m_logOutput->append("Tools installation method: Download from GitHub");
-    m_logOutput->append("Tools location: user data folder (updated automatically)");
-    m_logOutput->append("Supported platforms: Vimeo, YouTube");
-    m_logOutput->append("===========================");
-#else
-    m_logOutput->append("=== System Information ===");
-    m_logOutput->append("Operating System: Linux/Other");
-    m_logOutput->append("Tools installation: Manual installation required");
-    m_logOutput->append("Supported platforms: Vimeo, YouTube");
-    m_logOutput->append("===========================");
-#endif
-}
-
-// provisional: lo reemplaza el rediseño
-void MainWindow::refreshUpdateLink()
-{
-    if (!m_updateLinkButton || !m_updateService) {
+    if (!m_downloadQueue) {
         return;
     }
-    const QString version = m_updateService->currentVersion();
+    const QStringList links = m_addCard->links();
+    if (links.isEmpty()) {
+        log(QStringLiteral("Paste at least one Vimeo or YouTube link, then press Download"), LogLevel::Warning);
+        return;
+    }
+
+    DownloadOptions options = currentOptions();
+    if (!isValidDownloadPath(options.downloadDir)) {
+        QMessageBox::warning(this, QStringLiteral("Download folder"),
+                             QStringLiteral("The download folder does not exist. Choose another one with Browse."));
+        return;
+    }
+    if (m_addCard->cookiesSource() == QLatin1String("file")
+        && (options.cookiesFile.isEmpty() || !QFileInfo::exists(options.cookiesFile))) {
+        QMessageBox::warning(this, QStringLiteral("cookies.txt"),
+                             QStringLiteral("The selected cookies.txt file no longer exists. Choose it again in Use cookies from."));
+        return;
+    }
+
+    int added = 0;
+    for (const QString &link : links) {
+        if (isValidVideoUrl(link)) {
+            m_downloadQueue->addDownload(link, options);
+            ++added;
+        } else {
+            m_downloadQueue->addInvalidLink(link);
+        }
+    }
+    if (added > 0) {
+        log(added == 1 ? QStringLiteral("Added 1 link to the queue") : QStringLiteral("Added %1 links to the queue").arg(added));
+    }
+    m_addCard->clearLinks();
+}
+
+void MainWindow::onBrowseRequested()
+{
+    const QString current = m_settings->value(QStringLiteral("download/folder")).toString();
+    const QString folder = QFileDialog::getExistingDirectory(this, QStringLiteral("Select download folder"), current);
+    if (folder.isEmpty()) {
+        return;
+    }
+    m_settings->setValue(QStringLiteral("download/folder"), folder);
+    m_addCard->setDownloadFolder(folder);
+    log(QStringLiteral("Save to: %1").arg(QDir::toNativeSeparators(folder)));
+}
+
+void MainWindow::onCookiesSourceActivated(const QString &key)
+{
+    QString cookiesFile = m_settings->value(QStringLiteral("auth/cookiesFile")).toString();
+    if (key == QLatin1String("file")) {
+        const QString file = QFileDialog::getOpenFileName(this, QStringLiteral("Select cookies.txt (Netscape format)"),
+                                                          QFileInfo(cookiesFile).absolutePath(),
+                                                          QStringLiteral("Cookies files (*.txt);;All files (*)"));
+        if (file.isEmpty()) {
+            // Cancelado: vuelve a lo que estaba guardado.
+            m_addCard->setCookiesSource(m_settings->value(QStringLiteral("auth/cookiesBrowser")).toString(), cookiesFile);
+            return;
+        }
+        cookiesFile = file;
+        m_settings->setValue(QStringLiteral("auth/cookiesFile"), file);
+        log(QStringLiteral("Cookies: using the file %1").arg(QDir::toNativeSeparators(file)));
+    } else if (key.isEmpty()) {
+        log(QStringLiteral("Cookies: none (public videos only)"));
+    } else {
+        log(QStringLiteral("Cookies: using the %1 session").arg(BrowserDetect::displayName(key)));
+    }
+    m_settings->setValue(QStringLiteral("auth/cookiesBrowser"), key);
+    m_settings->sync();
+    m_addCard->setCookiesSource(key, cookiesFile);
+}
+
+void MainWindow::onToolsStatusChanged()
+{
+    if (!m_toolsManager) {
+        return;
+    }
+    switch (m_toolsManager->status()) {
+    case ToolsManager::Status::Checking:
+    case ToolsManager::Status::Ready:
+        m_tabHeader->setToolsNotice(QString(), QString(), QString());
+        break;
+    case ToolsManager::Status::Installing:
+        m_tabHeader->setToolsNotice(QStringLiteral("Installing download tools…"), QStringLiteral("neutral"),
+                                    QStringLiteral("yt-dlp and Deno install by themselves. Links you add start when they are ready."));
+        break;
+    case ToolsManager::Status::Updating:
+        m_tabHeader->setToolsNotice(QStringLiteral("Updating download tools…"), QStringLiteral("neutral"),
+                                    QStringLiteral("Checking for new versions of yt-dlp and Deno. Downloads keep working."));
+        break;
+    case ToolsManager::Status::Missing:
+        m_tabHeader->setToolsNotice(QStringLiteral("Download tools missing · Retry"), QStringLiteral("err"),
+                                    QStringLiteral("The automatic install failed. Check your connection and click to retry."));
+        break;
+    }
+    const bool ready = m_toolsManager->areToolsInstalled();
+    m_queueView->setWaitingForTools(!ready);
+    if (ready && m_downloadQueue) {
+        m_downloadQueue->kick();
+    }
+}
+
+void MainWindow::onVideoPasswordRequired(const DownloadItem &item)
+{
+    VideoPasswordDialog dialog(item.url, this);
+    if (dialog.exec() == QDialog::Accepted && !dialog.getVideoPassword().isEmpty()) {
+        m_downloadQueue->retryDownloadWithVideoPassword(dialog.getVideoPassword());
+        return;
+    }
+    m_downloadQueue->abandonPasswordRequest();
+}
+
+void MainWindow::onShowRequested(int id)
+{
+    const DownloadItem *item = m_downloadQueue ? m_downloadQueue->item(id) : nullptr;
+    if (!item) {
+        return;
+    }
+    const QString file = item->filePath;
+    if (!file.isEmpty() && QFileInfo::exists(file)) {
+#ifdef Q_OS_WIN
+        QProcess::startDetached(QStringLiteral("explorer.exe"),
+                                {QStringLiteral("/select,"), QDir::toNativeSeparators(file)});
+        return;
+#elif defined(Q_OS_MAC)
+        QProcess::startDetached(QStringLiteral("open"), {QStringLiteral("-R"), file});
+        return;
+#endif
+    }
+    QDesktopServices::openUrl(QUrl::fromLocalFile(item->options.downloadDir));
+}
+
+void MainWindow::onCopyErrorRequested(int id)
+{
+    const DownloadItem *item = m_downloadQueue ? m_downloadQueue->item(id) : nullptr;
+    if (!item) {
+        return;
+    }
+    QApplication::clipboard()->setText(QStringLiteral("%1\n%2\n\n%3").arg(item->url, item->errorHeadline,
+                                                                          item->errorMessage.trimmed()));
+}
+
+void MainWindow::onRetryRequested(int id)
+{
+    const DownloadItem *item = m_downloadQueue ? m_downloadQueue->item(id) : nullptr;
+    if (!item) {
+        return;
+    }
+    // Formato, calidad y carpeta del item; la sesion, la elegida ahora (el arreglo tipico
+    // de un error de sesion es cambiar Use cookies from y reintentar).
+    DownloadOptions options = item->options;
+    const DownloadOptions now = currentOptions();
+    options.cookiesBrowser = now.cookiesBrowser;
+    options.cookiesFile = now.cookiesFile;
+    m_downloadQueue->retryItem(id, options);
+}
+
+void MainWindow::onRetryWithBrowser(int id, const QString &browserKey)
+{
+    onCookiesSourceActivated(browserKey);
+    onRetryRequested(id);
+}
+
+UpdateView MainWindow::currentUpdateView() const
+{
+    UpdateView view;
+    view.currentVersion = QStringLiteral(VIDEODOWNLOADER_VERSION);
+    view.installsInPlace = UpdateService::installsInPlace();
+    if (m_updateService) {
+        view.state = m_updateService->state();
+        view.availableVersion = m_updateService->availableVersion();
+        view.error = m_updateService->errorString();
+        view.blockedReason = m_updateService->installBlockedReason();
+    }
+    view.received = m_installReceived;
+    view.total = m_installTotal;
+    view.lastChecked = m_lastUpdateCheck;
+    return view;
+}
+
+void MainWindow::refreshUpdateNotice()
+{
+    if (!m_updateService) {
+        return;
+    }
     QString text;
     switch (m_updateService->state()) {
-    case UpdateService::State::Checking:
-        text = QString("v%1 · Checking for updates...").arg(version);
-        break;
     case UpdateService::State::UpdateAvailable:
-        text = QString("v%1 · Update to %2").arg(version, m_updateService->availableVersion());
+        text = QStringLiteral("Update available · v%1").arg(m_updateService->availableVersion());
         break;
     case UpdateService::State::Downloading:
-        text = QString("v%1 · Downloading update...").arg(version);
+        text = QStringLiteral("Downloading update…");
         break;
     case UpdateService::State::Installing:
-        text = QString("v%1 · Installing update...").arg(version);
+        text = QStringLiteral("Installing update…");
         break;
     case UpdateService::State::InstallFailed:
-        text = QString("v%1 · Update failed, check again").arg(version);
+        text = QStringLiteral("Update failed");
         break;
-    case UpdateService::State::CheckFailed:
-        text = QString("v%1 · Update check failed, retry").arg(version);
-        break;
-    case UpdateService::State::UpToDate:
-        text = QString("v%1 · Up to date").arg(version);
-        break;
-    case UpdateService::State::Idle:
-        text = QString("v%1 · Check for updates").arg(version);
+    default:
         break;
     }
-    m_updateLinkButton->setText(text);
-
-    const QMap<QString, QString> tools = m_toolsManager ? m_toolsManager->toolVersions() : QMap<QString, QString>();
-    auto toolText = [&tools](const QString &key) {
-        const QString value = tools.value(key);
-        return value.isEmpty() ? QString("not found") : value;
-    };
-    QString tip = QString("LGA Video Downloader %1\nyt-dlp %2\ndeno %3\nffmpeg %4\nDownloads powered by yt-dlp (github.com/yt-dlp/yt-dlp)")
-                      .arg(version, toolText("yt-dlp"), toolText("deno"), toolText("ffmpeg"));
-    if (!m_updateService->errorString().isEmpty()) {
-        tip += "\n\n" + m_updateService->errorString();
+    m_tabHeader->setUpdateNotice(text);
+    if (m_helpDialog) {
+        m_helpDialog->setUpdateView(currentUpdateView());
     }
-    const QString blocked = m_updateService->installBlockedReason();
-    if (!blocked.isEmpty()) {
-        tip += "\n" + blocked;
-    }
-    m_updateLinkButton->setToolTip(tip);
 }
 
-// provisional: lo reemplaza el rediseño
-void MainWindow::onUpdateLinkClicked()
+void MainWindow::openHelp()
 {
-    const UpdateService::State state = m_updateService->state();
-    if (state == UpdateService::State::Checking || state == UpdateService::State::Downloading
-        || state == UpdateService::State::Installing) {
+    if (m_helpDialog) {
         return;
     }
-    if (state != UpdateService::State::UpdateAvailable) {
-        m_updateService->checkForUpdates();
+    HelpDialog dialog(this);
+    m_helpDialog = &dialog;
+    if (m_toolsManager) {
+        dialog.setToolVersions(m_toolsManager->toolVersions());
+        m_toolsManager->refreshToolVersions();
+    }
+    dialog.setUpdateView(currentUpdateView());
+    connect(&dialog, &HelpDialog::checkRequested, this, [this]() {
+        if (m_updateService) {
+            m_updateService->checkForUpdates();
+        }
+    });
+    connect(&dialog, &HelpDialog::installRequested, this, &MainWindow::requestAppInstall);
+    connect(&dialog, &HelpDialog::cancelInstallRequested, this, [this]() {
+        if (m_updateService) {
+            m_updateService->cancelInstall();
+        }
+    });
+    dialog.execOver(this);
+    m_helpDialog = nullptr;
+}
+
+void MainWindow::requestAppInstall()
+{
+    if (!m_updateService) {
         return;
     }
     const int active = m_downloadQueue ? m_downloadQueue->activeDownloadCount() : 0;
+    QWidget *parent = m_helpDialog ? static_cast<QWidget *>(m_helpDialog.data()) : this;
     if (active > 0 && UpdateService::installsInPlace()) {
-        const auto answer = QMessageBox::question(this, "Update",
-            QString("Updating will stop %1 active download(s). Continue?").arg(active),
+        const auto answer = QMessageBox::question(parent, QStringLiteral("Update"),
+            QStringLiteral("Updating will stop %1 active download(s). Continue?").arg(active),
             QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
         if (answer != QMessageBox::Yes) {
             return;
         }
     }
+    m_installReceived = -1;
+    m_installTotal = -1;
     m_updateService->installAppUpdate();
-    if (m_updateService->state() == UpdateService::State::InstallFailed) {
-        QMessageBox::warning(this, "Update", m_updateService->errorString());
-    }
 }
 
-bool MainWindow::eventFilter(QObject *obj, QEvent *event)
+bool MainWindow::isValidVideoUrl(const QString &url)
 {
-    if (obj == m_logGroup && event->type() == QEvent::MouseButtonPress) {
-        QMouseEvent *mouseEvent = static_cast<QMouseEvent*>(event);
-        if (mouseEvent->button() == Qt::LeftButton) {
-            onLogToggleClicked();
-            return true;
-        }
+    if (url.isEmpty() || url.contains(QLatin1Char(' '))) {
+        return false;
     }
-
-    if (obj == m_settingsGroup && event->type() == QEvent::MouseButtonPress) {
-        QMouseEvent *mouseEvent = static_cast<QMouseEvent*>(event);
-        if (mouseEvent->button() == Qt::LeftButton) {
-            onSettingsToggleClicked();
-            return true;
-        }
-    }
-
-    return QMainWindow::eventFilter(obj, event);
+    return url.contains(QLatin1String("vimeo.com"), Qt::CaseInsensitive)
+        || url.contains(QLatin1String("youtube.com"), Qt::CaseInsensitive)
+        || url.contains(QLatin1String("youtu.be"), Qt::CaseInsensitive);
 }
 
-void MainWindow::onLogToggleClicked()
+bool MainWindow::isValidDownloadPath(const QString &path)
 {
-    m_logExpanded = !m_logExpanded;
-
-    if (m_logExpanded) {
-        m_logGroup->setTitle("Log ⌄");
-        m_logGroup->setProperty("collapsed", false); // Not collapsed
-        m_logGroup->setFixedHeight(QWIDGETSIZE_MAX); // Permitir que se expanda
-        m_logGroup->setMinimumHeight(0); // Sin altura mínima
-        m_logGroup->setMaximumHeight(QWIDGETSIZE_MAX); // Sin límite máximo
-        m_logLayout->setContentsMargins(3, 2, 3, 3); // Márgenes consistentes con CSS
-        m_logLayout->setSpacing(2); // Espaciado pequeño entre widgets
-        m_logOutput->show();
-    } else {
-        m_logGroup->setTitle("Log >");
-        m_logGroup->setProperty("collapsed", true); // Collapsed
-        m_logGroup->setFixedHeight(35); // Altura aumentada en 10px más
-        m_logLayout->setContentsMargins(0, 0, 0, 0); // Sin márgenes cuando colapsado
-        m_logLayout->setSpacing(0); // No spacing between widgets
-        m_logOutput->hide();
+    if (path.isEmpty()) {
+        return false;
     }
-
-    // Force style refresh to apply new property
-    m_logGroup->style()->unpolish(m_logGroup);
-    m_logGroup->style()->polish(m_logGroup);
-
-    // Adjust window size after toggling with a small delay to ensure proper layout calculation
-    QTimer::singleShot(100, this, &MainWindow::adjustWindowSize);
+    const QDir dir(path);
+    return dir.exists() && dir.isReadable();
 }
 
-void MainWindow::onSettingsToggleClicked()
+QString MainWindow::configPath()
 {
-    m_settingsExpanded = !m_settingsExpanded;
-
-    if (m_settingsExpanded) {
-        m_settingsGroup->setTitle("Settings ⌄");
-        m_settingsGroup->setProperty("collapsed", false); // Not collapsed
-        m_settingsGroup->setFixedHeight(QWIDGETSIZE_MAX); // Permitir que se expanda
-        m_settingsGroup->setMinimumHeight(0); // Sin altura mínima
-        m_settingsGroup->setMaximumHeight(QWIDGETSIZE_MAX); // Sin límite máximo
-        // Mantener ancho consistente cuando está expandido también
-        m_settingsGroup->setMinimumWidth(SETTINGS_GROUP_WIDTH);
-        m_settingsGroup->setMaximumWidth(SETTINGS_GROUP_WIDTH);
-        m_settingsLayout->setContentsMargins(3, 2, 3, 3); // Márgenes consistentes con CSS
-        m_settingsLayout->setSpacing(8); // Espaciado normal
-        // Show all settings widgets
-        m_cookiesLabel->show();
-        m_cookiesSourceCombo->show();
-        m_downloadFolderInput->show();
-        m_browseFolderButton->show();
-        m_toolsButton->show();
-        m_updateLinkButton->show(); // provisional: lo reemplaza el rediseño
-    } else {
-        m_settingsGroup->setTitle("Settings >");
-        m_settingsGroup->setProperty("collapsed", true); // Collapsed
-        m_settingsGroup->setFixedHeight(35); // Altura compacta
-        // Usar ancho fijo consistente para mantener el layout estable
-        m_settingsGroup->setMinimumWidth(SETTINGS_GROUP_WIDTH);
-        m_settingsGroup->setMaximumWidth(SETTINGS_GROUP_WIDTH);
-        m_settingsLayout->setContentsMargins(0, 0, 0, 0); // Sin márgenes cuando colapsado
-        m_settingsLayout->setSpacing(0); // No spacing between widgets
-        // Hide all settings widgets
-        m_cookiesLabel->hide();
-        m_cookiesSourceCombo->hide();
-        m_downloadFolderInput->hide();
-        m_browseFolderButton->hide();
-        m_toolsButton->hide();
-        m_updateLinkButton->hide(); // provisional: lo reemplaza el rediseño
+    // Misma carpeta que PipeSync: <AppData>/LGA/VideoDownloader/config.ini
+    QString appDataPath;
+#ifdef Q_OS_WIN
+    appDataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    appDataPath = appDataPath.replace("/VideoDownloader", "").replace("\\VideoDownloader", "");
+    appDataPath += "/VideoDownloader";
+#elif defined(Q_OS_MAC)
+    appDataPath = QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    appDataPath = appDataPath.replace("/VideoDownloader", "");
+    appDataPath += "/VideoDownloader";
+#else
+    appDataPath = QStandardPaths::writableLocation(QStandardPaths::ConfigLocation);
+    appDataPath += "/LGA/VideoDownloader";
+#endif
+    QDir dir(appDataPath);
+    if (!dir.exists()) {
+        dir.mkpath(QStringLiteral("."));
     }
-
-    // Force style refresh to apply new property
-    m_settingsGroup->style()->unpolish(m_settingsGroup);
-    m_settingsGroup->style()->polish(m_settingsGroup);
-
-    // Adjust window size after toggling with a small delay to ensure proper layout calculation
-    QTimer::singleShot(100, this, &MainWindow::adjustWindowSize);
-}
-
-// Height constants for window sizing (configurable values) - defined here for easy adjustment
-
-void MainWindow::adjustWindowSize()
-{
-    // Height constants for window sizing (configurable values) - defined here for easy adjustment
-    static const int MIN_HEIGHT_BOTH_EXPANDED = 600;      // Ambas secciones expandidas
-    static const int MIN_HEIGHT_BOTH_COLLAPSED = 300;    // Ambas secciones contraídas
-    static const int MIN_HEIGHT_LOG_EXPANDED = 500;      // Solo Log expandido, Settings contraído
-    static const int MIN_HEIGHT_SETTINGS_EXPANDED = 350; // Solo Settings expandido, Log contraído
-    static const int MAX_HEIGHT_LOG_EXPANDED = 650;      // Máximo cuando Log está expandido
-    static const int MAX_HEIGHT_SETTINGS_EXPANDED = 620;  // Máximo cuando Settings está expandido
-
-    // Forzar el cálculo del tamaño de todos los widgets
-    m_centralWidget->adjustSize();
-
-    // Obtener el tamaño sugerido por el layout
-    QSize sizeHint = m_centralWidget->sizeHint();
-
-    // El layout tiene restricción fija, así que establecemos el tamaño manualmente
-    int extraWidth = 5;
-    int currentWidth = sizeHint.width() + extraWidth;
-
-    // Siempre mantener el ancho máximo registrado, independientemente del estado de expansión
-    if (currentWidth > m_maxWindowWidth) {
-        m_maxWindowWidth = currentWidth;
-    }
-
-    // Siempre usar el ancho máximo para evitar que las secciones se achiquen
-    int finalWidth = m_maxWindowWidth > 0 ? m_maxWindowWidth : currentWidth;
-
-    // Calcular altura según el estado del log y settings
-    int finalHeight;
-
-    // Usar el sizeHint cuando ambas secciones están en el mismo estado (ambas expandidas o ambas contraídas)
-    bool anyExpanded = m_logExpanded || m_settingsExpanded;
-    bool bothSameState = (m_logExpanded && m_settingsExpanded) || (!m_logExpanded && !m_settingsExpanded);
-
-    if (bothSameState) {
-        // Cuando ambas están en el mismo estado, usar el sizeHint que funciona bien
-        finalHeight = sizeHint.height();
-        finalHeight = anyExpanded ? qMax(MIN_HEIGHT_BOTH_EXPANDED, finalHeight) : qMax(MIN_HEIGHT_BOTH_COLLAPSED, finalHeight);
-    } else {
-        // Una sección expandida y otra contraída - usar constantes específicas
-        if (m_logExpanded && !m_settingsExpanded) {
-            // Solo Log expandido, Settings contraído
-            finalHeight = sizeHint.height();
-            if (finalHeight > MAX_HEIGHT_LOG_EXPANDED) {
-                finalHeight = MAX_HEIGHT_LOG_EXPANDED;
-            }
-            finalHeight = qMax(MIN_HEIGHT_LOG_EXPANDED, finalHeight);
-        } else if (!m_logExpanded && m_settingsExpanded) {
-            // Solo Settings expandido, Log contraído
-            finalHeight = sizeHint.height();
-            if (finalHeight > MAX_HEIGHT_SETTINGS_EXPANDED) {
-                finalHeight = MAX_HEIGHT_SETTINGS_EXPANDED;
-            }
-            finalHeight = qMax(MIN_HEIGHT_SETTINGS_EXPANDED, finalHeight);
-        } else {
-            // Fallback - ambas contraídas (aunque no debería llegar aquí)
-            finalHeight = sizeHint.height();
-            finalHeight = qMax(MIN_HEIGHT_BOTH_COLLAPSED, finalHeight);
-        }
-    }
-
-    // Ajustar el tamaño de la ventana al tamaño óptimo
-    setFixedSize(finalWidth, finalHeight);
-
-    // También establecer el tamaño mínimo para permitir algo de flexibilidad
-    setMinimumSize(400, finalHeight);
-    setMaximumSize(QWIDGETSIZE_MAX, QWIDGETSIZE_MAX);
+    return appDataPath + "/config.ini";
 }

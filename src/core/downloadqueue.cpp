@@ -1,9 +1,10 @@
 #include "videodownloader/downloadqueue.h"
+#include "videodownloader/browserdetect.h"
 #include "videodownloader/toolsmanager.h"
 
 #include <QDir>
-#include <QRegularExpression>
-#include <QMutexLocker>
+#include <QFileInfo>
+#include <QProcessEnvironment>
 #include <QTimer>
 
 #ifdef Q_OS_UNIX
@@ -11,181 +12,271 @@
 #include <unistd.h>
 #endif
 
-DownloadQueue::DownloadQueue(QTextEdit *logOutput, QProgressBar *progressBar, QGroupBox *progressGroup, ToolsManager *toolsManager, QObject *parent)
-    : QObject(parent)
-    , m_logOutput(logOutput)
-    , m_progressBar(progressBar)
-    , m_progressGroup(progressGroup)
-    , m_toolsManager(toolsManager)
-    , m_currentProcess(nullptr)
-    , m_isRunning(false)
-    , m_isPaused(false)
-    , m_completedCount(0)
-    , m_totalCount(0)
-    , m_hasCurrentDownload(false)
-    , m_totalFragments(0)
-    , m_currentFragment(0)
+namespace {
+
+// Pausa entre una descarga y la siguiente: deja que el proceso anterior libere archivos.
+constexpr int NEXT_DOWNLOAD_DELAY_MS = 300;
+// Minimo entre dos avisos de progreso del mismo item: la UI no necesita mas de ~7 por segundo.
+constexpr int PROGRESS_EMIT_INTERVAL_MS = 150;
+
+// Marcadores de las lineas estructuradas que se le piden a yt-dlp con --progress-template
+// y --print. Se reconocen con startsWith: nada de regex por linea.
+const QLatin1String kProgressTag("[vdprog] ");
+const QLatin1String kInfoTag("[vdinfo] ");
+const QLatin1String kFileTag("[vdfile] ");
+
+qint64 parseBytes(const QStringView &text)
 {
-    updateProgressLabel();
+    bool ok = false;
+    const double value = text.toDouble(&ok);
+    return ok ? static_cast<qint64>(value) : -1;
+}
+
+QString humanSize(qint64 bytes)
+{
+    if (bytes < 0) {
+        return QString();
+    }
+    const double mib = bytes / (1024.0 * 1024.0);
+    if (mib >= 1024.0) {
+        return QString::number(mib / 1024.0, 'f', 2) + QStringLiteral(" GiB");
+    }
+    return QString::number(mib, 'f', mib >= 100 ? 0 : 1) + QStringLiteral(" MiB");
+}
+
+// Ultima linea "ERROR: ..." de stderr, sin el prefijo del extractor ("[youtube] id: ").
+QString lastErrorLine(const QString &err)
+{
+    const QStringList lines = err.split(QLatin1Char('\n'), Qt::SkipEmptyParts);
+    for (int i = lines.size() - 1; i >= 0; --i) {
+        QString line = lines.at(i).trimmed();
+        if (!line.startsWith(QLatin1String("ERROR:"))) {
+            continue;
+        }
+        line = line.mid(6).trimmed();
+        if (line.startsWith(QLatin1Char('['))) {
+            const int close = line.indexOf(QLatin1String("]"));
+            const int colon = line.indexOf(QLatin1String(": "), close);
+            if (close > 0 && colon > close) {
+                line = line.mid(colon + 2);
+            }
+        }
+        return line;
+    }
+    return QString();
+}
+
+} // namespace
+
+DownloadQueue::DownloadQueue(ToolsManager *toolsManager, QObject *parent)
+    : QObject(parent)
+    , m_toolsManager(toolsManager)
+{
 }
 
 DownloadQueue::~DownloadQueue()
 {
+    if (m_currentProcess) {
+        m_currentProcess->disconnect(this);
+    }
     cleanupCurrentProcess();
 }
 
-void DownloadQueue::addDownload(const QString &url, const QString &cookiesBrowser, const QString &cookiesFile, const QString &downloadDir)
+int DownloadQueue::addDownload(const QString &url, const DownloadOptions &options)
 {
-    QMutexLocker locker(&m_queueMutex);
+    DownloadItem item;
+    item.id = m_nextId++;
+    item.url = url;
+    item.options = options;
+    m_items.append(item);
+    emit itemAdded(item);
 
-    DownloadItem item(url, cookiesBrowser, cookiesFile, downloadDir);
-    m_queue.enqueue(item);
-    m_totalCount++;
-
-    updateProgressLabel();
-
-    logMessage(QString("=== Download Added to Queue ==="));
-    logMessage(QString("URL: %1").arg(url));
-    logMessage(QString("Queue position: %1 of %2").arg(m_queue.size()).arg(m_totalCount));
-    logMessage("---");
-
-    // Emit signal for total count update, but don't change current number
-    emit downloadAddedToQueue(m_totalCount);
-
-    // Auto-start queue if not running
-    if (!m_isRunning && !m_isPaused) {
-        QTimer::singleShot(100, this, &DownloadQueue::startQueue);
+    m_stopped = false;
+    if (m_currentId < 0) {
+        QTimer::singleShot(0, this, &DownloadQueue::processNextDownload);
     }
+    return item.id;
 }
 
-void DownloadQueue::retryDownloadWithVideoPassword(const QString &videoPassword)
+int DownloadQueue::addInvalidLink(const QString &text)
 {
-    if (!m_hasCurrentDownload) return;
-
-    // Set the video password and retry the download
-    m_currentDownload.videoPassword = videoPassword;
-    m_currentDownload.errorMessage.clear();
-    m_currentDownload.status = DownloadStatus::Downloading;
-    m_currentDownload.startTime = QDateTime::currentDateTime();
-
-    logMessage(QString("Retrying download with video password..."));
-    startDownloadProcess(m_currentDownload);
+    DownloadItem item;
+    item.id = m_nextId++;
+    item.url = text;
+    item.status = DownloadStatus::Failed;
+    item.failure = FailureKind::InvalidLink;
+    item.errorHeadline = QStringLiteral("Not a Vimeo or YouTube link");
+    item.errorDetail = QStringLiteral("Check the link, paste it again and press Download.");
+    item.finishTime = QDateTime::currentDateTime();
+    m_items.append(item);
+    emit itemAdded(item);
+    log(QStringLiteral("Skipped \"%1\": not a Vimeo or YouTube link").arg(text), LogLevel::Warning);
+    return item.id;
 }
 
-void DownloadQueue::startQueue()
+DownloadItem *DownloadQueue::findItem(int id)
 {
-    if (m_isRunning) {
+    const int index = indexOf(id);
+    return index >= 0 ? &m_items[index] : nullptr;
+}
+
+const DownloadItem *DownloadQueue::item(int id) const
+{
+    const int index = indexOf(id);
+    return index >= 0 ? &m_items.at(index) : nullptr;
+}
+
+int DownloadQueue::indexOf(int id) const
+{
+    for (int i = 0; i < m_items.size(); ++i) {
+        if (m_items.at(i).id == id) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+DownloadItem *DownloadQueue::currentItem()
+{
+    return m_currentId >= 0 ? findItem(m_currentId) : nullptr;
+}
+
+void DownloadQueue::cancelItem(int id)
+{
+    DownloadItem *target = findItem(id);
+    if (!target || target->isFinished()) {
         return;
     }
-    
-    m_isRunning = true;
-    m_isPaused = false;
-    
-    logMessage("=== Starting Download Queue ===");
-    processNextDownload();
-}
-
-void DownloadQueue::pauseQueue()
-{
-    m_isPaused = true;
-    
-    if (m_currentProcess && m_currentProcess->state() == QProcess::Running) {
-        logMessage("=== Pausing Download Queue ===");
-        logMessage("Current download will finish, then queue will pause");
-    } else {
-        m_isRunning = false;
-        logMessage("=== Download Queue Paused ===");
-    }
-}
-
-void DownloadQueue::clearQueue()
-{
-    QMutexLocker locker(&m_queueMutex);
-    
-    // Cancel current download if running
-    if (m_currentProcess && m_currentProcess->state() == QProcess::Running) {
-        cancelCurrentDownload();
-    }
-    
-    m_queue.clear();
-    m_isRunning = false;
-    m_isPaused = false;
-    
-    logMessage("=== Download Queue Cleared ===");
-    updateProgressLabel();
-    emit queueStatusChanged(m_completedCount, m_totalCount);
-}
-
-void DownloadQueue::resetQueue()
-{
-    QMutexLocker locker(&m_queueMutex);
-    
-    // Cancel current download if running
-    if (m_currentProcess && m_currentProcess->state() == QProcess::Running) {
-        cancelCurrentDownload();
-    }
-    
-    // Clear everything and reset counters
-    m_queue.clear();
-    m_completedDownloads.clear();
-    m_completedCount = 0;
-    m_totalCount = 0;
-    m_isRunning = false;
-    m_isPaused = false;
-    m_hasCurrentDownload = false;
-    
-    logMessage("=== Download Queue Reset - All counters cleared ===");
-    updateProgressLabel();
-    emit queueStatusChanged(0, 0);
-}
-
-void DownloadQueue::cancelCurrentDownload()
-{
-    if (m_currentProcess && m_currentProcess->state() == QProcess::Running) {
-        logMessage("=== Cancelling Current Download ===");
-        m_currentDownload.status = DownloadStatus::Cancelled;
+    if (id == m_currentId) {
+        // El cierre real llega por onDownloadFinished, que ve el estado Cancelled.
+        target->status = DownloadStatus::Cancelled;
+        log(QStringLiteral("Cancelling %1").arg(target->title.isEmpty() ? target->url : target->title));
         killCurrentProcessTree();
-        m_currentProcess->waitForFinished(3000);
+        return;
+    }
+    target->status = DownloadStatus::Cancelled;
+    target->finishTime = QDateTime::currentDateTime();
+    emit itemUpdated(*target);
+}
+
+void DownloadQueue::removeItem(int id)
+{
+    if (id == m_currentId) {
+        return;
+    }
+    const int index = indexOf(id);
+    if (index < 0) {
+        return;
+    }
+    m_items.removeAt(index);
+    emit itemRemoved(id);
+}
+
+void DownloadQueue::retryItem(int id, const DownloadOptions &options)
+{
+    DownloadItem *target = findItem(id);
+    if (!target || !target->isFinished() || target->failure == FailureKind::InvalidLink
+        || target->status == DownloadStatus::Completed) {
+        return;
+    }
+    const QString url = target->url;
+    const QString title = target->title;
+    const QString password = target->videoPassword;
+    *target = DownloadItem();
+    target->id = id;
+    target->url = url;
+    target->title = title;
+    target->videoPassword = password;
+    target->options = options;
+    emit itemUpdated(*target);
+    log(QStringLiteral("Retrying %1").arg(title.isEmpty() ? url : title));
+
+    m_stopped = false;
+    if (m_currentId < 0) {
+        QTimer::singleShot(0, this, &DownloadQueue::processNextDownload);
+    }
+}
+
+void DownloadQueue::retryFailed(const DownloadOptions &options)
+{
+    QList<int> ids;
+    for (const DownloadItem &entry : std::as_const(m_items)) {
+        if (entry.status == DownloadStatus::Failed && entry.failure != FailureKind::InvalidLink) {
+            ids.append(entry.id);
+        }
+    }
+    for (int id : std::as_const(ids)) {
+        retryItem(id, options);
+    }
+}
+
+void DownloadQueue::clearFinished()
+{
+    QList<int> ids;
+    for (const DownloadItem &entry : std::as_const(m_items)) {
+        if (entry.isFinished()) {
+            ids.append(entry.id);
+        }
+    }
+    for (int id : std::as_const(ids)) {
+        removeItem(id);
+    }
+}
+
+void DownloadQueue::cancelAll()
+{
+    for (DownloadItem &entry : m_items) {
+        if (entry.status == DownloadStatus::Pending) {
+            entry.status = DownloadStatus::Cancelled;
+            entry.finishTime = QDateTime::currentDateTime();
+            emit itemUpdated(entry);
+        }
+    }
+    if (m_currentId >= 0) {
+        cancelItem(m_currentId);
+    }
+}
+
+void DownloadQueue::kick()
+{
+    if (m_currentId < 0 && !m_stopped) {
+        processNextDownload();
     }
 }
 
 void DownloadQueue::processNextDownload()
 {
-    QMutexLocker locker(&m_queueMutex);
-    
-    // Check if paused
-    if (m_isPaused) {
-        m_isRunning = false;
-        logMessage("=== Queue Paused ===");
+    if (m_currentId >= 0 || m_stopped) {
         return;
     }
-    
-    // Check if queue is empty
-    if (m_queue.isEmpty()) {
-        m_isRunning = false;
-        m_hasCurrentDownload = false;
-        
-        if (m_completedCount > 0) {
-            logMessage("=== All Downloads Completed ===");
-            logMessage(QString("Total downloads processed: %1").arg(m_completedCount));
+
+    DownloadItem *next = nullptr;
+    for (DownloadItem &entry : m_items) {
+        if (entry.status == DownloadStatus::Pending) {
+            next = &entry;
+            break;
         }
-        
-        emit queueFinished();
+    }
+    if (!next) {
         return;
     }
-    
-    // Get next download
-    m_currentDownload = m_queue.dequeue();
-    m_hasCurrentDownload = true;
-    m_currentDownload.status = DownloadStatus::Downloading;
-    m_currentDownload.startTime = QDateTime::currentDateTime();
-    
-    updateProgressLabel();
-    emit downloadStarted(m_currentDownload);
-    emit queueStatusChanged(m_completedCount + 1, m_totalCount);
-    
-    // Start download process
-    startDownloadProcess(m_currentDownload);
+
+    // Sin tools no se lanza nada: los links quedan en cola y arrancan con kick() cuando
+    // el auto-update termina de instalarlas.
+    if (m_toolsManager && !m_toolsManager->areToolsInstalled()) {
+        if (!m_waitingForTools) {
+            m_waitingForTools = true;
+            log(QStringLiteral("Waiting for the download tools to finish installing"), LogLevel::Warning);
+        }
+        return;
+    }
+    m_waitingForTools = false;
+
+    m_currentId = next->id;
+    next->status = DownloadStatus::Downloading;
+    next->startTime = QDateTime::currentDateTime();
+    emit itemUpdated(*next);
+    startDownloadProcess(*next);
 }
 
 bool DownloadQueue::hasActiveProcess() const
@@ -195,28 +286,42 @@ bool DownloadQueue::hasActiveProcess() const
 
 int DownloadQueue::activeDownloadCount() const
 {
-    return m_queue.size() + (m_hasCurrentDownload ? 1 : 0);
+    int count = 0;
+    for (const DownloadItem &entry : m_items) {
+        if (entry.status == DownloadStatus::Pending || entry.status == DownloadStatus::Downloading) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 void DownloadQueue::stopAllForShutdown()
 {
-    QMutexLocker locker(&m_queueMutex);
-    m_queue.clear();
-    m_isPaused = true;
-    m_hasCurrentDownload = false;
+    m_stopped = true;
+    for (DownloadItem &entry : m_items) {
+        if (entry.status == DownloadStatus::Pending || entry.status == DownloadStatus::Downloading) {
+            entry.status = DownloadStatus::Cancelled;
+        }
+    }
     if (m_currentProcess) {
         // Sin senales: que no dispare onDownloadFinished ni encadene la proxima descarga.
         m_currentProcess->disconnect(this);
     }
     cleanupCurrentProcess();
-    logMessage("=== Downloads stopped to install an update ===");
+    m_currentId = -1;
+    log(QStringLiteral("Downloads stopped to install an update"), LogLevel::Warning);
 }
 
-void DownloadQueue::startDownloadProcess(const DownloadItem &item)
+void DownloadQueue::startDownloadProcess(DownloadItem &item)
 {
-    // Clean up any existing process
     cleanupCurrentProcess();
+    m_stdoutBuffer.clear();
     m_stderrBuffer.clear();
+    m_streamCount = 1;
+    m_streamIndex = -1;
+    m_streamDoneBase = 0;
+    m_lastStreamTotal = 0;
+    m_progressThrottle.invalidate();
 
     // Punto unico de swap de tools: aca no queda ningun yt-dlp de esta cola corriendo, asi
     // que si el auto-update dejo algo verificado en staging se activa antes de usarlo.
@@ -224,347 +329,430 @@ void DownloadQueue::startDownloadProcess(const DownloadItem &item)
         m_toolsManager->applyStagedTools();
     }
 
-    // Create new process
     m_currentProcess = new QProcess(this);
 #ifdef Q_OS_UNIX
     // Grupo de procesos propio: asi killCurrentProcessTree() alcanza a los hijos de yt-dlp.
     m_currentProcess->setChildProcessModifier([]() { ::setpgid(0, 0); });
 #endif
-    
-    // Connect signals
+    // Sin esto, en Windows yt-dlp escribe los titulos en la codificacion de la consola.
+    QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+    env.insert(QStringLiteral("PYTHONIOENCODING"), QStringLiteral("utf-8"));
+    m_currentProcess->setProcessEnvironment(env);
+
     connect(m_currentProcess, &QProcess::readyReadStandardOutput, this, &DownloadQueue::onDownloadOutput);
     connect(m_currentProcess, &QProcess::readyReadStandardError, this, &DownloadQueue::onDownloadError);
     connect(m_currentProcess, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
             this, &DownloadQueue::onDownloadFinished);
-    
-    // Prepare yt-dlp arguments
-    QStringList arguments;
-    
-    // Autenticacion: cookies de una sesion ya iniciada en el navegador, o un cookies.txt.
-    // Ya no se usa -u/-p: pedirle a cada usuario el mail y la contrasena de su cuenta es
-    // inseguro, y ademas YouTube no acepta login por contrasena desde yt-dlp.
-    if (!item.cookiesFile.isEmpty()) {
-        arguments << "--cookies" << item.cookiesFile;
-    } else if (!item.cookiesBrowser.isEmpty()) {
-        arguments << "--cookies-from-browser" << item.cookiesBrowser;
-    }
 
-    // Add video password if provided
+    QStringList arguments;
+
+    // Autenticacion: cookies de una sesion ya iniciada en el navegador, o un cookies.txt.
+    // No se usa -u/-p: pedirle a cada usuario el mail y la contrasena de su cuenta es
+    // inseguro, y ademas YouTube no acepta login por contrasena desde yt-dlp.
+    if (!item.options.cookiesFile.isEmpty()) {
+        arguments << "--cookies" << item.options.cookiesFile;
+    } else if (!item.options.cookiesBrowser.isEmpty()) {
+        arguments << "--cookies-from-browser" << item.options.cookiesBrowser;
+    }
     if (!item.videoPassword.isEmpty()) {
         arguments << "--video-password" << item.videoPassword;
     }
-    
-    // Use a safer output template that avoids problematic characters
-    arguments << "--output" << item.downloadDir + "/%(title).200s.%(ext)s";
-    arguments << "--restrict-filenames"; // Restrict filenames to ASCII characters
 
-    // For Vimeo videos, don't specify restrictive format - let yt-dlp choose best available
-    // This handles cases where only HLS streaming formats are available
-    if (!item.url.contains("vimeo.com", Qt::CaseInsensitive)) {
-        // For non-Vimeo sites (like YouTube), use MP4-preferred formats
-        arguments << "--format" << "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best";
-    }
-    // For Vimeo, omit --format entirely to let yt-dlp choose the best available format
-    
-    // Add ffmpeg location for proper merging
-    QString ffmpegPath = m_toolsManager->getFfmpegPath();
-    if (!ffmpegPath.isEmpty() && ffmpegPath != "ffmpeg") {
-        arguments << "--ffmpeg-location" << ffmpegPath;
-        logMessage(QString("Using ffmpeg location: %1").arg(ffmpegPath));
+    arguments << "--output" << item.options.downloadDir + "/%(title).200s.%(ext)s";
+    arguments << "--restrict-filenames";
+
+    // Salida estructurada para la tarjeta: progreso en bytes, datos del formato elegido y
+    // ruta final. Con --print yt-dlp pasa a modo silencioso y simulado; --no-quiet y
+    // --no-simulate lo devuelven al modo normal.
+    arguments << "--newline" << "--no-quiet" << "--no-simulate" << "--progress" << "--no-colors";
+    arguments << "--progress-template"
+              << "download:[vdprog] %(progress.downloaded_bytes)s|%(progress.total_bytes)s|"
+                 "%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s";
+    arguments << "--print" << "before_dl:[vdinfo] %(format_id)s|%(resolution)s|%(ext)s|%(title)s";
+    arguments << "--print" << "after_move:[vdfile] %(filepath)s";
+
+    if (item.options.format == OutputFormat::AudioM4a) {
+        arguments << "--format" << "ba[ext=m4a]/ba/b" << "--extract-audio" << "--audio-format" << "m4a";
+    } else if (item.options.quality == VideoQuality::Compatible) {
+        // H.264 + AAC primero aunque haya mas resolucion en AV1/VP9: abre en cualquier editor.
+        arguments << "--format-sort" << "vcodec:h264,res,acodec:aac" << "--merge-output-format" << "mp4";
     } else {
-        logMessage("WARNING: ffmpeg path not found or using system ffmpeg");
+        arguments << "--format-sort" << "res" << "--merge-output-format" << "mp4" << "--remux-video" << "mp4";
     }
-    
+
+    const QString ffmpegPath = m_toolsManager ? m_toolsManager->getFfmpegPath() : QString();
+    if (!ffmpegPath.isEmpty() && ffmpegPath != QLatin1String("ffmpeg")) {
+        arguments << "--ffmpeg-location" << ffmpegPath;
+    } else {
+        log(QStringLiteral("WARNING: ffmpeg path not found, using the system ffmpeg"), LogLevel::Warning);
+    }
+
     // YouTube exige un runtime de JavaScript para resolver sus desafios (firma y "n").
     // yt-dlp solo busca deno en el PATH por defecto, asi que se le pasa la ruta explicita
-    // del deno que distribuye la app. Antes esto solo se hacia en macOS: en Windows nunca
-    // se pasaba y yt-dlp avisaba "No supported JavaScript runtime could be found".
-    if (item.url.contains("youtube.com", Qt::CaseInsensitive) || item.url.contains("youtu.be", Qt::CaseInsensitive)) {
+    // del deno que distribuye la app.
+    if (item.isYouTube()) {
         if (m_toolsManager && m_toolsManager->isDenoInstalled()) {
-            QString denoPath = m_toolsManager->getDenoPath();
+            const QString denoPath = m_toolsManager->getDenoPath();
             if (!denoPath.isEmpty()) {
-                arguments << "--js-runtimes" << QString("deno:%1").arg(denoPath);
+                arguments << "--js-runtimes" << QStringLiteral("deno:%1").arg(denoPath);
             }
         } else {
-            logMessage("WARNING: Deno runtime not found; YouTube downloads may fail or miss formats. It installs automatically at startup; if that failed, use 'Retry tools install' in Settings.");
+            log(QStringLiteral("WARNING: Deno was not found; YouTube downloads may fail or miss formats"),
+                LogLevel::Warning);
         }
     }
-    
-    arguments << item.url;
-    
-    // Activate progress bar and show percentage text
-    m_progressBar->setTextVisible(true);
-    m_progressBar->setValue(0);
-    
-    // Reset fragment tracking for new download
-    m_totalFragments = 0;
-    m_currentFragment = 0;
-    
-    // Log start
-    logMessage(QString("=== Starting Download %1 of %2 ===").arg(m_completedCount + 1).arg(m_totalCount));
-    logMessage(QString("URL: %1").arg(item.url));
-    if (!item.cookiesFile.isEmpty()) {
-        logMessage(QString("Login: cookies file %1").arg(item.cookiesFile));
-    } else if (!item.cookiesBrowser.isEmpty()) {
-        logMessage(QString("Login: cookies from %1").arg(item.cookiesBrowser));
-    } else {
-        logMessage("Login: none (public videos only)");
-    }
-    logMessage(QString("Download Folder: %1").arg(item.downloadDir));
-    logMessage("---");
 
-    // Start process
-    QString ytDlpPath = m_toolsManager->getYtDlpPath();
-    QString commandLog = arguments.join(" ");
-    // La contrasena de VIDEO (no de la cuenta) no debe quedar en el log.
-    if (!item.videoPassword.isEmpty()) {
-        commandLog = commandLog.replace(item.videoPassword, "***");
+    arguments << item.url;
+
+    QString login = QStringLiteral("no browser session");
+    if (!item.options.cookiesFile.isEmpty()) {
+        login = QStringLiteral("cookies file %1").arg(QDir::toNativeSeparators(item.options.cookiesFile));
+    } else if (!item.options.cookiesBrowser.isEmpty()) {
+        login = QStringLiteral("the %1 session").arg(BrowserDetect::displayName(item.options.cookiesBrowser));
     }
-    logMessage(QString("Executing: %1 %2").arg(ytDlpPath).arg(commandLog));
+    log(QStringLiteral("Fetching info · %1 · cookies: %2").arg(item.url, login));
+
+    const QString ytDlpPath = m_toolsManager ? m_toolsManager->getYtDlpPath() : QStringLiteral("yt-dlp");
+    QString commandLog = arguments.join(QLatin1Char(' '));
+    // La contrasena de VIDEO no debe quedar en el log.
+    if (!item.videoPassword.isEmpty()) {
+        commandLog.replace(item.videoPassword, QStringLiteral("***"));
+    }
+    log(QStringLiteral("Command: %1 %2").arg(QDir::toNativeSeparators(ytDlpPath), commandLog), LogLevel::Detail);
     m_currentProcess->start(ytDlpPath, arguments);
-    
+
     if (!m_currentProcess->waitForStarted(5000)) {
-        logMessage("ERROR: Could not start yt-dlp. Verify it's installed.");
-        m_currentDownload.status = DownloadStatus::Failed;
-        m_currentDownload.errorMessage = "Could not start yt-dlp";
+        item.errorMessage = QStringLiteral("ERROR: Could not start yt-dlp");
+        item.status = DownloadStatus::Failed;
         onDownloadFinished(-1, QProcess::CrashExit);
     }
 }
 
 void DownloadQueue::onDownloadOutput()
 {
-    if (!m_currentProcess) return;
-    
-    QByteArray data = m_currentProcess->readAllStandardOutput();
-    QString output = QString::fromUtf8(data).trimmed();
-    
-    if (!output.isEmpty()) {
-        logMessage(output);
-        
-        // Check for total fragments info (YouTube HLS downloads)
-        QRegularExpression fragmentsRegex("\\[hlsnative\\] Total fragments: (\\d+)");
-        QRegularExpressionMatch fragmentsMatch = fragmentsRegex.match(output);
-        if (fragmentsMatch.hasMatch()) {
-            m_totalFragments = fragmentsMatch.captured(1).toInt();
-            logMessage(QString("Detected HLS download with %1 fragments").arg(m_totalFragments));
-        }
-        
-        // Parse progress from yt-dlp output
-        QRegularExpression progressRegex("\\[download\\]\\s+(\\d+(?:\\.\\d+)?)%.*\\(frag (\\d+)/(\\d+)\\)");
-        QRegularExpressionMatch match = progressRegex.match(output);
-        
-        if (match.hasMatch()) {
-            // Fragment-based progress (YouTube HLS)
-            bool ok;
-            double fragmentProgress = match.captured(1).toDouble(&ok);
-            int currentFrag = match.captured(2).toInt();
-            int totalFrag = match.captured(3).toInt();
-            
-            if (ok && totalFrag > 0) {
-                // Update fragment info if we have it
-                if (m_totalFragments == 0) {
-                    m_totalFragments = totalFrag;
-                }
-                m_currentFragment = currentFrag;
-                
-                // Calculate overall progress: (completed fragments + current fragment progress) / total fragments
-                double overallProgress = ((double)(currentFrag - 1) + (fragmentProgress / 100.0)) / (double)totalFrag * 100.0;
-                int progressInt = static_cast<int>(overallProgress);
-                
-                // Ensure progress doesn't exceed 100% and is monotonic
-                progressInt = qMin(progressInt, 100);
-                if (progressInt >= m_currentDownload.progress) {
-                    m_currentDownload.progress = progressInt;
-                    m_progressBar->setValue(progressInt);
-                    emit downloadProgress(progressInt);
-                }
-            }
-        } else {
-            // Regular progress (Vimeo or non-fragmented downloads)
-            QRegularExpression simpleProgressRegex("\\[download\\]\\s+(\\d+(?:\\.\\d+)?)%");
-            QRegularExpressionMatch simpleMatch = simpleProgressRegex.match(output);
-            if (simpleMatch.hasMatch()) {
-                bool ok;
-                double progress = simpleMatch.captured(1).toDouble(&ok);
-                if (ok) {
-                    int progressInt = static_cast<int>(progress);
-                    m_currentDownload.progress = progressInt;
-                    m_progressBar->setValue(progressInt);
-                    emit downloadProgress(progressInt);
-                }
-            }
-        }
-        
-        // Check for completion
-        if (output.contains("100% of") && output.contains("in ")) {
-            m_progressBar->setValue(100);
-            m_currentDownload.progress = 100;
-        }
-        
-        // Extract title if available
-        if (m_currentDownload.title.isEmpty()) {
-            QRegularExpression titleRegex("\\[download\\] Destination: (.+)");
-            QRegularExpressionMatch titleMatch = titleRegex.match(output);
-            if (titleMatch.hasMatch()) {
-                QString fullPath = titleMatch.captured(1);
-                QStringList pathParts = fullPath.split("/");
-                if (!pathParts.isEmpty()) {
-                    m_currentDownload.title = pathParts.last();
-                }
-            }
+    if (!m_currentProcess) {
+        return;
+    }
+    m_stdoutBuffer += QString::fromUtf8(m_currentProcess->readAllStandardOutput());
+    int newline;
+    while ((newline = m_stdoutBuffer.indexOf(QLatin1Char('\n'))) >= 0) {
+        const QString line = m_stdoutBuffer.left(newline).trimmed();
+        m_stdoutBuffer.remove(0, newline + 1);
+        if (!line.isEmpty()) {
+            handleStdoutLine(line);
         }
     }
 }
 
+void DownloadQueue::handleStdoutLine(const QString &line)
+{
+    DownloadItem *item = currentItem();
+    if (!item) {
+        return;
+    }
+
+    if (line.startsWith(kProgressTag)) {
+        // downloaded|total|estimate|speed|eta ; "NA" cuando yt-dlp todavia no lo sabe.
+        const QList<QStringView> parts = QStringView(line).mid(kProgressTag.size()).split(QLatin1Char('|'));
+        if (parts.size() < 5) {
+            return;
+        }
+        const qint64 done = parseBytes(parts.at(0));
+        qint64 total = parseBytes(parts.at(1));
+        if (total <= 0) {
+            total = parseBytes(parts.at(2));
+        }
+        if (m_streamIndex < 0) {
+            m_streamIndex = 0;
+        }
+        if (total > 0) {
+            m_lastStreamTotal = total;
+        }
+        if (done >= 0) {
+            item->doneBytes = m_streamDoneBase + done;
+        }
+        item->totalBytes = m_streamDoneBase + qMax<qint64>(total, 0);
+        bool ok = false;
+        const double speed = parts.at(3).toDouble(&ok);
+        item->speedBytes = ok ? speed : -1;
+        const int eta = parts.at(4).toInt(&ok);
+        item->etaSeconds = ok ? eta : -1;
+        if (done >= 0 && total > 0) {
+            const double fraction = qBound(0.0, double(done) / double(total), 1.0);
+            const int overall = int(((m_streamIndex + fraction) / qMax(1, m_streamCount)) * 100.0);
+            // Monotono: un stream nuevo no hace retroceder la barra.
+            item->progress = qBound(item->progress, overall, 100);
+        }
+        emitUpdated(*item, true);
+        return;
+    }
+
+    if (line.startsWith(kInfoTag)) {
+        // format_id|resolution|ext|title (el titulo va al final porque puede traer '|').
+        const QString rest = line.mid(kInfoTag.size());
+        const QStringList parts = rest.split(QLatin1Char('|'));
+        if (parts.size() >= 4) {
+            m_streamCount = parts.at(0).count(QLatin1Char('+')) + 1;
+            const QString resolution = parts.at(1);
+            item->resolution = resolution == QLatin1String("audio only") || resolution == QLatin1String("NA")
+                                   ? QString() : resolution;
+            item->extension = item->options.format == OutputFormat::AudioM4a ? QStringLiteral("m4a") : parts.at(2);
+            item->title = parts.mid(3).join(QLatin1Char('|'));
+            log(QStringLiteral("Format: %1 %2 · %3").arg(item->resolution.isEmpty() ? QStringLiteral("audio") : item->resolution,
+                                                          item->extension, item->title));
+            emitUpdated(*item);
+        }
+        return;
+    }
+
+    if (line.startsWith(kFileTag)) {
+        item->filePath = line.mid(kFileTag.size()).trimmed();
+        return;
+    }
+
+    if (line.startsWith(QLatin1String("[download] Destination:"))) {
+        // Cada stream (video, audio) arranca con su propio Destination.
+        if (m_streamIndex >= 0) {
+            m_streamDoneBase += m_lastStreamTotal;
+            m_lastStreamTotal = 0;
+        }
+        m_streamIndex = qMin(m_streamIndex + 1, qMax(0, m_streamCount - 1));
+    } else if (line.startsWith(QLatin1String("[Merger]")) || line.startsWith(QLatin1String("[ExtractAudio]"))
+               || line.startsWith(QLatin1String("[VideoRemuxer]")) || line.startsWith(QLatin1String("[FixupM3u8]"))) {
+        item->finishing = true;
+        item->progress = 100;
+        item->speedBytes = -1;
+        item->etaSeconds = -1;
+        emitUpdated(*item);
+    }
+
+    log(line, classifyLogLine(line));
+}
+
 void DownloadQueue::onDownloadError()
 {
-    if (!m_currentProcess) return;
-    
-    // stderr de yt-dlp NO es solo errores: ahi van tambien los WARNING y los [debug], y cada
-    // linea ya trae su propio prefijo. Antes se le anteponia "ERROR: " a todo el bloque, y un
-    // WARNING inofensivo se leia en el log como "ERROR: WARNING: ...". Se loguea linea por
+    if (!m_currentProcess) {
+        return;
+    }
+    // stderr de yt-dlp NO es solo errores: ahi van tambien los WARNING. Se loguea linea por
     // linea tal cual; el fragmento sin salto de linea final se guarda hasta el proximo chunk.
     m_stderrBuffer += QString::fromUtf8(m_currentProcess->readAllStandardError());
-    int newlineIndex;
-    while ((newlineIndex = m_stderrBuffer.indexOf('\n')) >= 0) {
-        QString line = m_stderrBuffer.left(newlineIndex).trimmed();
-        m_stderrBuffer.remove(0, newlineIndex + 1);
+    int newline;
+    while ((newline = m_stderrBuffer.indexOf(QLatin1Char('\n'))) >= 0) {
+        const QString line = m_stderrBuffer.left(newline).trimmed();
+        m_stderrBuffer.remove(0, newline + 1);
         if (!line.isEmpty()) {
-            logMessage(line);
-            m_currentDownload.errorMessage += line + "\n";
+            log(line, classifyLogLine(line));
+            if (DownloadItem *item = currentItem()) {
+                item->errorMessage += line + QLatin1Char('\n');
+            }
         }
     }
 }
 
 void DownloadQueue::flushStderrBuffer()
 {
-    QString rest = m_stderrBuffer.trimmed();
+    const QString rest = m_stderrBuffer.trimmed();
     m_stderrBuffer.clear();
     if (!rest.isEmpty()) {
-        logMessage(rest);
-        m_currentDownload.errorMessage += rest + "\n";
+        log(rest, classifyLogLine(rest));
+        if (DownloadItem *item = currentItem()) {
+            item->errorMessage += rest + QLatin1Char('\n');
+        }
+    }
+    const QString out = m_stdoutBuffer.trimmed();
+    m_stdoutBuffer.clear();
+    if (!out.isEmpty()) {
+        handleStdoutLine(out);
     }
 }
 
-void DownloadQueue::logFailureHint(const DownloadItem &item)
+void DownloadQueue::classifyFailure(DownloadItem &item) const
 {
-    // Traduce los errores conocidos de yt-dlp a una indicacion accionable para el usuario.
-    // Los textos se comparan contra la salida real de yt-dlp 2026.08 en Windows.
+    // Traduce los errores conocidos de yt-dlp a un titular y una solucion para la tarjeta.
+    // Los textos se comparan contra la salida real de yt-dlp 2026.08.
     const QString &err = item.errorMessage;
-    const QString browser = item.cookiesBrowser.isEmpty() ? QStringLiteral("the browser") : item.cookiesBrowser;
-    QString hint;
+    const bool usedCookies = !item.options.cookiesBrowser.isEmpty() || !item.options.cookiesFile.isEmpty();
+    const QString browser = BrowserDetect::displayName(item.options.cookiesBrowser);
+    const QString site = item.isVimeo() ? QStringLiteral("Vimeo") : QStringLiteral("YouTube");
+    const auto has = [&err](const char *text) { return err.contains(QLatin1String(text), Qt::CaseInsensitive); };
 
-    if (err.contains("Could not copy Chrome cookie database", Qt::CaseInsensitive)) {
-        // Chromium bloquea su base de cookies mientras el navegador (o su proceso en segundo plano) esta abierto.
-        hint = QString("Could not read the cookies because %1 is open. Close %1 completely "
-                       "(also from the system tray) and retry, or switch to Firefox or a cookies.txt file.").arg(browser);
-    } else if (err.contains("Failed to decrypt with DPAPI", Qt::CaseInsensitive)
-               || err.contains("app-bound", Qt::CaseInsensitive)) {
-        // Chrome/Edge/Brave en Windows cifran las cookies con "app-bound encryption", que yt-dlp no puede descifrar.
-        hint = QString("%1 encrypts its cookies on Windows and they cannot be read. "
-                       "Use Firefox (sign in there) or export a cookies.txt file.").arg(browser);
-    } else if (err.contains("could not find", Qt::CaseInsensitive) && err.contains("cookies database", Qt::CaseInsensitive)) {
-        hint = QString("No cookies found for %1. Is it installed and has it been opened at least once?").arg(browser);
-    } else if (err.contains("Sign in to confirm your age", Qt::CaseInsensitive)
-               || err.contains("Sign in to confirm you", Qt::CaseInsensitive)
-               || err.contains("only works when logged-in", Qt::CaseInsensitive)
-               || err.contains("--cookies-from-browser or --cookies", Qt::CaseInsensitive)) {
-        if (item.cookiesBrowser.isEmpty() && item.cookiesFile.isEmpty()) {
-            hint = "This video requires a signed-in account. In Settings, choose a browser where you are "
-                   "signed in (Firefox works best on Windows) or a cookies.txt file.";
+    if (has("Could not copy Chrome cookie database")) {
+        item.failure = FailureKind::CookiesUnreadable;
+        item.errorHeadline = QStringLiteral("Close %1 to read its session").arg(browser);
+        item.errorDetail = QStringLiteral("%1 locks its cookies while it is open. Close it completely (also from the "
+                                          "system tray) and retry, or choose Firefox or a cookies.txt file.").arg(browser);
+    } else if (has("Failed to decrypt with DPAPI") || has("app-bound")) {
+        item.failure = FailureKind::CookiesUnreadable;
+        item.errorHeadline = QStringLiteral("Can't read %1 cookies on Windows").arg(browser);
+        item.errorDetail = QStringLiteral("%1 encrypts its cookies on Windows. Sign in to %2 in Firefox and choose "
+                                          "Firefox in Use cookies from, or load a cookies.txt file.").arg(browser, site);
+    } else if (has("could not find") && has("cookies database")) {
+        item.failure = FailureKind::CookiesUnreadable;
+        item.errorHeadline = QStringLiteral("No %1 session found").arg(browser);
+        item.errorDetail = QStringLiteral("Open %1 at least once and sign in to %2, then retry.").arg(browser, site);
+    } else if (has("Sign in to confirm") || has("only works when logged-in") || has("--cookies-from-browser or --cookies")
+               || has("members-only") || has("Join this channel") || has("Private video") || has("This video is private")
+               || has("logged-in") || has("login required")) {
+        item.failure = FailureKind::NeedsSignIn;
+        if (has("confirm your age")) {
+            item.errorHeadline = QStringLiteral("Sign in to confirm your age");
+        } else if (has("members-only") || has("Join this channel")) {
+            item.errorHeadline = QStringLiteral("Members-only video");
+        } else if (has("private")) {
+            item.errorHeadline = QStringLiteral("This video is private");
         } else {
-            hint = "This video requires a signed-in account, but the selected cookies have no valid session. "
-                   "Sign in to the site in that browser (or export a fresh cookies.txt) and retry.";
+            item.errorHeadline = QStringLiteral("This video needs a signed-in account");
         }
-    } else if (err.contains("Requested format is not available", Qt::CaseInsensitive)) {
-        hint = "The requested format is not available. yt-dlp and Deno update at startup: restart the app and retry.";
-    }
-
-    if (!hint.isEmpty()) {
-        logMessage("HINT: " + hint);
+        if (!usedCookies) {
+#ifdef Q_OS_WIN
+            item.errorDetail = QStringLiteral("%1 only shows this video to signed-in users. Sign in to %1 in Firefox, "
+                                              "choose it in Use cookies from, and retry.").arg(site);
+#else
+            item.errorDetail = QStringLiteral("%1 only shows this video to signed-in users. Sign in to %1 in your "
+                                              "browser, choose it in Use cookies from, and retry.").arg(site);
+#endif
+        } else {
+            item.errorDetail = QStringLiteral("The selected session has no access to this video. Sign in to %1 with an "
+                                              "account that can watch it (or export a fresh cookies.txt), then retry.").arg(site);
+        }
+    } else if (has("Unsupported URL") || has("is not a valid URL")) {
+        item.failure = FailureKind::InvalidLink;
+        item.errorHeadline = QStringLiteral("This link doesn't point to a video");
+        item.errorDetail = QStringLiteral("Check the link, paste it again and press Download.");
+    } else if (has("Video unavailable") || has("HTTP Error 404") || has("This video does not exist")) {
+        item.failure = FailureKind::Unavailable;
+        item.errorHeadline = QStringLiteral("Video unavailable");
+        item.errorDetail = QStringLiteral("The video was removed or the link is wrong.");
+    } else if (has("Unable to download webpage") || has("getaddrinfo failed") || has("timed out")
+               || has("Connection reset") || has("Temporary failure in name resolution")) {
+        item.failure = FailureKind::Network;
+        item.errorHeadline = QStringLiteral("Connection problem");
+        item.errorDetail = QStringLiteral("Check your internet connection and retry.");
+    } else if (has("Could not start yt-dlp")) {
+        item.failure = FailureKind::ToolsMissing;
+        item.errorHeadline = QStringLiteral("The download tools aren't ready");
+        item.errorDetail = QStringLiteral("They install automatically when the app starts. Restart the app and retry.");
+    } else if (has("protected by a password") || has("--video-password")) {
+        item.failure = FailureKind::PasswordRequired;
+        item.errorHeadline = QStringLiteral("This video has a password");
+        item.errorDetail = QStringLiteral("Retry and enter the video password when asked.");
+    } else if (has("Requested format is not available")) {
+        item.failure = FailureKind::Generic;
+        item.errorHeadline = QStringLiteral("Format not available");
+        item.errorDetail = QStringLiteral("Try Best quality, or retry later: the download tools update when the app starts.");
+    } else {
+        item.failure = FailureKind::Generic;
+        item.errorHeadline = QStringLiteral("Download failed");
+        const QString line = lastErrorLine(err);
+        item.errorDetail = line.isEmpty() ? QStringLiteral("yt-dlp stopped with an error. See the log for details.") : line;
     }
 }
 
 void DownloadQueue::onDownloadFinished(int exitCode, QProcess::ExitStatus exitStatus)
 {
-    if (!m_hasCurrentDownload) return;
+    DownloadItem *item = currentItem();
+    if (!item) {
+        return;
+    }
 
-    // Vaciar lo que quede de stderr antes de evaluar el resultado
     onDownloadError();
     flushStderrBuffer();
+    item = currentItem();
+    if (!item) {
+        return;
+    }
+    item->finishTime = QDateTime::currentDateTime();
+    item->speedBytes = -1;
+    item->etaSeconds = -1;
+    item->finishing = false;
 
-    // Deactivate progress bar and hide percentage text
-    m_progressBar->setTextVisible(false);
-    m_progressBar->setValue(0);
-    m_currentDownload.finishTime = QDateTime::currentDateTime();
-
-    if (exitStatus == QProcess::CrashExit) {
-        m_currentDownload.status = DownloadStatus::Failed;
-        if (m_currentDownload.errorMessage.isEmpty()) {
-            m_currentDownload.errorMessage = "Process crashed unexpectedly";
+    if (item->status == DownloadStatus::Cancelled) {
+        log(QStringLiteral("Cancelled %1").arg(item->title.isEmpty() ? item->url : item->title), LogLevel::Warning);
+    } else if (exitStatus == QProcess::NormalExit && exitCode == 0) {
+        item->status = DownloadStatus::Completed;
+        item->progress = 100;
+        qint64 size = -1;
+        if (!item->filePath.isEmpty()) {
+            size = QFileInfo(item->filePath).size();
         }
-        logMessage("ERROR: yt-dlp process crashed unexpectedly");
-        emit downloadFailed(m_currentDownload, m_currentDownload.errorMessage);
-    } else if (exitCode == 0) {
-        m_currentDownload.status = DownloadStatus::Completed;
-        m_currentDownload.progress = 100;
-        logMessage("=== Download completed successfully ===");
-        emit downloadCompleted(m_currentDownload);
+        if (size > 0) {
+            item->totalBytes = size;
+        }
+        const QString name = item->filePath.isEmpty() ? item->title : QFileInfo(item->filePath).fileName();
+        log(size > 0 ? QStringLiteral("Saved %1 (%2)").arg(name, humanSize(size)) : QStringLiteral("Saved %1").arg(name),
+            LogLevel::Done);
     } else {
-        // Check if the error is about video password protection
-        bool isVideoPasswordError = m_currentDownload.errorMessage.contains("This video is protected by a password", Qt::CaseInsensitive) ||
-                                   m_currentDownload.errorMessage.contains("--video-password", Qt::CaseInsensitive);
-
-        if (isVideoPasswordError && m_currentDownload.videoPassword.isEmpty()) {
-            // Show video password dialog and retry
-            logMessage("Video password required. Showing password dialog...");
-            emit videoPasswordRequired(m_currentDownload);
-            return; // Don't mark as failed yet, will retry after password is entered
-        } else {
-            m_currentDownload.status = DownloadStatus::Failed;
-            if (m_currentDownload.errorMessage.isEmpty()) {
-                m_currentDownload.errorMessage = QString("Process finished with error code: %1").arg(exitCode);
-            }
-            logMessage(QString("ERROR: yt-dlp finished with error code: %1").arg(exitCode));
-            logFailureHint(m_currentDownload);
-            emit downloadFailed(m_currentDownload, m_currentDownload.errorMessage);
+        const bool passwordError = item->errorMessage.contains(QLatin1String("protected by a password"), Qt::CaseInsensitive)
+                                   || item->errorMessage.contains(QLatin1String("--video-password"), Qt::CaseInsensitive);
+        if (passwordError && item->videoPassword.isEmpty()) {
+            // El item sigue siendo el actual hasta que el usuario responda el dialogo.
+            log(QStringLiteral("This video needs a password"), LogLevel::Warning);
+            cleanupCurrentProcess();
+            emit videoPasswordRequired(*item);
+            return;
         }
+        item->status = DownloadStatus::Failed;
+        classifyFailure(*item);
+        log(QStringLiteral("%1 · %2").arg(item->errorHeadline, item->errorDetail), LogLevel::Error);
     }
 
-    // Add to completed downloads
-    m_completedDownloads.append(m_currentDownload);
-    m_completedCount++;
-    m_hasCurrentDownload = false;
+    emit itemUpdated(*item);
+    finishCurrent();
+}
 
-    updateProgressLabel();
-    emit queueStatusChanged(m_completedCount, m_totalCount);
-
-    // Clean up process
+void DownloadQueue::finishCurrent()
+{
+    m_currentId = -1;
     cleanupCurrentProcess();
-
-    // Process next download after a short delay
-    QTimer::singleShot(1000, this, &DownloadQueue::processNextDownload);
+    QTimer::singleShot(NEXT_DOWNLOAD_DELAY_MS, this, &DownloadQueue::processNextDownload);
 }
 
-DownloadItem DownloadQueue::getCurrentDownload() const
+void DownloadQueue::retryDownloadWithVideoPassword(const QString &videoPassword)
 {
-    return m_hasCurrentDownload ? m_currentDownload : DownloadItem();
-}
-
-void DownloadQueue::updateProgressLabel()
-{
-    if (m_progressGroup) {
-        int currentNumber = m_hasCurrentDownload ? m_completedCount + 1 : m_completedCount;
-        QString text = QString("Progress (%1/%2)").arg(currentNumber).arg(m_totalCount);
-        m_progressGroup->setTitle(text);
+    DownloadItem *item = currentItem();
+    if (!item) {
+        return;
     }
+    item->videoPassword = videoPassword;
+    item->errorMessage.clear();
+    item->status = DownloadStatus::Downloading;
+    item->startTime = QDateTime::currentDateTime();
+    log(QStringLiteral("Retrying with the video password"));
+    startDownloadProcess(*item);
 }
 
-void DownloadQueue::logMessage(const QString &message)
+void DownloadQueue::abandonPasswordRequest()
 {
-    if (m_logOutput) {
-        m_logOutput->append(message);
+    DownloadItem *item = currentItem();
+    if (!item) {
+        return;
     }
+    item->status = DownloadStatus::Failed;
+    item->finishTime = QDateTime::currentDateTime();
+    item->failure = FailureKind::PasswordRequired;
+    item->errorHeadline = QStringLiteral("This video has a password");
+    item->errorDetail = QStringLiteral("No password was entered. Retry and type the video password when asked.");
+    log(QStringLiteral("Video password not provided"), LogLevel::Error);
+    emit itemUpdated(*item);
+    finishCurrent();
+}
+
+void DownloadQueue::log(const QString &text, LogLevel level)
+{
+    emit logLine(text, level);
+}
+
+void DownloadQueue::emitUpdated(const DownloadItem &item, bool throttle)
+{
+    if (throttle) {
+        if (m_progressThrottle.isValid() && m_progressThrottle.elapsed() < PROGRESS_EMIT_INTERVAL_MS
+            && item.progress < 100) {
+            return;
+        }
+        m_progressThrottle.restart();
+    }
+    emit itemUpdated(item);
 }
 
 void DownloadQueue::killCurrentProcessTree()
@@ -594,7 +782,8 @@ void DownloadQueue::killCurrentProcessTree()
 void DownloadQueue::cleanupCurrentProcess()
 {
     if (m_currentProcess) {
-        if (m_currentProcess->state() == QProcess::Running) {
+        if (m_currentProcess->state() != QProcess::NotRunning) {
+            m_currentProcess->disconnect(this);
             killCurrentProcessTree();
             m_currentProcess->waitForFinished(3000);
         }
