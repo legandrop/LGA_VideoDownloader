@@ -628,7 +628,12 @@ void ToolsUpdater::startExtract()
     if (!QFileInfo::exists(program)) {
         program = QStringLiteral("tar");
     }
-    args << QStringLiteral("-xf") << m_downloadPath << QStringLiteral("-C") << extractDir() << binaryName(Tool::Deno);
+    // tar.exe lee sus argumentos en el code page ANSI: una ruta absoluta con caracteres fuera
+    // de ese code page (p. ej. un usuario "日本" u "Ω") le llega rota. Se lo corre con la
+    // carpeta de extraccion como working directory (QProcess la pasa en UTF-16) y solo
+    // rutas relativas ASCII: el zip vive en .staging/dl y se extrae en .staging/extract.
+    args << QStringLiteral("-xf") << (QStringLiteral("../dl/") + QFileInfo(m_downloadPath).fileName()) << QStringLiteral("-C")
+         << QStringLiteral(".") << binaryName(Tool::Deno);
 #else
     program = QStringLiteral("/usr/bin/ditto");
     args << QStringLiteral("-x") << QStringLiteral("-k") << m_downloadPath << extractDir();
@@ -636,6 +641,9 @@ void ToolsUpdater::startExtract()
 
     QProcess *process = new QProcess(this);
     m_process = process;
+#ifdef Q_OS_WIN
+    process->setWorkingDirectory(extractDir());
+#endif
     QTimer *timer = new QTimer(process);
     timer->setSingleShot(true);
     connect(timer, &QTimer::timeout, process, [process]() { process->kill(); });

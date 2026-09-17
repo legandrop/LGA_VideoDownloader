@@ -9,6 +9,8 @@
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 #include <QNetworkRequest>
@@ -31,6 +33,37 @@ QString userAgent()
     return QStringLiteral("LGA_VideoDownloader/%1").arg(QCoreApplication::applicationVersion());
 }
 
+QString updateDirPath()
+{
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+        .filePath(QStringLiteral("LGA_VideoDownloader_updates"));
+}
+
+// Borra los instaladores de updates anteriores (~80 MB cada uno) que quedan en la carpeta
+// de updates, salvo keepName. Solo mira esa carpeta y solo archivos con nombre de asset;
+// si uno sigue en uso (instalador todavia corriendo) el borrado falla y se reintenta la
+// proxima vez.
+void removeOldInstallers(const QString &keepName)
+{
+    QDir dir(updateDirPath());
+    if (!dir.exists()) {
+        return;
+    }
+    const QStringList filters = {QStringLiteral("VideoDownloader_Setup_v*.exe"),
+                                 QStringLiteral("LGA_Video_Downloader_Mac_v*.zip")};
+    const QFileInfoList entries = dir.entryInfoList(filters, QDir::Files | QDir::Hidden | QDir::NoSymLinks);
+    for (const QFileInfo &entry : entries) {
+        if (entry.fileName() == keepName) {
+            continue;
+        }
+        if (QFile::remove(entry.absoluteFilePath())) {
+            qDebug() << "[UpdateService] Instalador viejo borrado" << entry.fileName();
+        } else {
+            qDebug() << "[UpdateService] No se pudo borrar el instalador viejo" << entry.fileName();
+        }
+    }
+}
+
 } // namespace
 
 // Asset de update por plataforma. En Windows el instalador conserva el nombre
@@ -48,6 +81,7 @@ UpdateService::UpdateService(QObject *parent)
     : QObject(parent)
     , m_network(new QNetworkAccessManager(this))
 {
+    removeOldInstallers(QString());
 }
 
 UpdateService::~UpdateService()
@@ -233,13 +267,13 @@ void UpdateService::installAppUpdate()
         return;
     }
 
-    const QString updateDir = QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
-                                  .filePath(QStringLiteral("LGA_VideoDownloader_updates"));
+    const QString updateDir = updateDirPath();
     if (!QDir().mkpath(updateDir)) {
         failInstall(QStringLiteral("The update folder could not be created."));
         return;
     }
     discardPartialDownload();
+    removeOldInstallers(m_assetName);
     m_downloadTargetPath = QDir(updateDir).filePath(m_assetName);
     m_downloadFile = new QSaveFile(m_downloadTargetPath);
     if (!m_downloadFile->open(QIODevice::WriteOnly)) {

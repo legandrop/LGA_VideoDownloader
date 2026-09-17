@@ -45,6 +45,8 @@ Lo que mas cuesta si no se lee:
   - macOS: `./compilar.sh`
 - No hacer builds limpios automaticamente. No borrar `build/` salvo pedido explicito.
 - Si la compilacion falla, corregir el problema SIN limpiar primero.
+- **Capturas de QA sin escritorio**: `VideoDownloader.exe --ui-shot <estado> <out.png> [--dpr N] [--size WxH]` construye la ventana real con datos de prueba (estados `empty`, `downloading`, `error`, `tools`, `help`, `help-update`, `help-downloading`), la dibuja a un PNG nuevo sin mostrarla ni tomar el foco y deja al lado un `<out.png>.json` con la geometria de los widgets y las fuentes resueltas.
+- `--qa-walkthrough <links.txt> <carpeta-existente> [--qa-isolated <carpeta-descargas>]` corre la app completa con `QT_QPA_PLATFORM=offscreen`: pega los links, aprieta Download y guarda capturas numeradas hasta que la cola termina, mas `items.json` y `log.txt`. Hace descargas reales; `--qa-isolated` usa config y tools de prueba en vez de los del usuario.
 
 ## Herramientas de terceros
 
@@ -75,6 +77,7 @@ Lo que mas cuesta si no se lee:
 - El rename va SOLO en el bloque `if(APPLE)` del CMakeLists: en Windows el ejecutable y el instalador siguen siendo `VideoDownloader`.
 - **Esta app TIENE auto-updater** (`UpdateService`): lee el tag del redirect de `github.com/legandrop/LGA_VideoDownloader/releases/latest` (sin API) y del MISMO release baja `SHA256SUMS` y el asset `VideoDownloader_Setup_v<version>.exe` (Windows) o `LGA_Video_Downloader_Mac_v<version>.zip` (macOS, por ahora solo abre la pagina del release). Cambiar el nombre de esos artefactos rompe la actualizacion de las copias instaladas.
 - **Todo release lleva `SHA256SUMS`** (formato `hash  nombre`) con las lineas de TODOS los assets de update: sin la linea de su asset, la app no ofrece el update. `instalador.bat` genera `installer/SHA256SUMS` y `deploy.sh` genera `deploy/SHA256SUMS`; si se publican las dos plataformas en el mismo release, se suben concatenados en un solo `SHA256SUMS`.
+- **No hay que instalar nada**: `dmgbuild` va vendorizado en `tools/macos/vendor/` (Python puro, corre con el `python3` del sistema) y el fondo lo genera `tools/macos/make_dmg_background.js` con AppKit via JXA. El `.tiff` esta versionado en `resources/dmg/`; regenerarlo solo hace falta si cambia el diseno o el nombre.
 
 ## Tools en runtime (yt-dlp y deno)
 
@@ -82,7 +85,6 @@ Lo que mas cuesta si no se lee:
 - Orden de resolucion: carpeta de usuario → copia de la instalacion (`tools/`, `toolsmac/`) → PATH en macOS.
 - El swap de un binario verificado se hace en UN solo punto: al arrancar y antes de lanzar cada proceso de yt-dlp (`ToolsManager::applyStagedTools`).
 - Para probar sin publicar: `LGA_VD_GITHUB_BASE` (tools y app), que solo acepta `localhost`/`127.0.0.1`.
-- **No hay que instalar nada**: `dmgbuild` va vendorizado en `tools/macos/vendor/` (Python puro, corre con el `python3` del sistema) y el fondo lo genera `tools/macos/make_dmg_background.js` con AppKit via JXA. El `.tiff` esta versionado en `resources/dmg/`; regenerarlo solo hace falta si cambia el diseno o el nombre.
 
 ## Commits
 
