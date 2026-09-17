@@ -1,3 +1,6 @@
+v0.92:
+        - `RELEASE / ACTUALIZACION AUTOMATICA VALIDADA DESDE LA APP` La prueba de la 0.91 no pudo hacerse desde la app: el firewall local retenia la conexion del ejecutable recien instalado y el instalador se corrio a mano con los mismos argumentos. La 0.92 no agrega funciones: existe para que una 0.91 instalada, ya con acceso a red, recorra el circuito completo por si sola (aviso de version nueva, descarga del instalador, verificacion del hash, instalacion silenciosa y relanzamiento). [ Release - Actualizacion automatica validada desde la app ]
+
 v0.91:
         - `RELEASE / PRIMERA ACTUALIZACION AUTOMATICA PUBLICADA` La 0.90 es la primera version publicada en GitHub Releases con el instalador y su `SHA256SUMS`, y el auto-update de la app solo se puede probar de punta a punta si existe una version posterior. La 0.91 no agrega funciones: existe para validar el circuito completo desde una 0.90 instalada (detectar el release nuevo, bajar el instalador, verificar el hash, instalar en silencio sobre la misma carpeta y relanzar). [ Release - Primera actualizacion automatica publicada ]
 
