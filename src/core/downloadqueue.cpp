@@ -1,10 +1,14 @@
 #include "videodownloader/downloadqueue.h"
 #include "videodownloader/browserdetect.h"
+#include "videodownloader/linkparser.h"
 #include "videodownloader/toolsmanager.h"
 
 #include <QDir>
 #include <QFileInfo>
 #include <QProcessEnvironment>
+#include <QRegularExpression>
+#include <QSet>
+#include <QThread>
 #include <QTimer>
 
 #ifdef Q_OS_UNIX
@@ -76,10 +80,15 @@ DownloadQueue::DownloadQueue(ToolsManager *toolsManager, QObject *parent)
 
 DownloadQueue::~DownloadQueue()
 {
+    // Cierre de la app con una descarga en curso: se corta y se borran sus parciales.
+    const bool hadProcess = hasActiveProcess();
     if (m_currentProcess) {
         m_currentProcess->disconnect(this);
     }
     cleanupCurrentProcess();
+    if (hadProcess) {
+        removePartialFiles();
+    }
 }
 
 int DownloadQueue::addDownload(const QString &url, const DownloadOptions &options)
@@ -98,19 +107,21 @@ int DownloadQueue::addDownload(const QString &url, const DownloadOptions &option
     return item.id;
 }
 
-int DownloadQueue::addInvalidLink(const QString &text)
+int DownloadQueue::addNoLinkFound(const QString &text)
 {
+    // Una sola tarjeta para todo el texto pegado que no tenia links, no una por palabra.
     DownloadItem item;
     item.id = m_nextId++;
-    item.url = text;
+    // La tarjeta muestra el texto pegado (recortado) como titulo.
+    item.url = text.simplified().left(80);
     item.status = DownloadStatus::Failed;
-    item.failure = FailureKind::InvalidLink;
-    item.errorHeadline = QStringLiteral("Not a Vimeo or YouTube link");
-    item.errorDetail = QStringLiteral("Check the link, paste it again and press Download.");
+    item.failure = FailureKind::NoLinkFound;
+    item.errorHeadline = QStringLiteral("No link found");
+    item.errorDetail = QStringLiteral("Copy the address of the video (it starts with https://) and paste it again.");
     item.finishTime = QDateTime::currentDateTime();
     m_items.append(item);
     emit itemAdded(item);
-    log(QStringLiteral("Skipped \"%1\": not a Vimeo or YouTube link").arg(text), LogLevel::Warning);
+    log(QStringLiteral("No link found in the pasted text"), LogLevel::Warning);
     return item.id;
 }
 
@@ -175,7 +186,7 @@ void DownloadQueue::removeItem(int id)
 void DownloadQueue::retryItem(int id, const DownloadOptions &options)
 {
     DownloadItem *target = findItem(id);
-    if (!target || !target->isFinished() || target->failure == FailureKind::InvalidLink
+    if (!target || !target->isFinished() || !target->isRetryable()
         || target->status == DownloadStatus::Completed) {
         return;
     }
@@ -290,11 +301,15 @@ void DownloadQueue::stopAllForShutdown()
             entry.status = DownloadStatus::Cancelled;
         }
     }
+    const bool hadProcess = hasActiveProcess();
     if (m_currentProcess) {
         // Sin senales: que no dispare onDownloadFinished ni encadene la proxima descarga.
         m_currentProcess->disconnect(this);
     }
     cleanupCurrentProcess();
+    if (hadProcess) {
+        removePartialFiles();
+    }
     m_currentId = -1;
     log(QStringLiteral("Downloads stopped to install an update"), LogLevel::Warning);
 }
@@ -307,6 +322,10 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
     m_stdoutDecoder = QStringDecoder(QStringDecoder::Utf8);
     m_stderrDecoder = QStringDecoder(QStringDecoder::Utf8);
     m_errorLogged = false;
+    m_liveAbort = false;
+    m_destinations.clear();
+    m_formatIds.clear();
+    m_mergeTarget.clear();
     m_expectedTotal = 0;
     m_streamCount = 1;
     m_streamIndex = -1;
@@ -356,21 +375,37 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
     // ruta final. Con --print yt-dlp pasa a modo silencioso y simulado; --no-quiet y
     // --no-simulate lo devuelven al modo normal.
     arguments << "--newline" << "--no-quiet" << "--no-simulate" << "--progress" << "--no-colors";
+    // Los mensajes propios de yt-dlp (no solo --print) en UTF-8, igual que PYTHONIOENCODING.
+    arguments << "--encoding" << "utf-8";
     arguments << "--progress-template"
               << "download:[vdprog] %(progress.downloaded_bytes)s|%(progress.total_bytes)s|"
                  "%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s";
     // filesize_approx del formato elegido: con video + audio es la suma de los dos, y permite
     // ponderar el progreso por bytes en vez de 50/50 por stream.
-    arguments << "--print" << "before_dl:[vdinfo] %(format_id)s|%(resolution)s|%(ext)s|%(filesize,filesize_approx)s|%(title)s";
+    // Transmisiones en vivo: el filtro hace que yt-dlp las saltee antes de lanzar ffmpeg
+    // (cortar el proceso despues dejaba un ffmpeg huerfano escribiendo). live_status en
+    // [vdinfo] queda como segunda red.
+    // "!=?" deja pasar a los sitios que no informan live_status (SoundCloud, Dailymotion...):
+    // con "!=" un campo ausente no pasa el filtro y todo se marcaba como vivo.
+    arguments << "--match-filter" << "live_status!=?is_live & live_status!=?is_upcoming";
+    arguments << "--print"
+              << "before_dl:[vdinfo] %(format_id)s|%(resolution)s|%(ext)s|%(filesize,filesize_approx)s|%(live_status)s|"
+                 "%(extractor_key)s|%(title)s";
     arguments << "--print" << "after_move:[vdfile] %(filepath)s";
 
     if (item.options.format == OutputFormat::AudioM4a) {
         arguments << "--format" << "ba[ext=m4a]/ba/b" << "--extract-audio" << "--audio-format" << "m4a";
-    } else if (item.options.quality == VideoQuality::Compatible) {
-        // H.264 + AAC primero aunque haya mas resolucion en AV1/VP9: abre en cualquier editor.
-        arguments << "--format-sort" << "vcodec:h264,res,acodec:aac" << "--merge-output-format" << "mp4";
     } else {
-        arguments << "--format-sort" << "res" << "--merge-output-format" << "mp4" << "--remux-video" << "mp4";
+        // "/ba" al final: sitios solo de audio (SoundCloud) bajan el audio en vez de fallar
+        // por no tener video.
+        arguments << "--format" << "bv*+ba/b/ba";
+        if (item.options.quality == VideoQuality::Compatible) {
+            // H.264 + AAC primero aunque haya mas resolucion en AV1/VP9: abre en cualquier editor.
+            arguments << "--format-sort" << "vcodec:h264,res,acodec:aac" << "--merge-output-format" << "mp4";
+        } else {
+            // Remux solo de contenedores de video: un audio suelto queda en su formato.
+            arguments << "--format-sort" << "res" << "--merge-output-format" << "mp4" << "--remux-video" << "webm>mp4/mkv>mp4";
+        }
     }
 
     const QString ffmpegPath = m_toolsManager ? m_toolsManager->getFfmpegPath() : QString();
@@ -395,6 +430,9 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
         }
     }
 
+    // No se reescribe vimeo.com/<id> a player.vimeo.com/video/<id>: con yt-dlp 2026.08 el
+    // player lista formatos sin sesion, pero todos los HLS salen "DRM protected" al bajar
+    // (probado con 76979871; otros ids dieron 401 o sin formatos). Vimeo necesita cookies.
     arguments << item.url;
 
     QString login = QStringLiteral("no browser session");
@@ -490,21 +528,38 @@ void DownloadQueue::handleStdoutLine(const QString &line)
     }
 
     if (line.startsWith(kInfoTag)) {
-        // format_id|resolution|ext|size|title (el titulo va al final porque puede traer '|').
+        // format_id|resolution|ext|size|live_status|extractor|title (titulo al final: puede traer '|').
         const QString rest = line.mid(kInfoTag.size());
         const QStringList parts = rest.split(QLatin1Char('|'));
-        if (parts.size() >= 5) {
+        if (parts.size() >= 7) {
+            item->extractor = parts.at(5) == QLatin1String("NA") ? QString() : parts.at(5);
+            const QString liveStatus = parts.at(4);
+            if (liveStatus == QLatin1String("is_live") || liveStatus == QLatin1String("is_upcoming")) {
+                // Un vivo no termina nunca y ffmpeg corta a los segundos con un codigo crudo:
+                // se aborta antes de bajar nada, con un error entendible.
+                item->title = parts.mid(6).join(QLatin1Char('|'));
+                abortLive(*item, liveStatus == QLatin1String("is_upcoming"));
+                return;
+            }
+            m_formatIds = parts.at(0).split(QLatin1Char('+'), Qt::SkipEmptyParts);
             m_streamCount = parts.at(0).count(QLatin1Char('+')) + 1;
             const QString resolution = parts.at(1);
             item->resolution = resolution == QLatin1String("audio only") || resolution == QLatin1String("NA")
                                    ? QString() : resolution;
             item->extension = item->options.format == OutputFormat::AudioM4a ? QStringLiteral("m4a") : parts.at(2);
             m_expectedTotal = qMax<qint64>(0, parseBytes(parts.at(3)));
-            item->title = parts.mid(4).join(QLatin1Char('|'));
+            item->title = parts.mid(6).join(QLatin1Char('|'));
             log(QStringLiteral("Format: %1 %2 · %3").arg(item->resolution.isEmpty() ? QStringLiteral("audio") : item->resolution,
                                                           item->extension, item->title));
             emitUpdated(*item);
         }
+        return;
+    }
+
+    if (line.contains(QLatin1String("does not pass filter")) && line.contains(QLatin1String("live_status"))) {
+        // yt-dlp salteo el vivo por --match-filter y termina solo, sin bajar nada.
+        markLive(*item, false);
+        log(line, LogLevel::Detail);
         return;
     }
 
@@ -514,7 +569,9 @@ void DownloadQueue::handleStdoutLine(const QString &line)
     }
 
     if (line.startsWith(QLatin1String("[download] Destination:"))) {
-        // Cada stream (video, audio) arranca con su propio Destination.
+        // Cada stream (video, audio) arranca con su propio Destination. Se guarda la ruta
+        // para poder borrar sus parciales si la descarga se cancela.
+        m_destinations.append(line.mid(int(qstrlen("[download] Destination:"))).trimmed());
         if (m_streamIndex >= 0) {
             m_streamDoneBase += m_lastStreamTotal;
             m_lastStreamTotal = 0;
@@ -522,6 +579,14 @@ void DownloadQueue::handleStdoutLine(const QString &line)
         m_streamIndex = qMin(m_streamIndex + 1, qMax(0, m_streamCount - 1));
     } else if (line.startsWith(QLatin1String("[Merger]")) || line.startsWith(QLatin1String("[ExtractAudio]"))
                || line.startsWith(QLatin1String("[VideoRemuxer]")) || line.startsWith(QLatin1String("[FixupM3u8]"))) {
+        if (line.startsWith(QLatin1String("[Merger]"))) {
+            // [Merger] Merging formats into "<ruta>"
+            const int open = line.indexOf(QLatin1Char('"'));
+            const int close = line.lastIndexOf(QLatin1Char('"'));
+            if (open >= 0 && close > open) {
+                m_mergeTarget = line.mid(open + 1, close - open - 1);
+            }
+        }
         item->finishing = true;
         item->progress = 100;
         item->speedBytes = -1;
@@ -581,7 +646,12 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
     const QString &err = item.errorMessage;
     const bool usedCookies = !item.options.cookiesBrowser.isEmpty() || !item.options.cookiesFile.isEmpty();
     const QString browser = BrowserDetect::displayName(item.options.cookiesBrowser);
-    const QString site = item.isVimeo() ? QStringLiteral("Vimeo") : QStringLiteral("YouTube");
+    // Nombre del sitio para los textos: los conocidos por dominio, si no el extractor de yt-dlp.
+    QString site = LinkParser::siteName(item.url);
+    if (site.isEmpty()) {
+        site = item.extractor.isEmpty() || item.extractor == QLatin1String("Generic") ? QStringLiteral("the site")
+                                                                                     : item.extractor;
+    }
     const auto has = [&err](const char *text) { return err.contains(QLatin1String(text), Qt::CaseInsensitive); };
 
     if (has("Could not copy Chrome cookie database")) {
@@ -600,8 +670,11 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
         item.errorDetail = QStringLiteral("Open %1, sign in to %2, then retry.").arg(browser, site);
     } else if (has("Sign in to confirm") || has("only works when logged-in") || has("--cookies-from-browser or --cookies")
                || has("members-only") || has("Join this channel") || has("Private video") || has("This video is private")
-               || has("logged-in") || has("login required")) {
+               || has("logged-in") || has("login required") || has("log in for access") || has("You must log in")
+               || has("--cookies for the authentication") || has("account credentials")) {
+        // Generico por sitio: Instagram, TikTok o Facebook privados piden sesion igual que YouTube.
         item.failure = FailureKind::NeedsSignIn;
+        const QString shownSite = site == QLatin1String("the site") ? QStringLiteral("This site") : site;
         if (has("confirm your age")) {
             item.errorHeadline = QStringLiteral("Sign in to confirm your age");
         } else if (has("members-only") || has("Join this channel")) {
@@ -609,7 +682,7 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
         } else if (has("private")) {
             item.errorHeadline = QStringLiteral("This video is private");
         } else {
-            item.errorHeadline = QStringLiteral("This video needs a signed-in account");
+            item.errorHeadline = QStringLiteral("%1 needs a signed-in account").arg(shownSite);
         }
         if (!usedCookies) {
 #ifdef Q_OS_WIN
@@ -623,10 +696,25 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
             item.errorDetail = QStringLiteral("This session can't watch it. Sign in to %1 with an account that can, "
                                               "then retry.").arg(site);
         }
+    } else if (has("live event will begin") || has("Premieres in") || has("This live event has ended")
+               || has("live stream recording is not available")
+               || (has("ffmpeg exited with code") && has("live"))) {
+        // Vivos que no llegaron a [vdinfo] (programados) o que yt-dlp corto por su cuenta.
+        item.failure = FailureKind::LiveStream;
+        item.errorHeadline = QStringLiteral("Live streams aren't supported");
+        item.errorDetail = QStringLiteral("Only regular videos can be downloaded. If the stream is saved as a video "
+                                          "when it ends, paste that link.");
+    } else if (has("DRM protected")) {
+        // yt-dlp no descifra DRM. En Vimeo sin sesion es lo que devuelve el player publico.
+        item.failure = item.isVimeo() && !usedCookies ? FailureKind::NeedsSignIn : FailureKind::Generic;
+        item.errorHeadline = QStringLiteral("This video is protected (DRM)");
+        item.errorDetail = item.failure == FailureKind::NeedsSignIn
+            ? QStringLiteral("Vimeo only serves it to signed-in accounts. Pick your browser in Use cookies from and retry.")
+            : QStringLiteral("The site encrypts this video, so it can't be downloaded.");
     } else if (has("Unsupported URL") || has("is not a valid URL")) {
         item.failure = FailureKind::InvalidLink;
-        item.errorHeadline = QStringLiteral("This link doesn't point to a video");
-        item.errorDetail = QStringLiteral("Check the link, paste it again and press Download.");
+        item.errorHeadline = QStringLiteral("This site isn't supported");
+        item.errorDetail = QStringLiteral("There's no downloadable video at this link. Check the link or try the video's own page.");
     } else if (has("Video unavailable") || has("HTTP Error 404") || has("This video does not exist")) {
         item.failure = FailureKind::Unavailable;
         item.errorHeadline = QStringLiteral("Video unavailable");
@@ -644,6 +732,11 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
         item.failure = FailureKind::PasswordRequired;
         item.errorHeadline = QStringLiteral("This video has a password");
         item.errorDetail = QStringLiteral("Retry and enter the video password when asked.");
+    } else if (has("IP address is blocked")) {
+        // TikTok (y otros) bloquean descargas anonimas desde ciertas redes.
+        item.failure = FailureKind::Generic;
+        item.errorHeadline = QStringLiteral("%1 blocked this download").arg(site == QLatin1String("the site") ? QStringLiteral("The site") : site);
+        item.errorDetail = QStringLiteral("The site blocks your network. Pick a signed-in browser in Use cookies from, or retry later.");
     } else if (has("Requested format is not available")) {
         item.failure = FailureKind::Generic;
         item.errorHeadline = QStringLiteral("Format not available");
@@ -674,8 +767,13 @@ void DownloadQueue::onDownloadFinished(int exitCode, QProcess::ExitStatus exitSt
     item->etaSeconds = -1;
     item->finishing = false;
 
-    if (item->status == DownloadStatus::Cancelled) {
+    if (m_liveAbort) {
+        // El item ya quedo fallido con su explicacion en abortLive().
+        item->status = DownloadStatus::Failed;
+        removePartialFiles();
+    } else if (item->status == DownloadStatus::Cancelled) {
         log(QStringLiteral("Cancelled %1").arg(item->title.isEmpty() ? item->url : item->title), LogLevel::Warning);
+        removePartialFiles();
     } else if (exitStatus == QProcess::NormalExit && exitCode == 0) {
         item->status = DownloadStatus::Completed;
         item->progress = 100;
@@ -709,6 +807,92 @@ void DownloadQueue::onDownloadFinished(int exitCode, QProcess::ExitStatus exitSt
 
     emit itemUpdated(*item);
     finishCurrent();
+}
+
+void DownloadQueue::abortLive(DownloadItem &item, bool upcoming)
+{
+    markLive(item, upcoming);
+    killCurrentProcessTree();
+}
+
+void DownloadQueue::markLive(DownloadItem &item, bool upcoming)
+{
+    m_liveAbort = true;
+    item.failure = FailureKind::LiveStream;
+    item.errorHeadline = upcoming ? QStringLiteral("This live stream hasn't started")
+                                  : QStringLiteral("Live streams aren't supported");
+    item.errorDetail = upcoming ? QStringLiteral("Live streams can't be downloaded. Once it ends and is saved as a video, "
+                                                 "paste the link again.")
+                                : QStringLiteral("Only regular videos can be downloaded. If the stream is saved as a video "
+                                                 "when it ends, paste that link.");
+    log(QStringLiteral("%1 · %2").arg(item.errorHeadline, item.url), LogLevel::Error);
+}
+
+void DownloadQueue::removePartialFiles()
+{
+    // Solo archivos de ESTE item, derivados de las rutas que yt-dlp anuncio: el .part, su
+    // .ytdl, los fragmentos .part-FragN y, si habia video + audio por separado, los streams
+    // intermedios <titulo>.f<formato>.<ext> y el .temp de la union. Nunca el archivo final.
+    QStringList candidates;
+    QList<QRegularExpression> fragmentPatterns;
+    const auto addBase = [&](const QString &path) {
+        candidates << path + QStringLiteral(".part") << path + QStringLiteral(".ytdl");
+        fragmentPatterns << QRegularExpression(QStringLiteral("^%1\\.part-Frag\\d+(\\.part)?$")
+                                                   .arg(QRegularExpression::escape(QFileInfo(path).fileName())));
+    };
+    for (const QString &destination : std::as_const(m_destinations)) {
+        addBase(destination);
+        const QString name = QFileInfo(destination).fileName();
+        for (const QString &formatId : std::as_const(m_formatIds)) {
+            if (m_formatIds.size() > 1 && name.contains(QStringLiteral(".f%1.").arg(formatId))) {
+                candidates << destination;
+            }
+        }
+    }
+    if (!m_mergeTarget.isEmpty()) {
+        const QFileInfo merged(m_mergeTarget);
+        const QString temp = merged.dir().filePath(QStringLiteral("%1.temp.%2").arg(merged.completeBaseName(), merged.suffix()));
+        addBase(temp);
+        candidates << temp;
+    }
+
+    QSet<QString> folders;
+    for (const QString &destination : std::as_const(m_destinations)) {
+        folders.insert(QFileInfo(destination).absolutePath());
+    }
+    for (const QString &folder : std::as_const(folders)) {
+        const QStringList entries = QDir(folder).entryList(QDir::Files);
+        for (const QString &entry : entries) {
+            for (const QRegularExpression &pattern : std::as_const(fragmentPatterns)) {
+                if (pattern.match(entry).hasMatch()) {
+                    candidates << QDir(folder).filePath(entry);
+                }
+            }
+        }
+    }
+
+    int removed = 0;
+    for (const QString &path : std::as_const(candidates)) {
+        if (!QFileInfo::exists(path)) {
+            continue;
+        }
+        // ffmpeg recien muerto puede tener el archivo abierto unos instantes.
+        bool ok = QFile::remove(path);
+        for (int attempt = 0; !ok && attempt < 5; ++attempt) {
+            QThread::msleep(150);
+            ok = QFile::remove(path);
+        }
+        if (ok) {
+            ++removed;
+        } else {
+            log(QStringLiteral("Could not remove the partial file %1").arg(QDir::toNativeSeparators(path)), LogLevel::Warning);
+        }
+    }
+    if (removed > 0) {
+        log(QStringLiteral("Removed %1 partial %2").arg(removed).arg(removed == 1 ? QStringLiteral("file") : QStringLiteral("files")));
+    }
+    m_destinations.clear();
+    m_mergeTarget.clear();
 }
 
 void DownloadQueue::finishCurrent()

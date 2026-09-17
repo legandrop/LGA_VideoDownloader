@@ -59,7 +59,6 @@ private:
     void setupServices();
     void loadSettings();
     DownloadOptions currentOptions() const;
-    static bool isValidVideoUrl(const QString &url);
     static bool isValidDownloadPath(const QString &path);
 
     void onDownloadRequested();

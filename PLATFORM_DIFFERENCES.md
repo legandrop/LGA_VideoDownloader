@@ -1,199 +1,42 @@
-# Platform Differences - VideoDownloader
+# Platform Differences - LGA Video Downloader
 
-This document explains the differences in yt-dlp and ffmpeg installation and management between different operating systems.
+How the download tools, browser sessions and app updates behave on each platform.
 
-## macOS Implementation ✅ (Fully Implemented)
+## Tools (yt-dlp, deno, ffmpeg)
 
-### Detection Method
-- **Primary**: Checks for binaries in `toolsmac/` subdirectory within the application bundle
-- **Fallbacks**: Homebrew locations → system PATH if local tools are missing
+| | Windows | macOS |
+|---|---|---|
+| Bundled copy ("seed") | `<app>/tools/` (`ffmpeg.exe` + DLLs; `yt-dlp.exe`/`deno.exe` only if the build copied them) | `LGA Video Downloader.app/Contents/MacOS/toolsmac/` |
+| Auto-updated copy | `%LOCALAPPDATA%\LGA\VideoDownloader\tools\` | `~/Library/Application Support/LGA/VideoDownloader/tools/` |
+| Resolution order (yt-dlp, deno) | user folder → seed | user folder → seed → Homebrew/PATH |
+| ffmpeg | seed only | seed → Homebrew/PATH |
 
-### Installation Method
-- **Install**: Downloads binaries directly to `toolsmac/` subdirectory
-- **Update**: Downloads latest yt-dlp and deno (ffmpeg not updated)
-- **yt-dlp**: `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos`
-- **ffmpeg**: `https://evermeet.cx/ffmpeg/getrelease/zip` (extracted automatically)
-- **deno**: `https://github.com/denoland/deno/releases/latest/download/deno-<arch>-apple-darwin.zip` (extracted automatically)
+- `ToolsUpdater` checks GitHub at startup for yt-dlp and deno: the tag is resolved once from the `releases/latest` redirect, the binary is streamed to disk and verified against the release SHA-256 file (no hash, no install).
+- Verified binaries wait in `tools/.staging` and are swapped in only when no yt-dlp process is running (at startup, before each download, or when the update ends with an idle queue).
+- ffmpeg is not auto-updated.
+- Downloads added while the tools are still installing wait in the queue and start by themselves.
+- YouTube needs deno: its path is passed with `--js-runtimes deno:<path>`.
 
-### Requirements
-- Internet connection for download
-- Write permissions in application bundle
-- **No external dependencies** (completely self-contained)
+## Browser sessions (Use cookies from)
 
-### Status
-- ✅ Fully implemented and tested
-- ✅ Detection working (local binaries prioritized)
-- ✅ Installation working (direct download)
-- ✅ Updates working (yt-dlp + deno)
-- ✅ **Completely portable** (no Homebrew required)
-- ✅ **QuickTime compatible** formats by default
-- ✅ **YouTube JS challenges supported** (deno runtime)
+- The app never asks for a username or password. It passes `--cookies-from-browser <browser>` or `--cookies <cookies.txt>`; with **None** no cookies are used.
+- Only installed browsers are listed (detected by their profile folder).
+- **Windows:** Chrome, Edge, Brave, Opera and Vivaldi use app-bound encryption and yt-dlp cannot read them. They are listed disabled ("not supported on Windows"); Firefox is marked recommended.
+- **macOS:** Safari, Firefox and the Chromium browsers can be used.
 
----
+## App updates
 
-## Windows Implementation ✅ (Fully Implemented)
+- `UpdateService` reads the latest GitHub release of `legandrop/LGA_VideoDownloader` and requires the asset hash in its `SHA256SUMS`.
+- **Windows:** downloads `VideoDownloader_Setup_v<version>.exe`, verifies it, stops the queue (killing yt-dlp and its children) and runs the installer silently over the same folder; the installer reopens the app.
+- **macOS:** "Update" opens the release page.
+- Development builds can check for updates but refuse to install.
 
-### Detection Method
-- Checks for `yt-dlp.exe` and `ffmpeg.exe` in the `tools/` subdirectory relative to the application executable
-- Uses `QFile::exists()` to verify file presence
+## Process control
 
-### Installation Method
-- **Install**: Downloads `yt-dlp.exe` from GitHub releases to `tools/` subdirectory
-- **Update**: Downloads latest `yt-dlp.exe` and replaces existing file (ffmpeg not updated)
-- **yt-dlp**: `https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe`
-- **ffmpeg**: Manual placement in `tools/` directory (not auto-downloaded)
-- Automatically creates `tools/` directory if it doesn't exist
+- **Windows:** cancelling kills the whole yt-dlp tree with `taskkill /T /F` (the onefile launcher runs the real yt-dlp as a child, which runs ffmpeg/deno).
+- **macOS:** yt-dlp is started in its own process group and the group is killed.
+- After cancelling, the partial files of that download are removed.
 
-### Requirements
-- Internet connection for yt-dlp download
-- Write permissions in application directory and `tools/` subdirectory
-- Manual ffmpeg placement for full YouTube support
-- No external dependencies (self-contained)
+## Linux
 
-### Status
-- ✅ Fully implemented
-- ✅ Detection logic working
-- ✅ Download logic working
-- ✅ File replacement logic working
-- ✅ Completely portable
-
----
-
-## Linux/Other Platforms ❌ (Not Implemented)
-
-### Status
-- ❌ Not implemented
-- Shows placeholder message
-- Suggests manual installation via package managers
-
-### Future Implementation
-Could use similar approaches to macOS/Windows:
-- Package managers (apt, yum, pacman, etc.)
-- Direct binary download
-- AppImage or Flatpak distribution
-
----
-
-## Key Differences Summary
-
-| Feature | macOS | Windows | Linux |
-|---------|-------|---------|-------|
-| Detection | toolsmac/ → Homebrew → PATH | tools/ subdirectory | Not implemented |
-| Installation | GitHub/evermeet.cx → toolsmac/ | GitHub → tools/ | Not implemented |
-| Updates | yt-dlp + deno auto, ffmpeg manual | yt-dlp auto, ffmpeg manual | Not implemented |
-| Dependencies | None (self-contained) | None (self-contained) | Not implemented |
-| Status | ✅ Fully working | ✅ Fully working | ❌ Not implemented |
-
----
-
-## Binary Locations
-
-### macOS
-```
-VideoDownloader.app/
-└── Contents/
-    └── MacOS/
-        ├── VideoDownloader
-        └── toolsmac/
-            ├── yt-dlp
-            ├── ffmpeg
-            └── deno
-```
-
-### Windows
-```
-VideoDownloader/
-├── VideoDownloader.exe
-└── tools/
-    ├── yt-dlp.exe
-    ├── ffmpeg.exe
-    └── [ffmpeg DLLs]
-```
-
----
-
-## YouTube Support Requirements
-
-### Why ffmpeg is Required for YouTube
-
-YouTube videos often come in separate audio and video streams that need to be merged:
-- **Video Stream**: Contains video without audio
-- **Audio Stream**: Contains audio without video
-- **ffmpeg**: Merges these streams into a single playable file
-
-### YouTube vs Vimeo Differences
-
-| Feature | Vimeo | YouTube |
-|---------|-------|---------|
-| **Authentication** | Username + Password required | No credentials needed |
-| **Bot Detection** | Minimal | Requires browser cookies |
-| **JS Challenge** | None | Requires JS runtime (deno) |
-| **Format Selection** | `bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]` | `bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]` |
-| **ffmpeg Location** | `--ffmpeg-location` required | `--ffmpeg-location` required |
-| **Cookies** | Not needed | `--cookies-from-browser chrome` |
-| **Output Format** | MP4 with H.264 + AAC (QuickTime compatible) | MP4 with H.264 + AAC (QuickTime compatible) |
-| **Recodificación** | Ninguna (formato nativo compatible) | Ninguna (formato nativo compatible) |
-
-### Platform-Specific YouTube Support
-
-| Platform | yt-dlp | ffmpeg | YouTube Support | Notes |
-|----------|--------|--------|-----------------|-------|
-| macOS | ✅ Local | ✅ Local | ✅ Full | QuickTime-compatible formats, JS runtime incluido |
-| Windows | ✅ Local | ✅ Local | ✅ Full | Standard videos work automatically |
-| Linux | ❌ Manual | ❌ Manual | ⚠️ Manual | Requires manual setup |
-
-### YouTube Cookie Support
-
-The application automatically uses Chrome browser cookies for all YouTube downloads to avoid bot detection and access restrictions. This provides:
-
-- **Access to age-restricted content** (if logged in to YouTube in Chrome)
-- **Better success rate** for all YouTube videos
-- **No manual authentication required**
-
-Requirements:
-- Chrome browser installed on the system
-- User has visited YouTube in Chrome (to have cookies available)
-
-The application automatically detects YouTube URLs and adds `--cookies-from-browser chrome` and `--js-runtimes deno:...` to the yt-dlp command.
-
----
-
-## Installation Process Flow
-
-### macOS
-1. Check `toolsmac/yt-dlp`, `toolsmac/ffmpeg` y `toolsmac/deno` (local binaries)
-2. If missing, download from GitHub/evermeet.cx to `toolsmac/` subdirectory
-3. Extract and set executable permissions
-4. **Ready to use** (completely self-contained, no Homebrew required)
-
-### Windows
-1. Check `tools/yt-dlp.exe` and `tools/ffmpeg.exe`
-2. If yt-dlp missing, download from GitHub
-3. If ffmpeg missing, show manual installation message
-4. Ready to use when both present
-
-### Linux
-1. Check system PATH for yt-dlp and ffmpeg
-2. Show manual installation instructions
-3. User must install via package manager
-
----
-
-## Update Process
-
-### Both macOS and Windows
-- **yt-dlp**: Automatically downloaded and replaced when "Update dlp" is clicked
-- **ffmpeg**: Not automatically updated (stable, less frequent updates needed)
-- **Process**: Download → Replace → Verify → Ready
-
----
-
-## Notes for Developers
-
-- All platform-specific code is wrapped in appropriate `#ifdef` blocks
-- Qt's networking classes (`QNetworkAccessManager`) handle downloads
-- File operations use Qt's cross-platform file handling
-- Error handling includes both network and file system errors
-- Progress reporting keeps user informed during downloads
-- Tools are stored in platform-specific subdirectories for organization
-- Both platforms now support completely portable, self-contained operation
+Not packaged. The code builds, but tools are taken from PATH and there is no auto-update.

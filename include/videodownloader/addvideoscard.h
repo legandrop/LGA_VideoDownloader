@@ -20,8 +20,8 @@ class AddVideosCard : public QFrame
 public:
     explicit AddVideosCard(QWidget *parent = nullptr);
 
-    // Links pegados, uno por renglon, sin vacios.
-    QStringList links() const;
+    // Texto tal como se pego; LinkParser separa los links.
+    QString linksText() const;
     void setLinksText(const QString &text);
     void clearLinks();
 

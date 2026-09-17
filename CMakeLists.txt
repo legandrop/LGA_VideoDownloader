@@ -91,6 +91,7 @@ set(SOURCES
     src/core/downloadqueue.cpp
     src/core/updateservice.cpp
     src/utils/browserdetect.cpp
+    src/utils/linkparser.cpp
     src/utils/toolsmanager.cpp
     src/utils/toolsupdater.cpp
     src/utils/versioncompare.cpp
@@ -110,6 +111,7 @@ set(HEADERS
     include/videodownloader/helpdialog.h
     include/videodownloader/uishot.h
     include/videodownloader/browserdetect.h
+    include/videodownloader/linkparser.h
     include/videodownloader/loglevel.h
     include/videodownloader/toolsmanager.h
     include/videodownloader/toolsupdater.h

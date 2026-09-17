@@ -30,11 +30,13 @@ enum class FailureKind {
     None,
     NeedsSignIn,        // edad, privado, miembros, Vimeo con sesion
     CookiesUnreadable,  // el navegador elegido no deja leer sus cookies
-    InvalidLink,        // no es un link de Vimeo ni de YouTube
+    InvalidLink,        // yt-dlp no soporta el sitio del link
     Unavailable,        // video borrado o inexistente
     Network,
     ToolsMissing,
     PasswordRequired,
+    LiveStream,         // transmision en vivo: no se puede bajar, reintentar no sirve
+    NoLinkFound,        // texto pegado sin ningun link
     Generic
 };
 
@@ -60,6 +62,7 @@ struct DownloadItem {
 
     // Datos que llegan de yt-dlp mientras descarga (vacios o -1 hasta que se conocen).
     QString title;
+    QString extractor;       // extractor_key de yt-dlp ("Dailymotion", "Generic"...)
     QString resolution;      // "1920x1080"
     QString extension;       // "mp4" / "m4a"
     QString filePath;        // archivo final, despues de unir y mover
@@ -80,6 +83,12 @@ struct DownloadItem {
         return status == DownloadStatus::Completed ||
                status == DownloadStatus::Failed ||
                status == DownloadStatus::Cancelled;
+    }
+
+    // Fallos que se arreglan reintentando (con otra sesion, otra red, etc.).
+    bool isRetryable() const {
+        return failure != FailureKind::InvalidLink && failure != FailureKind::LiveStream
+            && failure != FailureKind::NoLinkFound;
     }
 
     bool isYouTube() const {

@@ -56,7 +56,7 @@ AddVideosCard::AddVideosCard(QWidget *parent)
     header->setSpacing(10);
     auto *title = new QLabel(QStringLiteral("Add videos"), this);
     title->setObjectName(QStringLiteral("cardTitle"));
-    auto *caption = new QLabel(QStringLiteral("Vimeo and YouTube"), this);
+    auto *caption = new QLabel(QStringLiteral("YouTube, Vimeo, SoundCloud, Instagram and 1,800+ more sites"), this);
     caption->setObjectName(QStringLiteral("cardCaption"));
     header->addWidget(title);
     header->addWidget(caption);
@@ -69,7 +69,7 @@ AddVideosCard::AddVideosCard(QWidget *parent)
     linksRow->setSpacing(10);
     m_links = new QPlainTextEdit(this);
     m_links->setObjectName(QStringLiteral("urlInput"));
-    m_links->setPlaceholderText(QStringLiteral("Paste one or more Vimeo or YouTube links, one per line…"));
+    m_links->setPlaceholderText(QStringLiteral("Paste one or more video links, one per line…"));
     m_links->setFixedHeight(58);
     m_links->setTabChangesFocus(true);
     m_links->setLineWrapMode(QPlainTextEdit::NoWrap);
@@ -179,21 +179,9 @@ bool AddVideosCard::eventFilter(QObject *watched, QEvent *event)
     return QFrame::eventFilter(watched, event);
 }
 
-QStringList AddVideosCard::links() const
+QString AddVideosCard::linksText() const
 {
-    QStringList result;
-    const QStringList lines = m_links->toPlainText().split(QLatin1Char('\n'));
-    for (const QString &line : lines) {
-        // Varios links pegados en un mismo renglon separados por espacios tambien valen.
-        const QStringList words = line.split(QLatin1Char(' '), Qt::SkipEmptyParts);
-        for (const QString &word : words) {
-            const QString trimmed = word.trimmed();
-            if (!trimmed.isEmpty()) {
-                result.append(trimmed);
-            }
-        }
-    }
-    return result;
+    return m_links->toPlainText();
 }
 
 void AddVideosCard::setLinksText(const QString &text)

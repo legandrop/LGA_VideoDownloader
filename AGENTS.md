@@ -11,11 +11,11 @@
 
 ## Que es esta app
 
-Descarga videos de **Vimeo y YouTube** con `yt-dlp`, con cola de descargas y credenciales guardadas. Qt/C++ multiplataforma.
+Descarga videos de **cualquier sitio que soporte `yt-dlp`** (YouTube, Vimeo, SoundCloud, Instagram, TikTok...), con cola de descargas y sesion tomada de las cookies del navegador (nunca usuario/contrasena). Qt/C++ multiplataforma. Los sitios conocidos tienen nombre propio en la tarjeta (`LinkParser::siteName`); el resto muestra el extractor de yt-dlp o "Other site".
 
 **Importante:** "Vimeo" aparece en el repo en DOS roles distintos y no son intercambiables:
 
-- **El servicio**: `vimeo.com` en la logica de formato (`src/core/downloadqueue.cpp`), `isVimeoUrl()`, el placeholder de credenciales. Eso es funcional y NO se renombra.
+- **El servicio**: `vimeo.com` como sitio (`DownloadItem::isVimeo()`, `LinkParser`, textos de error de sesion, la migracion del AppData `VimeoDownloader` en `main.cpp`). Eso es funcional y NO se renombra.
 - **El nombre del producto**: se renombra cuando corresponda.
 
 Antes de cualquier barrido de nombres, separar los dos.

@@ -1,172 +1,56 @@
-# VideoDownloader
+# LGA Video Downloader
 
-Una aplicación Qt/C++ multiplataforma para descargar videos de Vimeo y YouTube usando yt-dlp con sistema de cola de descargas. **Completamente portable** - incluye todas las herramientas necesarias.
-
-## Características
-
-- **Interfaz gráfica moderna** con tema oscuro (basado en el estilo de PipeSync)
-- **Soporte para URLs de Vimeo y YouTube** con validación en tiempo real
-- **Sistema de cola de descargas** - procesa múltiples descargas secuencialmente
-- **Contador persistente** - rastrea descargas completadas durante la sesión
-- **Descarga usando yt-dlp + ffmpeg** con credenciales de usuario
-- **Herramientas locales** - yt-dlp, ffmpeg y deno incluidos en la aplicación (no requiere instalación global)
-- **YouTube robusto** - cookies de Chrome + runtime JS (Deno) para resolver challenges y acceder a formatos completos
-- **Formatos compatibles con QuickTime** - descarga directamente en MP4 con H.264 + AAC
-- **Configuración persistente** - guarda credenciales de Vimeo de forma segura
-- **Log en tiempo real** - muestra todo el proceso de descarga
-- **Control total de cola** - botón Cancel para resetear todo
-- **Compatible con macOS y Windows**
-- **Aplicación completamente portable** - funciona sin instalación previa
-
-## Requisitos
-
-### Para usar la aplicación:
-- **Completamente autónoma** - Incluye yt-dlp, ffmpeg y deno en el paquete de la aplicación
-- **No requiere instalación previa** - Las herramientas se descargan automáticamente si es necesario
-  ```bash
-  # Las herramientas se incluyen automáticamente:
-  # - macOS: toolsmac/ dentro del bundle (.app/Contents/MacOS/toolsmac/)
-  # - Windows: tools/ en el directorio de la aplicación
-
-  # El botón "Update dlp" descarga la versión más reciente desde GitHub
-  # El botón "Install Tools" instala herramientas iniciales si no existen
-  ```
-
-### Para compilar:
-- Qt 6.8.2
-- CMake 3.16+
-- C++17 compatible compiler
-- macOS 10.15+ (para macOS)
-
-## Compilación
-
-### Windows
-```batch
-compilar.bat
-```
-
-### macOS
-```bash
-./compilar.sh
-```
-
-### Crear versión portable
-```batch
-# Windows
-deploy.bat
-
-# macOS
-./deploy.sh
-```
-
-### Limpiar archivos de compilación
-```batch
-# Windows
-limpiar.bat
-
-# macOS
-./limpiar.sh
-```
-
-## Estructura del Proyecto
-
-```
-VideoDownloader/
-├── CMakeLists.txt          # Configuración de CMake
-├── compilar.sh             # Script de compilación para desarrollo
-├── deploy.sh               # Script de despliegue para producción
-├── limpiar.sh              # Script para limpiar la compilación
-├── include/                # Archivos de cabecera (.h)
-│   └── videodownloader/
-├── src/                    # Código fuente (.cpp)
-│   ├── core/               # Lógica de descarga y cola
-│   ├── ui/                 # Interfaz de usuario
-│   └── utils/              # Utilidades y gestión de herramientas
-├── resources/              # Recursos (estilos, iconos)
-│   ├── styles/
-│   └── icons/
-├── cmake/                  # Archivos de configuración CMake
-├── tools/                  # Herramientas externas Windows (yt-dlp.exe, ffmpeg.exe)
-├── toolsmac/               # Herramientas externas macOS (yt-dlp, ffmpeg, deno)
-├── build/                  # Carpeta de compilación (generada)
-└── deploy/                 # Versión portable (generada)
-```
+Aplicación Qt/C++ (Windows y macOS) para descargar videos con [yt-dlp](https://github.com/yt-dlp/yt-dlp): YouTube, Vimeo, SoundCloud, Instagram y el resto de los sitios que yt-dlp soporta. Es una interfaz con cola de descargas; el trabajo lo hacen yt-dlp, ffmpeg y deno, que vienen con la app y se actualizan solos.
 
 ## Uso
 
-1. **Ejecuta la aplicación**
-2. **Configura las credenciales de Vimeo**:
-   - Ingresa tu usuario y contraseña de Vimeo
-   - Haz clic en "Save" para guardar las credenciales
-3. **Configura la carpeta de descarga**:
-   - Ingresa la ruta de descarga o usa "Browse" para seleccionar
-   - Haz clic en "Save" para guardar la configuración
-4. **Instala herramientas** (si no están instaladas):
-   - Haz clic en "Install Tools" para instalar yt-dlp y ffmpeg automáticamente
-   - Si ya están instaladas, usa "Update dlp" para actualizarlas
-5. **Descarga videos**:
-   - Ingresa una URL válida de Vimeo o YouTube
-   - Haz clic en "Download" para agregar a la cola (se habilita cuando todo está configurado)
-   - Puedes agregar múltiples URLs - se procesarán secuencialmente
-   - Monitorea el progreso en la sección Progress y Log
-   - Usa "Cancel" para cancelar toda la cola y resetear contadores
+1. Pegá uno o varios links en **Add videos** (uno por renglón, o mezclados con texto: la app se queda solo con los links y no repite los duplicados).
+2. Elegí **Format** (MP4 con video y audio, o solo audio M4A), **Quality** (*Most compatible (H.264)*, que abre en cualquier editor, o *Best quality*) y **Save to**.
+3. Apretá **Download** (o Ctrl+Enter). Cada link es una tarjeta en **Queue** con su progreso; se descarga de a uno.
 
-### Configuración
+- **Sesión (Use cookies from):** no se piden usuario ni contraseña. Para videos privados, de miembros o con restricción de edad se usa la sesión de un navegador donde ya estés logueado. Solo aparecen los navegadores instalados. En Windows, Chrome/Edge/Brave/Opera/Vivaldi cifran sus cookies y no se pueden leer: usá Firefox o un archivo `cookies.txt`.
+- **Errores:** la tarjeta explica qué pasó y cómo seguir (por ejemplo "Sign in to confirm your age" con *Retry with Firefox*). Las transmisiones en vivo se rechazan al empezar ("Live streams aren't supported") y los sitios que yt-dlp no soporta terminan en "This site isn't supported".
+- **Cancelar:** la X de la tarjeta, *Cancel all* o cerrar la app cortan yt-dlp con sus procesos hijos y borran los archivos parciales de esa descarga (`.part`, `.ytdl`, fragmentos). Nunca archivos completos ni de otras descargas.
+- **Log:** siempre visible abajo, con filtros All/Warnings/Errors y botón Copy.
+- **Help** (icono `?`): versión, actualizaciones, versiones de yt-dlp/ffmpeg/deno y créditos.
 
-La aplicación guarda las credenciales de Vimeo en:
-- **macOS**: `~/Library/Application Support/LGA/VideoDownloader/config.ini`
-- **Windows**: `%APPDATA%\LGA\VideoDownloader\config.ini`
+Configuración: `%APPDATA%\LGA\VideoDownloader\config.ini` (Windows) o `~/Library/Application Support/LGA/VideoDownloader/config.ini` (macOS).
 
-### Interfaz de Usuario
+## Actualizaciones
 
-La aplicación tiene 4 secciones principales:
+- **yt-dlp y deno:** al abrir la app se buscan versiones nuevas en GitHub (tag fijo, SHA-256 obligatorio) y se instalan en la carpeta de datos del usuario. El reemplazo se hace solo cuando no hay una descarga corriendo.
+- **La app:** se busca el último release de GitHub con su `SHA256SUMS`. Si hay uno nuevo, aparece "Update available" arriba a la derecha y el botón Update en Help. En Windows descarga el instalador verificado e instala sobre la misma carpeta; en macOS abre la página del release.
+- **ffmpeg** viene con la app y no se actualiza solo.
 
-1. **Video URL**: Campo de entrada para URL de Vimeo/YouTube + botón Download
-2. **Progress**: Contador de cola (actual/total) + barra de progreso + botón Cancel
-3. **Settings**: Configuración en 3 filas:
-   - Fila 1: `Username | Password | Save`
-   - Fila 2: `Download Folder | Browse`
-   - Fila 3: `Tools Button` (Install/Update dlp)
-4. **Log**: Terminal en tiempo real con todo el proceso de cola
+Detalle por plataforma: [PLATFORM_DIFFERENCES.md](PLATFORM_DIFFERENCES.md). Cola y parseo de yt-dlp: [DOWNLOAD_QUEUE_SYSTEM.md](DOWNLOAD_QUEUE_SYSTEM.md).
 
-### Comando equivalente
+## Compilación
 
-La aplicación ejecuta internamente comandos optimizados:
+Requisitos: Qt 6.8.2, CMake 3.16+, compilador C++17.
 
-**Para Vimeo (con credenciales):**
 ```bash
-# Para videos estándar con formatos MP4 disponibles:
-yt-dlp -u "usuario@email.com" -p "contraseña" --video-password "password_video" --output "/ruta/descarga/%(title).200s.%(ext)s" --restrict-filenames --ffmpeg-location "/ruta/a/ffmpeg" "URL_DE_VIMEO"
-
-# Para videos que solo ofrecen HLS streaming (se omite --format):
-yt-dlp -u "usuario@email.com" -p "contraseña" --video-password "password_video" --output "/ruta/descarga/%(title).200s.%(ext)s" --restrict-filenames --ffmpeg-location "/ruta/a/ffmpeg" "URL_DE_VIMEO"
+./compilar.bat      # Windows (siempre este script, no cmake a mano)
+./compilar.sh       # macOS
+./deploy.bat        # Windows: versión portable
+./deploy.sh --zip --dmg   # macOS: .zip de actualización y .dmg de instalación
 ```
 
-**Para YouTube (sin credenciales, con cookies automáticas y runtime JS):**
+### Capturas de UI sin abrir ventanas
+
 ```bash
-yt-dlp --output "/ruta/descarga/%(title).200s.%(ext)s" --restrict-filenames --format "bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]" --ffmpeg-location "/ruta/a/ffmpeg" --cookies-from-browser chrome --js-runtimes "deno:/ruta/a/deno" "URL_DE_YOUTUBE"
+VideoDownloader.exe --ui-shot <estado> <salida.png> [--dpr 1.5] [--size 1200x860]
 ```
 
-### Características técnicas
+Estados: `empty`, `downloading`, `error`, `tools`, `other-errors`, `help`, `help-update`, `help-downloading`. Dibuja la ventana real con datos de prueba y escribe al lado un `.json` con la geometría. `--qa-walkthrough <links.txt> <carpeta> --qa-isolated <destino>` corre la app real sin ventana (plataforma offscreen), pega los links, aprieta Download y guarda capturas.
 
-- **Formatos adaptativos**: Para YouTube usa MP4 preferido, para Vimeo deja que yt-dlp elija el mejor formato disponible (MP4 o HLS)
-- **Soporte completo para Vimeo**: Incluye videos con contraseña y diferentes tipos de formato (MP4/HLS streaming)
-- **Formatos QuickTime**: Descarga directamente en MP4 con H.264 + AAC cuando disponible (compatible con QuickTime, Preview, VLC)
-- **Nombres seguros**: `--restrict-filenames` convierte caracteres especiales a ASCII seguro
-- **Herramientas locales**: yt-dlp, ffmpeg y deno incluidos en la aplicación (toolsmac/ en macOS, tools/ en Windows)
-- **Sin recodificación**: Los videos se descargan directamente en formatos compatibles
+## Estructura
 
-### Sistema de Cola de Descargas
-
-La aplicación incluye un sistema de cola:
-
-- **Cola secuencial**: Las descargas se procesan una por una
-- **Contador persistente**: Formato (actual/total) que persiste durante la sesión
-- **Control total**: Botón Cancel resetea toda la cola a (0/0)
-- **Auto-inicio**: La cola comienza automáticamente al agregar elementos
-- **Feedback visual**: Barra de progreso siempre visible, activa durante descargas
-
-Para más detalles, consulta: [DOWNLOAD_QUEUE_SYSTEM.md](DOWNLOAD_QUEUE_SYSTEM.md)
-
-
-
+```
+include/videodownloader/   Cabeceras
+src/core/                  DownloadQueue (cola y yt-dlp), UpdateService (update de la app)
+src/ui/                    MainWindow, AddVideosCard, QueueView, LogView, HelpDialog, tema
+src/utils/                 ToolsManager/ToolsUpdater (tools), BrowserDetect, LinkParser
+src/qa/                    --ui-shot y --qa-walkthrough
+resources/                 Fuentes Inter, iconos, fondo del DMG
+tools/, toolsmac/          yt-dlp, ffmpeg y deno que se distribuyen con la app
+```

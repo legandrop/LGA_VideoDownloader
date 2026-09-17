@@ -24,8 +24,8 @@ public:
 
     // Encola un link valido y devuelve su id. La cola arranca sola.
     int addDownload(const QString &url, const DownloadOptions &options);
-    // Registra un texto que no es un link soportado como item fallido (no lanza nada).
-    int addInvalidLink(const QString &text);
+    // Texto pegado sin ningun link: una unica tarjeta que lo explica.
+    int addNoLinkFound(const QString &text);
 
     // Cancela el item: si es el actual mata yt-dlp, si esta en cola lo marca cancelado.
     void cancelItem(int id);
@@ -82,6 +82,12 @@ private:
     void classifyFailure(DownloadItem &item) const;
     void flushStderrBuffer();
     void logStderrLine(const QString &line);
+    // Transmision en vivo detectada en [vdinfo]: marca el item y corta yt-dlp.
+    void abortLive(DownloadItem &item, bool upcoming);
+    // Solo marca el item como vivo no soportado (cuando yt-dlp ya lo salteo por el filtro).
+    void markLive(DownloadItem &item, bool upcoming);
+    // Borra los parciales del item actual (cancelado, vivo abortado o cierre de la app).
+    void removePartialFiles();
     void log(const QString &text, LogLevel level = LogLevel::Info);
     void emitUpdated(const DownloadItem &item, bool throttle = false);
 
@@ -98,6 +104,10 @@ private:
     QStringDecoder m_stdoutDecoder{QStringDecoder::Utf8};
     QStringDecoder m_stderrDecoder{QStringDecoder::Utf8};
     bool m_errorLogged = false;  // yt-dlp ya escribio una linea ERROR para el item actual
+    bool m_liveAbort = false;    // se corto yt-dlp porque el link es una transmision en vivo
+    QStringList m_destinations;  // rutas "[download] Destination:" del item actual
+    QStringList m_formatIds;     // formatos elegidos ("137", "140") para reconocer streams intermedios
+    QString m_mergeTarget;       // archivo final de la union de video + audio
     qint64 m_expectedTotal = 0;  // tamano anunciado del formato elegido (0 = desconocido)
 
     // Progreso de varios streams (video + audio se bajan por separado y despues se unen).

@@ -42,6 +42,7 @@ namespace {
 const QStringList kStates = {
     QStringLiteral("empty"), QStringLiteral("downloading"), QStringLiteral("error"), QStringLiteral("tools"),
     QStringLiteral("help"), QStringLiteral("help-update"), QStringLiteral("help-downloading"),
+    QStringLiteral("other-errors"),
 };
 
 constexpr int SHOT_WIDTH = 1200;
@@ -151,6 +152,57 @@ void loadError(MainWindow &window)
     addLog(log, "10:54:10", LogLevel::Done, QStringLiteral("Saved Director_Interview_Final_Cut.mp4 (268 MiB)"));
 }
 
+void loadOtherErrors(MainWindow &window)
+{
+    // Texto sin links, transmision en vivo y descarga cancelada (tanda de pruebas reales 0.93).
+    QueueView *queue = window.queueView();
+    DownloadItem noLink = fixtureItem(1, QStringLiteral("esto no es un link"), DownloadStatus::Failed, QString());
+    noLink.failure = FailureKind::NoLinkFound;
+    noLink.errorHeadline = QStringLiteral("No link found");
+    noLink.errorDetail = QStringLiteral("Copy the address of the video (it starts with https://) and paste it again.");
+    queue->upsertItem(noLink);
+
+    DownloadItem live = fixtureItem(2, QStringLiteral("https://www.youtube.com/watch?v=jfKfPfyJRdk"), DownloadStatus::Failed,
+                                    QStringLiteral("lofi hip hop radio - beats to relax/study to"));
+    live.failure = FailureKind::LiveStream;
+    live.errorHeadline = QStringLiteral("Live streams aren't supported");
+    live.errorDetail = QStringLiteral("Only regular videos can be downloaded. If the stream is saved as a video when it ends, paste that link.");
+    queue->upsertItem(live);
+
+    DownloadItem cancelled = fixtureItem(3, QStringLiteral("https://www.youtube.com/watch?v=aqz-KE-bpKQ"), DownloadStatus::Cancelled,
+                                         QStringLiteral("Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film"));
+    queue->upsertItem(cancelled);
+
+    // Chips de sitio: conocido por dominio, extractor de yt-dlp y sitio no soportado.
+    DownloadItem sound = fixtureItem(4, QStringLiteral("https://soundcloud.com/artist/track"), DownloadStatus::Completed,
+                                     QStringLiteral("Short Public Track"));
+    sound.totalBytes = 3LL * 1024 * 1024;
+    sound.extension = QStringLiteral("mp3");
+    sound.progress = 100;
+    queue->upsertItem(sound);
+    DownloadItem archive = fixtureItem(5, QStringLiteral("https://archive.org/details/example"), DownloadStatus::Completed,
+                                       QStringLiteral("Public Domain Film"));
+    archive.extractor = QStringLiteral("ArchiveOrg");
+    archive.totalBytes = 21LL * 1024 * 1024;
+    archive.resolution = QStringLiteral("640x480");
+    archive.extension = QStringLiteral("mp4");
+    archive.progress = 100;
+    queue->upsertItem(archive);
+    DownloadItem unsupported = fixtureItem(6, QStringLiteral("https://example.com"), DownloadStatus::Failed, QString());
+    unsupported.extractor = QStringLiteral("Generic");
+    unsupported.failure = FailureKind::InvalidLink;
+    unsupported.errorHeadline = QStringLiteral("This site isn't supported");
+    unsupported.errorDetail = QStringLiteral("There's no downloadable video at this link. Check the link or try the video's own page.");
+    queue->upsertItem(unsupported);
+
+    LogView *log = window.logView();
+    addLog(log, "11:02:10", LogLevel::Warning, QStringLiteral("No link found in the pasted text"));
+    addLog(log, "11:02:31", LogLevel::Info, QStringLiteral("Format: 1280x720 mp4 · lofi hip hop radio - beats to relax/study to"));
+    addLog(log, "11:02:31", LogLevel::Error, QStringLiteral("Live streams aren't supported · https://www.youtube.com/watch?v=jfKfPfyJRdk"));
+    addLog(log, "11:03:12", LogLevel::Warning, QStringLiteral("Cancelled Big Buck Bunny 60fps 4K - Official Blender Foundation Short Film"));
+    addLog(log, "11:03:13", LogLevel::Info, QStringLiteral("Removed 2 partial files"));
+}
+
 void loadTools(MainWindow &window)
 {
     window.tabHeader()->setToolsNotice(QStringLiteral("Installing download tools…"), QStringLiteral("neutral"), QString());
@@ -220,6 +272,16 @@ int runWalkthrough(const QStringList &args)
         MainWindow::setAutomaticUpdatesEnabled(false);
         QSettings settings(MainWindow::configPath(), QSettings::IniFormat);
         settings.setValue(QStringLiteral("download/folder"), downloadDir);
+        // --qa-setting clave=valor (repetible), p.ej. download/quality=best.
+        for (int i = 0; i < args.size() - 1; ++i) {
+            if (args.at(i) == QLatin1String("--qa-setting")) {
+                const QString pair = args.at(i + 1);
+                const int eq = pair.indexOf(QLatin1Char('='));
+                if (eq > 0) {
+                    settings.setValue(pair.left(eq), pair.mid(eq + 1));
+                }
+            }
+        }
         settings.sync();
         fprintf(stdout, "isolated config %s\n", qPrintable(MainWindow::configPath()));
     }
@@ -237,6 +299,9 @@ int runWalkthrough(const QStringList &args)
     };
 
     bool clicked = false;
+    bool cancelled = false;
+    const int cancelAtIndex = args.indexOf(QStringLiteral("--qa-cancel-at"));
+    const int cancelAt = cancelAtIndex >= 0 ? args.value(cancelAtIndex + 1).toInt() : -1;
     int idleChecks = 0;
     QElapsedTimer clock;
     clock.start();
@@ -262,6 +327,25 @@ int runWalkthrough(const QStringList &args)
             return;
         }
         save(QStringLiteral("progress"));
+        // --qa-cancel-at N: al pasar N% en el item que descarga, aprieta su boton Cancel real.
+        if (cancelAt >= 0 && !cancelled) {
+            for (const DownloadItem &item : queue->items()) {
+                if (item.status == DownloadStatus::Downloading && item.progress >= cancelAt) {
+                    for (QPushButton *button : window.queueView()->findChildren<QPushButton *>()) {
+                        if (button->toolTip() == QLatin1String("Cancel") && button->isVisibleTo(&window)) {
+                            fprintf(stdout, "cancel at %d%%\n", item.progress);
+                            button->click();
+                            cancelled = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            if (cancelled) {
+                save(QStringLiteral("cancelled"));
+                return;
+            }
+        }
         const bool idle = queue && queue->activeDownloadCount() == 0;
         idleChecks = idle ? idleChecks + 1 : 0;
         if (idleChecks >= 2 || clock.elapsed() > 10 * 60 * 1000) {
@@ -359,6 +443,9 @@ int runUiShot(const QStringList &args)
         card->setCookiesSource(QString(), QString());
         card->setCookiesAttention(true);
         loadError(window);
+    } else if (state == QLatin1String("other-errors")) {
+        card->setCookiesSource(QStringLiteral("firefox"), QString());
+        loadOtherErrors(window);
     } else if (state == QLatin1String("tools")) {
         card->setCookiesSource(QStringLiteral("firefox"), QString());
         loadTools(window);

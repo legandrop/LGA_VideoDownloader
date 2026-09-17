@@ -1,6 +1,7 @@
 #include "videodownloader/mainwindow.h"
 #include "videodownloader/addvideoscard.h"
 #include "videodownloader/downloadqueue.h"
+#include "videodownloader/linkparser.h"
 #include "videodownloader/logview.h"
 #include "videodownloader/queueview.h"
 #include "videodownloader/tabheader.h"
@@ -185,7 +186,7 @@ void MainWindow::setupServices()
         // Igual que el Retry de cada tarjeta: formato, calidad y carpeta de cada item, la
         // sesion elegida ahora.
         for (const DownloadItem &item : m_downloadQueue->items()) {
-            if (item.status == DownloadStatus::Failed && item.failure != FailureKind::InvalidLink) {
+            if (item.status == DownloadStatus::Failed && item.isRetryable()) {
                 onRetryRequested(item.id);
             }
         }
@@ -285,11 +286,12 @@ void MainWindow::onDownloadRequested()
     if (!m_downloadQueue) {
         return;
     }
-    const QStringList links = m_addCard->links();
-    if (links.isEmpty()) {
-        log(QStringLiteral("Paste at least one Vimeo or YouTube link, then press Download"), LogLevel::Warning);
+    const QString pasted = m_addCard->linksText();
+    if (pasted.trimmed().isEmpty()) {
+        log(QStringLiteral("Paste at least one video link, then press Download"), LogLevel::Warning);
         return;
     }
+    const LinkParser::Result links = LinkParser::parse(pasted);
 
     DownloadOptions options = currentOptions();
     if (!isValidDownloadPath(options.downloadDir)) {
@@ -304,17 +306,25 @@ void MainWindow::onDownloadRequested()
         return;
     }
 
-    int added = 0;
-    for (const QString &link : links) {
-        if (isValidVideoUrl(link)) {
-            m_downloadQueue->addDownload(link, options);
-            ++added;
-        } else {
-            m_downloadQueue->addInvalidLink(link);
-        }
+    // Solo lo que parece un link: texto suelto no crea una tarjeta por palabra.
+    // Cualquier sitio: si yt-dlp no lo soporta, la tarjeta lo dice.
+    for (const QString &link : links.links) {
+        m_downloadQueue->addDownload(link, options);
     }
+    const int added = links.links.size();
     if (added > 0) {
         log(added == 1 ? QStringLiteral("Added 1 link to the queue") : QStringLiteral("Added %1 links to the queue").arg(added));
+    }
+    if (links.ignoredWords > 0) {
+        if (added == 0) {
+            m_downloadQueue->addNoLinkFound(links.ignoredText);
+        } else {
+            log(QStringLiteral("%1 %2 ignored (not links): %3")
+                    .arg(links.ignoredWords)
+                    .arg(links.ignoredWords == 1 ? QStringLiteral("item") : QStringLiteral("items"))
+                    .arg(links.ignoredText.left(120)),
+                LogLevel::Warning);
+        }
     }
     m_addCard->clearLinks();
 }
@@ -558,16 +568,6 @@ void MainWindow::requestAppInstall()
     m_installReceived = -1;
     m_installTotal = -1;
     m_updateService->installAppUpdate();
-}
-
-bool MainWindow::isValidVideoUrl(const QString &url)
-{
-    if (url.isEmpty() || url.contains(QLatin1Char(' '))) {
-        return false;
-    }
-    return url.contains(QLatin1String("vimeo.com"), Qt::CaseInsensitive)
-        || url.contains(QLatin1String("youtube.com"), Qt::CaseInsensitive)
-        || url.contains(QLatin1String("youtu.be"), Qt::CaseInsensitive);
 }
 
 bool MainWindow::isValidDownloadPath(const QString &path)

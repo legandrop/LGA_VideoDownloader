@@ -1,4 +1,5 @@
 #include "videodownloader/queueview.h"
+#include "videodownloader/linkparser.h"
 #include "videodownloader/theme.h"
 #include "videodownloader/uiwidgets.h"
 
@@ -206,8 +207,16 @@ void QueueCard::setItem(const DownloadItem &item, int position, bool firefoxAvai
 {
     m_title->setText(item.title.isEmpty() ? shortUrl(item.url) : item.title);
 
-    const QString source = item.isYouTube() ? QStringLiteral("YouTube")
-                           : item.isVimeo() ? QStringLiteral("Vimeo") : QString();
+    // Chip del sitio: nombre propio si es conocido, si no el extractor de yt-dlp, si no
+    // "Other site". Sin chip para el texto pegado que no era un link.
+    QString source;
+    if (item.failure != FailureKind::NoLinkFound) {
+        source = LinkParser::siteName(item.url);
+        if (source.isEmpty()) {
+            source = !item.extractor.isEmpty() && item.extractor != QLatin1String("Generic") ? item.extractor
+                                                                                            : QStringLiteral("Other site");
+        }
+    }
     m_source->set(QStringLiteral("src"), source);
     m_source->setVisible(!source.isEmpty());
 
@@ -300,7 +309,7 @@ void QueueCard::setItem(const DownloadItem &item, int position, bool firefoxAvai
         m_fixText->setText(item.errorDetail);
         const bool sessionProblem = item.failure == FailureKind::NeedsSignIn || item.failure == FailureKind::CookiesUnreadable;
         const bool usingFirefox = item.options.cookiesBrowser == QLatin1String("firefox");
-        const bool retryable = item.failure != FailureKind::InvalidLink;
+        const bool retryable = item.isRetryable();
         // Error de sesion con Firefox disponible: el arreglo es un boton. Si no, Retry comun
         // (el usuario puede haber cambiado Use cookies from antes de reintentar).
         const bool offerFirefox = sessionProblem && firefoxAvailable && !usingFirefox;
@@ -356,7 +365,7 @@ QueueView::QueueView(QWidget *parent)
     emptyLayout->addSpacing(4);
     auto *emptyTitle = new QLabel(QStringLiteral("The queue is empty"), empty);
     emptyTitle->setObjectName(QStringLiteral("emptyTitle"));
-    auto *emptyText = new QLabel(QStringLiteral("Paste links above and press Download. Each link becomes a row here."), empty);
+    auto *emptyText = new QLabel(QStringLiteral("Paste video links above and press Download. Each link becomes a card here."), empty);
     emptyText->setObjectName(QStringLiteral("emptyText"));
     emptyLayout->addWidget(emptyTitle, 0, Qt::AlignHCenter);
     emptyLayout->addWidget(emptyText, 0, Qt::AlignHCenter);
@@ -500,7 +509,7 @@ void QueueView::refreshSummary()
         case DownloadStatus::Failed:
             ++failed;
             progressSum += 1.0;
-            if (item.failure != FailureKind::InvalidLink) {
+            if (item.isRetryable()) {
                 ++retryable;
             }
             break;
