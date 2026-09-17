@@ -1,0 +1,9 @@
+{
+    "name": "com.lga.videodownloader",
+    "description": "LGA Video Downloader",
+    "path": "VideoDownloader.exe",
+    "type": "stdio",
+    "allowed_origins": [
+        "chrome-extension://@VD_EXTENSION_ID@/"
+    ]
+}

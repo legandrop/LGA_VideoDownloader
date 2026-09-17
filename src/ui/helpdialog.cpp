@@ -161,6 +161,50 @@ HelpDialog::HelpDialog(QWidget *parent)
     rule->setObjectName(QStringLiteral("helpRule"));
     layout->addWidget(rule);
 
+    // Extension de navegador: como cargarla (sin Web Store, carpeta junto a la app).
+    const auto strong = [](const QString &text) {
+        return QStringLiteral("<span style=\"color:#F2F2F4;\">%1</span>").arg(text.toHtmlEscaped());
+    };
+    auto *extensionRow = new QHBoxLayout();
+    extensionRow->setSpacing(12);
+    extensionRow->addWidget(label(QStringLiteral("Browser extension"), "kvKeyStrong", this), 0, Qt::AlignVCenter);
+    extensionRow->addStretch(1);
+    auto *openExtension = Ui::button(QStringLiteral("Open extension folder"), QString(), QStringLiteral("sm"), this);
+    extensionRow->addWidget(openExtension, 0, Qt::AlignVCenter);
+    layout->addLayout(extensionRow);
+    auto *extensionIntro = label(QStringLiteral("Send the page you're on to the queue with one click, using your "
+                                                "browser session."), "helpBody", this);
+    extensionIntro->setWordWrap(true);
+    layout->addWidget(extensionIntro);
+    const QStringList steps = {
+        QStringLiteral("Open %1 (or %2, %3).").arg(strong(QStringLiteral("brave://extensions")),
+                                                   strong(QStringLiteral("chrome://extensions")),
+                                                   strong(QStringLiteral("edge://extensions"))),
+        QStringLiteral("Turn on %1 and keep it on: turning it off disables the extension.")
+            .arg(strong(QStringLiteral("Developer mode"))),
+        QStringLiteral("Click %1 and pick the extension folder.").arg(strong(QStringLiteral("Load unpacked"))),
+        QStringLiteral("Pin LGA Video Downloader in the toolbar."),
+    };
+    auto *stepsLayout = new QVBoxLayout();
+    stepsLayout->setSpacing(4);
+    for (int i = 0; i < steps.size(); ++i) {
+        auto *row = new QHBoxLayout();
+        row->setSpacing(8);
+        auto *number = label(QString::number(i + 1), "kvKey", this);
+        number->setFixedWidth(12);
+        row->addWidget(number, 0, Qt::AlignTop);
+        auto *text = label(steps.at(i), "helpBody", this);
+        text->setTextFormat(Qt::RichText);
+        text->setWordWrap(true);
+        row->addWidget(text, 1);
+        stepsLayout->addLayout(row);
+    }
+    layout->addLayout(stepsLayout);
+
+    auto *extensionRule = new QFrame(this);
+    extensionRule->setObjectName(QStringLiteral("helpRule"));
+    layout->addWidget(extensionRule);
+
     // Creditos: la app es una interfaz; el trabajo lo hacen estas herramientas.
     auto *body = label(QStringLiteral("This app is a <span style=\"color:#F2F2F4;\">download queue for yt-dlp</span>. "
                                       "yt-dlp does the downloading; FFmpeg and Deno support it. Credit for site "
@@ -207,6 +251,7 @@ HelpDialog::HelpDialog(QWidget *parent)
     connect(m_check, &QPushButton::clicked, this, &HelpDialog::checkRequested);
     connect(m_install, &QPushButton::clicked, this, &HelpDialog::installRequested);
     connect(m_cancelInstall, &QPushButton::clicked, this, &HelpDialog::cancelInstallRequested);
+    connect(openExtension, &QPushButton::clicked, this, &HelpDialog::openExtensionFolderRequested);
 
     setToolVersions({});
     setUpdateView(UpdateView());

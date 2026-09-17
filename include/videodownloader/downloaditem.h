@@ -1,6 +1,7 @@
 #ifndef DOWNLOADITEM_H
 #define DOWNLOADITEM_H
 
+#include <QByteArray>
 #include <QString>
 #include <QDateTime>
 
@@ -40,13 +41,23 @@ enum class FailureKind {
     Generic
 };
 
-// Opciones con las que se encola un link. Las cookies: como mucho uno de los dos cargado.
+// Opciones con las que se encola un link. Las cookies: como mucho una fuente cargada.
 struct DownloadOptions {
     QString cookiesBrowser;  // nombre que entiende --cookies-from-browser (firefox, chrome, ...)
     QString cookiesFile;     // ruta a un cookies.txt en formato Netscape (--cookies)
     QString downloadDir;
     OutputFormat format = OutputFormat::VideoMp4;
     VideoQuality quality = VideoQuality::Compatible;
+
+    // Link que llego desde la extension de navegador ("Brave", "Chrome"...; vacio si no).
+    QString fromBrowser;
+    // cookies.txt Netscape armado con la sesion que mando la extension. Solo en memoria: va a
+    // un archivo temporal mientras corre yt-dlp y tiene prioridad sobre las otras fuentes.
+    // Retry lo conserva (el combo "Use cookies from" no es la fuente de este item).
+    QByteArray sessionCookies;
+    int sessionCookieCount = 0;
+
+    bool hasSession() const { return !sessionCookies.isEmpty(); }
 };
 
 struct DownloadItem {

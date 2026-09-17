@@ -1,5 +1,9 @@
 #include "videodownloader/mainwindow.h"
 #include "videodownloader/LgaRegistry.h"
+#include "videodownloader/appinstance.h"
+#include "videodownloader/hostregistration.h"
+#include "videodownloader/nativehost.h"
+#include "videodownloader/sessioncookies.h"
 #include "videodownloader/theme.h"
 #include "videodownloader/uishot.h"
 
@@ -134,6 +138,13 @@ void purgeLegacyAccountCredentials()
 
 int main(int argc, char *argv[])
 {
+    // Modo host de Native Messaging: el navegador lanza este mismo exe con argv[1] =
+    // "chrome-extension://<ID>/". Se decide ANTES de QApplication: sin ventana, sin migracion,
+    // sin LgaRegistry, sin Theme y sin instancia unica. Lee un pedido, responde y sale.
+    if (NativeHost::isHostInvocation(argc, argv)) {
+        return NativeHost::run(argc, argv);
+    }
+
     QApplication app(argc, argv);
 
     // Configurar información de la aplicación
@@ -148,9 +159,26 @@ int main(int argc, char *argv[])
     if (app.arguments().contains(QStringLiteral("--qa-parse"))) {
         return runParseCheck(app.arguments());
     }
+    if (app.arguments().contains(QStringLiteral("--qa-cookies"))) {
+        return runCookiesCheck();
+    }
     if (app.arguments().contains(QStringLiteral("--ui-shot"))) {
         Theme::apply(app);
         return runUiShot(app.arguments());
+    }
+
+    // Instancia unica (el recorrido de QA queda afuera: corre aislado). Una segunda apertura
+    // trae la ventana existente al frente y sale sin tocar settings ni registro.
+    const bool walkthrough = app.arguments().contains(QStringLiteral("--qa-walkthrough"));
+    AppInstance instance;
+    int sweptSessionFiles = 0;
+    if (!walkthrough) {
+        if (!instance.acquire()) {
+            AppInstance::sendActivate(5000);
+            return 0;
+        }
+        // Restos de un cierre abrupto durante una descarga con la sesion de la extension.
+        sweptSessionFiles = SessionCookies::sweep();
     }
 
     // Debe correr ANTES de que MainWindow construya su QSettings.
@@ -175,9 +203,24 @@ int main(int argc, char *argv[])
         return runWalkthrough(app.arguments());
     }
 
+    // Registro del host de la extension (crea o repara la clave y el JSON si faltan o apuntan a
+    // otra copia; desde el arbol de build solo completa lo que falta).
+    const QString hostStatus = HostRegistration::ensureRegistered();
+
     // Crear y mostrar la ventana principal
     MainWindow window;
+    if (sweptSessionFiles > 0) {
+        window.log(QStringLiteral("Removed %1 leftover session %2").arg(sweptSessionFiles)
+                       .arg(sweptSessionFiles == 1 ? QStringLiteral("file") : QStringLiteral("files")));
+    }
+    if (!hostStatus.isEmpty()) {
+        window.log(hostStatus);
+    }
     window.show();
-    
+
+    // Los pedidos de la extension que llegaron mientras se construia la ventana esperaban aca.
+    instance.setHandlers([&window](const NativeHost::Request &request) { return window.handleBrowserRequest(request); },
+                         [&window]() { window.bringToFront(); });
+
     return app.exec();
 }

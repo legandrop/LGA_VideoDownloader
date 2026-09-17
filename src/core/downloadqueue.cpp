@@ -1,6 +1,7 @@
 #include "videodownloader/downloadqueue.h"
 #include "videodownloader/browserdetect.h"
 #include "videodownloader/linkparser.h"
+#include "videodownloader/sessioncookies.h"
 #include "videodownloader/toolsmanager.h"
 
 #include <QDir>
@@ -357,10 +358,30 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
 
     QStringList arguments;
 
+    // Sesion mandada por la extension: un cookies.txt temporal solo para esta corrida de yt-dlp.
+    // Se borra en cleanupCurrentProcess(), que corre en todos los finales (ok, error, cancel,
+    // cierre y update).
+    if (item.options.hasSession()) {
+        m_sessionCookiesFile = SessionCookies::writeTempFile(item.options.sessionCookies);
+        if (m_sessionCookiesFile.isEmpty()) {
+            item.status = DownloadStatus::Failed;
+            item.finishTime = QDateTime::currentDateTime();
+            item.failure = FailureKind::Generic;
+            item.errorHeadline = QStringLiteral("Couldn't use the browser session");
+            item.errorDetail = QStringLiteral("The app couldn't write a temporary file. Check the free disk space and retry.");
+            log(QStringLiteral("%1 · %2").arg(item.errorHeadline, item.errorDetail), LogLevel::Error);
+            emit itemUpdated(item);
+            finishCurrent();
+            return;
+        }
+    }
+
     // Autenticacion: cookies de una sesion ya iniciada en el navegador, o un cookies.txt.
     // No se usa -u/-p: pedirle a cada usuario el mail y la contrasena de su cuenta es
     // inseguro, y ademas YouTube no acepta login por contrasena desde yt-dlp.
-    if (!item.options.cookiesFile.isEmpty()) {
+    if (!m_sessionCookiesFile.isEmpty()) {
+        arguments << "--cookies" << m_sessionCookiesFile;
+    } else if (!item.options.cookiesFile.isEmpty()) {
         arguments << "--cookies" << item.options.cookiesFile;
     } else if (!item.options.cookiesBrowser.isEmpty()) {
         arguments << "--cookies-from-browser" << item.options.cookiesBrowser;
@@ -442,7 +463,10 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
     arguments << item.url;
 
     QString login = QStringLiteral("no browser session");
-    if (!item.options.cookiesFile.isEmpty()) {
+    if (item.options.hasSession()) {
+        // Solo la fuente y la cantidad: nunca nombres ni valores.
+        login = QStringLiteral("%1 session (extension)").arg(item.options.fromBrowser);
+    } else if (!item.options.cookiesFile.isEmpty()) {
         login = QStringLiteral("cookies file %1").arg(QDir::toNativeSeparators(item.options.cookiesFile));
     } else if (!item.options.cookiesBrowser.isEmpty()) {
         login = QStringLiteral("the %1 session").arg(BrowserDetect::displayName(item.options.cookiesBrowser));
@@ -663,8 +687,10 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
     if (err.isEmpty()) {
         err = item.errorMessage;
     }
-    const bool usedCookies = !item.options.cookiesBrowser.isEmpty() || !item.options.cookiesFile.isEmpty();
-    const QString browser = BrowserDetect::displayName(item.options.cookiesBrowser);
+    const bool extensionSession = item.options.hasSession();
+    const bool usedCookies = extensionSession || !item.options.cookiesBrowser.isEmpty() || !item.options.cookiesFile.isEmpty();
+    const QString browser = extensionSession ? item.options.fromBrowser
+                                             : BrowserDetect::displayName(item.options.cookiesBrowser);
     // Nombre del sitio para los textos: los conocidos por dominio, si no el extractor de yt-dlp.
     QString site = LinkParser::siteName(item.url);
     if (site.isEmpty()) {
@@ -703,7 +729,11 @@ void DownloadQueue::classifyFailure(DownloadItem &item) const
         } else {
             item.errorHeadline = QStringLiteral("%1 needs a signed-in account").arg(shownSite);
         }
-        if (!usedCookies) {
+        if (extensionSession) {
+            // Retry reusa las mismas cookies; si YouTube las roto, hacen falta unas frescas.
+            item.errorDetail = QStringLiteral("Your %1 session can't watch it. Sign in with an account that can, then "
+                                              "send it again from the browser extension.").arg(browser);
+        } else if (!usedCookies) {
 #ifdef Q_OS_WIN
             item.errorDetail = QStringLiteral("No browser session was used. Sign in to %1 in Firefox, pick Firefox in "
                                               "Use cookies from and retry.").arg(site);
@@ -1015,5 +1045,13 @@ void DownloadQueue::cleanupCurrentProcess()
         }
         m_currentProcess->deleteLater();
         m_currentProcess = nullptr;
+    }
+    // Despues de que yt-dlp termino: mientras corre lo lee y al salir lo reescribe.
+    if (!m_sessionCookiesFile.isEmpty()) {
+        if (!SessionCookies::removeFile(m_sessionCookiesFile)) {
+            log(QStringLiteral("Could not remove the temporary session file %1")
+                    .arg(QDir::toNativeSeparators(m_sessionCookiesFile)), LogLevel::Warning);
+        }
+        m_sessionCookiesFile.clear();
     }
 }

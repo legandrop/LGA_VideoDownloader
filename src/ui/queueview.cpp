@@ -300,6 +300,10 @@ void QueueCard::setItem(const DownloadItem &item, int position, bool firefoxAvai
     } else if (failed && !item.title.isEmpty()) {
         meta << shortUrl(item.url).toHtmlEscaped();
     }
+    if (!item.options.fromBrowser.isEmpty()) {
+        // Marca discreta: el link llego desde la extension de navegador.
+        meta << QStringLiteral("From browser");
+    }
     m_meta->setText(joinMeta(meta));
     m_meta->setVisible(!meta.isEmpty());
     m_meta->setToolTip(done ? QDir::toNativeSeparators(item.filePath.isEmpty() ? item.options.downloadDir : item.filePath)
@@ -315,7 +319,8 @@ void QueueCard::setItem(const DownloadItem &item, int position, bool firefoxAvai
         const bool retryable = item.isRetryable();
         // Error de sesion con Firefox disponible: el arreglo es un boton. Si no, Retry comun
         // (el usuario puede haber cambiado Use cookies from antes de reintentar).
-        const bool offerFirefox = sessionProblem && firefoxAvailable && !usingFirefox;
+        // Con la sesion de la extension el arreglo no es cambiar de navegador en la app.
+        const bool offerFirefox = sessionProblem && firefoxAvailable && !usingFirefox && !item.options.hasSession();
         m_retryBrowser->setVisible(offerFirefox);
         m_retry->setVisible(retryable && !offerFirefox);
         m_copyError->setVisible(!item.errorMessage.isEmpty());

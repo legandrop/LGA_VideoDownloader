@@ -15,4 +15,8 @@ int runWalkthrough(const QStringList &args);
 // `--qa-parse <texto.txt>`: lista los links que LinkParser extrae de un texto (sin red).
 int runParseCheck(const QStringList &args);
 
+// `--qa-cookies`: test sin red del armado de cookies.txt y de la validacion del protocolo de
+// la extension. Imprime PASS/FAIL por caso y devuelve 0 si pasan todos.
+int runCookiesCheck();
+
 #endif // UISHOT_H

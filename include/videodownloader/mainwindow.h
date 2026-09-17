@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QDateTime>
+#include <QJsonObject>
 #include <QMainWindow>
 #include <QPointer>
 
@@ -9,6 +10,7 @@
 #include "downloaditem.h"
 #include "helpdialog.h"
 #include "loglevel.h"
+#include "nativehost.h"
 
 class AddVideosCard;
 class DownloadQueue;
@@ -46,6 +48,12 @@ public:
     LogView *logView() const { return m_logView; }
 
     void log(const QString &text, LogLevel level = LogLevel::Info);
+
+    // Pedido de la extension de navegador (ya validado): encola el link con las opciones
+    // actuales y la sesion que mando la extension. Devuelve la respuesta para el host.
+    QJsonObject handleBrowserRequest(const NativeHost::Request &request);
+    // Segunda apertura del exe: trae esta ventana al frente.
+    void bringToFront();
 
     // <AppData>/LGA/VideoDownloader/config.ini (crea la carpeta si falta).
     static QString configPath();

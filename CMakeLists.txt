@@ -90,7 +90,11 @@ set(SOURCES
     src/qa/uishot.cpp
     src/core/downloadqueue.cpp
     src/core/updateservice.cpp
+    src/core/nativehost.cpp
+    src/core/appinstance.cpp
     src/utils/browserdetect.cpp
+    src/utils/hostregistration.cpp
+    src/utils/sessioncookies.cpp
     src/utils/linkparser.cpp
     src/utils/toolsmanager.cpp
     src/utils/toolsupdater.cpp
@@ -121,7 +125,31 @@ set(HEADERS
     include/videodownloader/LgaRegistry.h
     include/videodownloader/downloadqueue.h
     include/videodownloader/downloaditem.h
+    include/videodownloader/nativehost.h
+    include/videodownloader/appinstance.h
+    include/videodownloader/hostregistration.h
+    include/videodownloader/sessioncookies.h
 )
+
+# Extension de navegador: el ID fijo sale de extension/EXTENSION_ID.txt (unica fuente). El exe
+# lo usa para aceptar solo ese origen y para escribir el JSON del host.
+set(VD_EXTENSION_ID_FILE "${CMAKE_CURRENT_SOURCE_DIR}/extension/EXTENSION_ID.txt")
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${VD_EXTENSION_ID_FILE}")
+file(READ "${VD_EXTENSION_ID_FILE}" VD_EXTENSION_ID)
+string(STRIP "${VD_EXTENSION_ID}" VD_EXTENSION_ID)
+if(NOT VD_EXTENSION_ID MATCHES "^[a-p]+$")
+    message(FATAL_ERROR "extension/EXTENSION_ID.txt no tiene un ID de extension valido: '${VD_EXTENSION_ID}'")
+endif()
+string(LENGTH "${VD_EXTENSION_ID}" VD_EXTENSION_ID_LENGTH)
+if(NOT VD_EXTENSION_ID_LENGTH EQUAL 32)
+    message(FATAL_ERROR "extension/EXTENSION_ID.txt debe tener 32 caracteres a-p")
+endif()
+if(WIN32)
+    # JSON del host para el deploy de Windows (path relativo al exe). La app lo repara al
+    # arrancar si falta o no coincide.
+    configure_file("${CMAKE_CURRENT_SOURCE_DIR}/cmake/native_host_windows.json.in"
+                   "${CMAKE_CURRENT_BINARY_DIR}/com.lga.videodownloader.json" @ONLY NEWLINE_STYLE UNIX)
+endif()
 
 # Archivos de UI (comentado por ahora, no usamos archivos .ui)
 # set(UI_FILES
@@ -163,6 +191,7 @@ target_compile_definitions(${PROJECT_NAME} PRIVATE
     # ejemplo). Salen de CMake, asi que valen igual en Windows y macOS.
     LGA_BUILD_TREE_DIR="${CMAKE_BINARY_DIR}"
     LGA_SOURCE_TREE_DIR="${CMAKE_SOURCE_DIR}"
+    LGA_EXTENSION_ID="${VD_EXTENSION_ID}"
 )
 
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -228,6 +257,14 @@ if(APPLE)
             PROPERTIES MACOSX_PACKAGE_LOCATION "Resources")
         target_sources(${PROJECT_NAME} PRIVATE ${VD_MACOS_ICON_FILES})
     endif()
+
+    # Extension de navegador dentro del bundle (no verificado en Mac). Al arrancar, la app la
+    # copia a Application Support, que es la carpeta que se carga con "Load unpacked".
+    add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E remove_directory "$<TARGET_BUNDLE_CONTENT_DIR:${PROJECT_NAME}>/Resources/extension"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory "${CMAKE_CURRENT_SOURCE_DIR}/extension"
+                "$<TARGET_BUNDLE_CONTENT_DIR:${PROJECT_NAME}>/Resources/extension"
+        COMMENT "Copiando la extension de navegador al bundle")
 endif()
 
 # Instalación

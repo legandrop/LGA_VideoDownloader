@@ -8,6 +8,8 @@
 
 #include "videodownloader/downloadqueue.h"
 #include "videodownloader/linkparser.h"
+#include "videodownloader/nativehost.h"
+#include "videodownloader/sessioncookies.h"
 #include "videodownloader/toolsmanager.h"
 
 #include <QAbstractButton>
@@ -251,6 +253,62 @@ int runParseCheck(const QStringList &args)
     }
     fprintf(stdout, "ignored %d: %s\n", result.ignoredWords, qPrintable(result.ignoredText));
     return 0;
+}
+
+int runCookiesCheck()
+{
+    // Casos fijos, sin red ni archivos: una cookie de cada tipo y las que se deben descartar.
+    int failures = 0;
+    const auto check = [&failures](const char *name, bool ok) {
+        fprintf(stdout, "%s %s\n", ok ? "PASS" : "FAIL", name);
+        failures += ok ? 0 : 1;
+    };
+
+    const QByteArray message = R"({"v":1,"type":"download","url":"https://www.youtube.com/watch?v=jNQXAC9IVRw",
+        "title":"t","browser":"brave","cookies":[
+        {"domain":".youtube.com","hostOnly":false,"path":"/","secure":true,"httpOnly":true,"expirationDate":1790000000.75,"name":"SID","value":"abc"},
+        {"domain":"www.youtube.com","hostOnly":true,"path":"/watch","secure":false,"httpOnly":false,"name":"PREF","value":"f1=1"},
+        {"domain":".example.com","hostOnly":true,"path":"","secure":false,"httpOnly":false,"name":"a","value":"b"},
+        {"domain":"vimeo.com","hostOnly":false,"path":"/","secure":true,"httpOnly":false,"expirationDate":-5,"name":"c","value":"d"},
+        {"domain":"youtube.com","hostOnly":false,"path":"/","secure":true,"httpOnly":false,"name":"TAB","value":"x\ty"},
+        {"domain":"...","hostOnly":false,"path":"/","secure":true,"httpOnly":false,"name":"EMPTY","value":"z"}
+        ]})";
+    NativeHost::Request request;
+    QString code;
+    QString text;
+    const bool parsed = NativeHost::parseRequest(message, false, &request, &code, &text);
+    check("parse download with cookies", parsed && request.type == QLatin1String("download"));
+    check("drop cookies with tabs or empty domain", request.cookies.size() == 4 && request.droppedCookies == 2);
+
+    int accepted = 0;
+    const QByteArray netscape = SessionCookies::toNetscape(request.cookies, &accepted);
+    const QByteArray expected = "# Netscape HTTP Cookie File\n"
+                                "# Temporary file written by LGA Video Downloader.\n\n"
+                                "#HttpOnly_.youtube.com\tTRUE\t/\tTRUE\t1790000000\tSID\tabc\n"
+                                "www.youtube.com\tFALSE\t/watch\tFALSE\t0\tPREF\tf1=1\n"
+                                "example.com\tFALSE\t/\tFALSE\t0\ta\tb\n"
+                                ".vimeo.com\tTRUE\t/\tTRUE\t0\tc\td\n";
+    check("netscape text", netscape == expected && accepted == 4);
+    if (netscape != expected) {
+        fprintf(stdout, "--- got ---\n%s--- expected ---\n%s", netscape.constData(), expected.constData());
+    }
+
+    const auto rejects = [&](const char *name, const QByteArray &json, const char *wantedCode) {
+        NativeHost::Request ignored;
+        QString gotCode;
+        QString gotText;
+        const bool ok = NativeHost::parseRequest(json, false, &ignored, &gotCode, &gotText);
+        check(name, !ok && gotCode == QLatin1String(wantedCode));
+    };
+    rejects("reject broken json", R"({"v":1,"type":)", "bad_request");
+    rejects("reject newer protocol", R"({"v":2,"type":"ping"})", "unsupported_version");
+    rejects("reject file url", R"({"v":1,"type":"download","url":"file:///C:/Windows/win.ini"})", "bad_request");
+    rejects("reject javascript url", R"({"v":1,"type":"download","url":"javascript:void0"})", "bad_request");
+    rejects("reject cookie with wrong type", R"({"v":1,"type":"download","url":"https://a.com/","cookies":[{"domain":"a.com","path":"/","name":"n","value":1}]})", "bad_request");
+    rejects("reject activate from the browser", R"({"v":1,"type":"activate"})", "bad_request");
+    rejects("reject long title", QByteArray(R"({"v":1,"type":"download","url":"https://a.com/","title":")")
+                                     + QByteArray(513, 'x') + R"("})", "bad_request");
+    return failures == 0 ? 0 : 1;
 }
 
 int runWalkthrough(const QStringList &args)

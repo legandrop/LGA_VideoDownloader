@@ -75,6 +75,7 @@ private:
     void startDownloadProcess(DownloadItem &item);
     void handleStdoutLine(const QString &line);
     void finishCurrent();
+    // Mata yt-dlp si sigue vivo y, ya sin proceso, borra el cookies.txt temporal de la sesion.
     void cleanupCurrentProcess();
     // Mata yt-dlp CON sus hijos: el ejecutable onefile relanza el yt-dlp real como hijo, y
     // este a su vez lanza ffmpeg y deno. Matar solo el padre dejaba la descarga huerfana.
@@ -99,6 +100,7 @@ private:
     bool m_stopped = false;
 
     QProcess *m_currentProcess = nullptr;
+    QString m_sessionCookiesFile;  // cookies.txt temporal del item actual (sesion de la extension)
     QString m_stdoutBuffer;  // linea incompleta de stdout pendiente del proximo chunk
     QString m_stderrBuffer;  // idem stderr
     QStringDecoder m_stdoutDecoder{QStringDecoder::Utf8};

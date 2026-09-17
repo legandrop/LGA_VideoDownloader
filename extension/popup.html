@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=340">
+  <title>LGA Video Downloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <main class="popup" data-state="checking">
+    <header class="head">
+      <img class="head-icon" src="icons/icon32.png" alt="" width="20" height="20">
+      <span class="head-name">LGA Video Downloader</span>
+    </header>
+
+    <section class="page" aria-label="Current page">
+      <p class="page-title" id="pageTitle"></p>
+      <p class="page-host" id="pageHost"></p>
+    </section>
+
+    <label class="session" for="useSession">
+      <span class="session-text">
+        <span class="session-label">Use my session</span>
+        <span class="session-help">Sends this site's cookies for private or age-restricted videos. Deleted after download.</span>
+      </span>
+      <input class="switch" type="checkbox" id="useSession" role="switch" checked>
+    </label>
+
+    <button class="primary" id="downloadButton" type="button" disabled>Download</button>
+
+    <div class="notice" id="notice" role="status" aria-live="polite" hidden>
+      <p class="notice-title" id="noticeTitle"></p>
+      <p class="notice-body" id="noticeBody"></p>
+    </div>
+  </main>
+  <script type="module" src="popup.js"></script>
+</body>
+</html>

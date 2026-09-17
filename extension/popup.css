@@ -1,0 +1,240 @@
+/* Estilo de la familia LGA: mismos tokens que src/ui/theme.cpp de la app. */
+
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-display: block;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter-Medium.ttf") format("truetype");
+  font-weight: 500;
+  font-display: block;
+}
+@font-face {
+  font-family: "Inter";
+  src: url("fonts/Inter-SemiBold.ttf") format("truetype");
+  font-weight: 600;
+  font-display: block;
+}
+
+:root {
+  color-scheme: dark;
+  --window: #161616;
+  --card: #1d1d1d;
+  --tile: #242424;
+  --border: #303030;
+  --divider: #262626;
+  --text: #b2b2b2;
+  --text-title: #d6d6d6;
+  --text-muted: #8f8f8f;
+  --text-caption: #7b7b7b;
+  --primary: #443a91;
+  --primary-hover: #5243a8;
+  --primary-pressed: #3b3280;
+  --primary-text: #dddbee;
+  --primary-disabled: #2c2848;
+  --primary-disabled-text: #7d7a95;
+  --accent: #774dcb;
+  --run: #b3a6ec;
+  --ok: #a8d86a;
+  --warn: #d4a437;
+  --error: #e8836f;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--window);
+}
+
+body {
+  width: 340px;
+  font-family: "Inter", system-ui, sans-serif;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--text);
+  -webkit-font-smoothing: antialiased;
+}
+
+p { margin: 0; }
+
+.popup {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 14px;
+}
+
+/* Cabecera */
+.head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.head-icon { flex: none; }
+.head-name {
+  color: var(--text-title);
+  font-size: 13.5px;
+  font-weight: 600;
+}
+
+/* Pestana actual */
+.page {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  min-height: 58px;
+}
+.page-title {
+  color: var(--text-title);
+  font-size: 13px;
+  font-weight: 500;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.page-host {
+  margin-top: 3px;
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Interruptor de sesion */
+.session {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  cursor: pointer;
+}
+.session-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+.session-label {
+  color: var(--text-title);
+  font-weight: 500;
+}
+.session-help {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.switch {
+  appearance: none;
+  flex: none;
+  position: relative;
+  width: 30px;
+  height: 18px;
+  margin: 1px 0 0;
+  border-radius: 9px;
+  background: var(--tile);
+  border: 1px solid #3a3a3a;
+  cursor: pointer;
+  transition: background-color 120ms ease, border-color 120ms ease;
+}
+.switch::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #6f6f6f;
+  transition: transform 120ms ease, background-color 120ms ease;
+}
+.switch:checked {
+  background: var(--primary);
+  border-color: var(--accent);
+}
+.switch:checked::after {
+  transform: translateX(12px);
+  background: var(--primary-text);
+}
+.switch:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.switch:disabled { opacity: 0.5; cursor: default; }
+
+/* Boton principal */
+.primary {
+  height: 36px;
+  border: none;
+  border-radius: 5px;
+  background: var(--primary);
+  color: var(--primary-text);
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+.primary:hover:not(:disabled) { background: var(--primary-hover); }
+.primary:active:not(:disabled) { background: var(--primary-pressed); }
+.primary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.primary:disabled {
+  background: var(--primary-disabled);
+  color: var(--primary-disabled-text);
+  cursor: default;
+}
+.primary[data-tone="ok"]:disabled {
+  background: #1f2a17;
+  color: var(--ok);
+  box-shadow: inset 0 0 0 1px #3a4d27;
+}
+
+/* Aviso de estado */
+.notice {
+  border-radius: 6px;
+  padding: 9px 11px;
+  border: 1px solid var(--border);
+  background: var(--card);
+}
+.notice[hidden] { display: none; }
+.notice-title {
+  font-weight: 600;
+  color: var(--text-title);
+}
+.notice-body {
+  margin-top: 2px;
+  color: #a9a9ae;
+  font-size: 12px;
+}
+.notice-body:empty { display: none; }
+
+.notice[data-tone="run"] { background: #242131; border-color: #3b316a; }
+.notice[data-tone="run"] .notice-title { color: var(--run); font-weight: 500; }
+
+.notice[data-tone="ok"] { background: #1f2a17; border-color: #3a4d27; }
+.notice[data-tone="ok"] .notice-title { color: var(--ok); }
+
+.notice[data-tone="warn"] { background: #2a2416; border-color: #5a4820; }
+.notice[data-tone="warn"] .notice-title { color: var(--warn); }
+
+.notice[data-tone="err"] { background: #2a201e; border-color: #4a2d2a; }
+.notice[data-tone="err"] .notice-title { color: var(--error); }
+
+.notice[data-tone="neutral"] { background: transparent; border-color: var(--divider); }
+.notice[data-tone="neutral"] .notice-title { color: var(--text-muted); font-weight: 500; }
+
+/* Pagina no descargable: la tarjeta pierde protagonismo. */
+.popup[data-state="unsupported"] .page-title { color: var(--text-muted); }
+
+@media (prefers-reduced-motion: reduce) {
+  .switch, .switch::after, .primary { transition: none; }
+}

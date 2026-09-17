@@ -1,7 +1,9 @@
 #include "videodownloader/mainwindow.h"
 #include "videodownloader/addvideoscard.h"
 #include "videodownloader/downloadqueue.h"
+#include "videodownloader/hostregistration.h"
 #include "videodownloader/linkparser.h"
+#include "videodownloader/sessioncookies.h"
 #include "videodownloader/logview.h"
 #include "videodownloader/queueview.h"
 #include "videodownloader/tabheader.h"
@@ -377,7 +379,8 @@ void MainWindow::refreshCookiesAttention()
     const DownloadOptions now = currentOptions();
     bool attention = false;
     for (const DownloadItem &item : m_downloadQueue->items()) {
-        const bool sessionProblem = item.status == DownloadStatus::Failed
+        // Los items con la sesion de la extension no cuentan: el combo no es su fuente.
+        const bool sessionProblem = item.status == DownloadStatus::Failed && !item.options.hasSession()
             && (item.failure == FailureKind::NeedsSignIn || item.failure == FailureKind::CookiesUnreadable);
         if (sessionProblem && item.options.cookiesBrowser == now.cookiesBrowser && item.options.cookiesFile == now.cookiesFile) {
             attention = true;
@@ -464,11 +467,14 @@ void MainWindow::onRetryRequested(int id)
         return;
     }
     // Formato, calidad y carpeta del item; la sesion, la elegida ahora (el arreglo tipico
-    // de un error de sesion es cambiar Use cookies from y reintentar).
+    // de un error de sesion es cambiar Use cookies from y reintentar). Un item con la sesion
+    // de la extension conserva esas cookies: el combo no es su fuente.
     DownloadOptions options = item->options;
-    const DownloadOptions now = currentOptions();
-    options.cookiesBrowser = now.cookiesBrowser;
-    options.cookiesFile = now.cookiesFile;
+    if (!options.hasSession()) {
+        const DownloadOptions now = currentOptions();
+        options.cookiesBrowser = now.cookiesBrowser;
+        options.cookiesFile = now.cookiesFile;
+    }
     m_downloadQueue->retryItem(id, options);
 }
 
@@ -476,6 +482,64 @@ void MainWindow::onRetryWithBrowser(int id, const QString &browserKey)
 {
     onCookiesSourceActivated(browserKey);
     onRetryRequested(id);
+}
+
+QJsonObject MainWindow::handleBrowserRequest(const NativeHost::Request &request)
+{
+    const auto failure = [](const QString &message) {
+        return QJsonObject{{QStringLiteral("v"), NativeHost::kProtocolVersion}, {QStringLiteral("ok"), false},
+                           {QStringLiteral("error"), QStringLiteral("internal")}, {QStringLiteral("message"), message}};
+    };
+    if (!m_downloadQueue) {
+        return failure(QStringLiteral("The app isn't ready yet. Try again."));
+    }
+    // Opciones actuales de la app (carpeta, formato, calidad). Sin dialogos modales: el pedido
+    // lo dispara el navegador y la respuesta vuelve al popup.
+    DownloadOptions options = currentOptions();
+    if (!isValidDownloadPath(options.downloadDir)) {
+        log(QStringLiteral("Browser extension: choose a download folder to receive links"), LogLevel::Warning);
+        return failure(QStringLiteral("Choose a download folder in the app"));
+    }
+
+    const QString key = request.browser.toLower();
+    options.fromBrowser = key == QLatin1String("brave") ? QStringLiteral("Brave")
+                          : key == QLatin1String("edge") ? QStringLiteral("Edge")
+                          : key == QLatin1String("chrome") ? QStringLiteral("Chrome")
+                                                           : QStringLiteral("Browser");
+    int accepted = 0;
+    if (!request.cookies.isEmpty()) {
+        const QByteArray cookies = SessionCookies::toNetscape(request.cookies, &accepted);
+        if (accepted > 0) {
+            // La sesion de la extension reemplaza a "Use cookies from" solo para este item.
+            options.sessionCookies = cookies;
+            options.sessionCookieCount = accepted;
+            options.cookiesBrowser.clear();
+            options.cookiesFile.clear();
+        }
+    }
+    m_downloadQueue->addDownload(request.url, options);
+
+    // Solo cantidades: nunca nombres ni valores de cookies.
+    const QString session = options.hasSession()
+        ? QStringLiteral("%1 session (%2 cookies)").arg(options.fromBrowser).arg(accepted)
+        : request.hasCookies ? QStringLiteral("no cookies for this site") : QStringLiteral("without the browser session");
+    log(QStringLiteral("Added from %1 · %2 · %3").arg(options.fromBrowser, request.url, session));
+    // Sin robar el foco: la barra de tareas avisa.
+    if (!isActiveWindow()) {
+        QApplication::alert(this);
+    }
+    return QJsonObject{{QStringLiteral("v"), NativeHost::kProtocolVersion}, {QStringLiteral("ok"), true},
+                       {QStringLiteral("status"), QStringLiteral("queued")}};
+}
+
+void MainWindow::bringToFront()
+{
+    if (isMinimized()) {
+        showNormal();
+    }
+    show();
+    raise();
+    activateWindow();
 }
 
 UpdateView MainWindow::currentUpdateView() const
@@ -541,6 +605,14 @@ void MainWindow::openHelp()
         }
     });
     connect(&dialog, &HelpDialog::installRequested, this, &MainWindow::requestAppInstall);
+    connect(&dialog, &HelpDialog::openExtensionFolderRequested, this, [this]() {
+        const QString folder = HostRegistration::extensionFolder();
+        if (!QFileInfo(folder).isDir()) {
+            log(QStringLiteral("Extension folder not found: %1").arg(QDir::toNativeSeparators(folder)), LogLevel::Warning);
+            return;
+        }
+        QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
+    });
     connect(&dialog, &HelpDialog::cancelInstallRequested, this, [this]() {
         if (m_updateService) {
             m_updateService->cancelInstall();

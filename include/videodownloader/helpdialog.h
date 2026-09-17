@@ -25,7 +25,8 @@ struct UpdateView {
     QDateTime lastChecked;
 };
 
-// Dialogo de ayuda: version, actualizaciones, versiones de las tools y creditos. Sin marco
+// Dialogo de ayuda: version, actualizaciones, extension de navegador, versiones de las tools
+// y creditos. Sin marco
 // del sistema; se dibuja su propia caja redondeada sobre un velo que oscurece la ventana.
 class HelpDialog : public QDialog
 {
@@ -43,6 +44,7 @@ signals:
     void checkRequested();
     void installRequested();
     void cancelInstallRequested();
+    void openExtensionFolderRequested();
 
 protected:
     void paintEvent(QPaintEvent *event) override;

@@ -9,6 +9,15 @@ if not exist deploy\VideoDownloader.exe (
     echo Error: falta deploy\VideoDownloader.exe. Ejecute primero deploy.bat
     exit /b 1
 )
+REM La clave de registro del host apunta a este JSON: sin el, la extension no encuentra la app.
+if not exist deploy\com.lga.videodownloader.json (
+    echo Error: falta deploy\com.lga.videodownloader.json. Ejecute primero deploy.bat
+    exit /b 1
+)
+if not exist deploy\extension\manifest.json (
+    echo Error: falta deploy\extension. Ejecute primero deploy.bat
+    exit /b 1
+)
 
 REM Abortar si el build es posterior a lo desplegado: `xcopy /L /D` lista el
 REM origen solo cuando es mas nuevo que el destino, y no copia nada.
@@ -85,6 +94,11 @@ echo Name: "{userdesktop}\VideoDownloader"; Filename: "{app}\VideoDownloader.exe
 echo. >> VideoDownloader_installer.iss
 echo [Tasks] >> VideoDownloader_installer.iss
 echo Name: "desktopicon"; Description: "Crear un icono en el escritorio"; GroupDescription: "Iconos adicionales:" >> VideoDownloader_installer.iss
+echo. >> VideoDownloader_installer.iss
+REM Host de Native Messaging de la extension: una sola clave de HKCU que leen Chrome, Brave y
+REM Edge, apuntando al JSON junto al exe. Se borra al desinstalar.
+echo [Registry] >> VideoDownloader_installer.iss
+echo Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.lga.videodownloader"; ValueType: string; ValueName: ""; ValueData: "{app}\com.lga.videodownloader.json"; Flags: uninsdeletekey >> VideoDownloader_installer.iss
 echo. >> VideoDownloader_installer.iss
 echo [Run] >> VideoDownloader_installer.iss
 REM Sin skipifsilent: el auto-update corre el instalador en /SILENT y tiene que relanzar la app.

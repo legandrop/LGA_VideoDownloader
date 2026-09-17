@@ -50,6 +50,22 @@ if exist tools\*.* (
     echo Carpeta tools no encontrada o vacía.
 )
 
+REM Extension de navegador (se carga con Load unpacked desde esta carpeta) y el JSON del host
+REM de Native Messaging con "path" relativo al exe. El instalador registra la clave de HKCU.
+echo.
+echo Copiando la extension de navegador...
+if exist deploy\extension rmdir /S /Q deploy\extension
+xcopy /E /I /Y /Q extension deploy\extension
+if %ERRORLEVEL% neq 0 (
+    echo Error al copiar la extension de navegador.
+    exit /b 1
+)
+copy /Y build\com.lga.videodownloader.json deploy\
+if %ERRORLEVEL% neq 0 (
+    echo Error: falta build\com.lga.videodownloader.json
+    exit /b 1
+)
+
 echo.
 echo Implementacion completada exitosamente.
 echo La aplicacion portable esta en la carpeta 'deploy'.

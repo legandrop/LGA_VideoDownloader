@@ -188,6 +188,12 @@ else
     echo "Carpeta toolsmac no encontrada o vacía."
 fi
 
+# Extension de navegador (no verificado en Mac): va en Resources ANTES de firmar, porque la
+# firma cubre el contenido. Al arrancar, la app la copia a Application Support y escribe el JSON
+# del host (path absoluto) en NativeMessagingHosts de Chrome, Brave y Edge.
+rm -rf "deploy/${APP_NAME}.app/Contents/Resources/extension"
+cp -R extension "deploy/${APP_NAME}.app/Contents/Resources/extension"
+
 # Hacer ejecutable el script
 chmod +x "deploy/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
 
