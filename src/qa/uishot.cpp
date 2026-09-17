@@ -333,9 +333,10 @@ int runWalkthrough(const QStringList &args)
     }
     const QString links = QString::fromUtf8(linksFile.readAll());
 
-    // --qa-isolated <carpeta>: modo de prueba de QStandardPaths. Config y tools van a
-    // carpetas "qttest" propias, asi no se tocan los del usuario y se usan las tools que
-    // vienen con el build. La carpeta indicada es el destino de las descargas.
+    // --qa-isolated <carpeta>: modo de prueba de QStandardPaths. La config va a una carpeta
+    // "qttest" propia, asi no se toca la del usuario; las tools son las de la carpeta del exe
+    // (en Windows es donde viven siempre; en macOS, el seed del bundle). La carpeta indicada es
+    // el destino de las descargas.
     const int isolatedIndex = args.indexOf(QStringLiteral("--qa-isolated"));
     if (isolatedIndex >= 0) {
         const QString downloadDir = args.value(isolatedIndex + 1);

@@ -14,11 +14,11 @@ Aplicación Qt/C++ (Windows y macOS) para descargar videos con [yt-dlp](https://
 - **Log:** siempre visible abajo, con filtros All/Warnings/Errors y botón Copy.
 - **Help** (icono `?`): versión, actualizaciones, versiones de yt-dlp/ffmpeg/deno y créditos.
 
-Configuración: `%APPDATA%\LGA\VideoDownloader\config.ini` (Windows) o `~/Library/Application Support/LGA/VideoDownloader/config.ini` (macOS).
+Configuración: `%APPDATA%\LGA\VideoDownloader\config.ini` (Windows) o `~/Library/Application Support/LGA/VideoDownloader/config.ini` (macOS). En AppData solo van settings: lo pesado (yt-dlp, deno y las cookies temporales) vive en la carpeta de la app en Windows y en Application Support en macOS.
 
 ## Actualizaciones
 
-- **yt-dlp y deno:** al abrir la app se buscan versiones nuevas en GitHub (tag fijo, SHA-256 obligatorio) y se instalan en la carpeta de datos del usuario. El reemplazo se hace solo cuando no hay una descarga corriendo.
+- **yt-dlp y deno:** al abrir la app se buscan versiones nuevas en GitHub (tag fijo, SHA-256 obligatorio) y se instalan en la carpeta `tools` de la propia app (Windows) o en `~/Library/Application Support/LGA/VideoDownloader/tools` (macOS, fuera del bundle por la firma). El reemplazo se hace solo cuando no hay una descarga corriendo.
 - **La app:** se busca el último release de GitHub con su `SHA256SUMS`. Si hay uno nuevo, aparece "Update available" arriba a la derecha y el botón Update en Help. En Windows descarga el instalador verificado e instala sobre la misma carpeta; en macOS abre la página del release.
 - **ffmpeg** viene con la app y no se actualiza solo.
 

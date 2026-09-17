@@ -80,10 +80,22 @@ Lo que mas cuesta si no se lee:
 - **Todo release lleva `SHA256SUMS`** (formato `hash  nombre`) con las lineas de TODOS los assets de update: sin la linea de su asset, la app no ofrece el update. `instalador.bat` genera `installer/SHA256SUMS` y `deploy.sh` genera `deploy/SHA256SUMS`; si se publican las dos plataformas en el mismo release, se suben concatenados en un solo `SHA256SUMS`.
 - **No hay que instalar nada**: `dmgbuild` va vendorizado en `tools/macos/vendor/` (Python puro, corre con el `python3` del sistema) y el fondo lo genera `tools/macos/make_dmg_background.js` con AppKit via JXA. El `.tiff` esta versionado en `resources/dmg/`; regenerarlo solo hace falta si cambia el diseno o el nombre.
 
+## Donde van los datos en runtime (regla LGA)
+
+Vale para todas las apps de Lega, no solo esta:
+
+- **Windows: todo lo pesado DENTRO de la carpeta de la app.** Las tools auto-actualizadas y las cookies temporales viven en `<carpeta del exe>\tools` y `<carpeta del exe>\session-cookies`. Asi la instalacion es una sola cosa: se copia, se mueve y se desinstala entera, sin duplicados desparramados.
+- **Fallback SOLO si esa carpeta no es escribible** (p. ej. instalada en Program Files): se cae a `%LOCALAPPDATA%\LGA\VideoDownloader\<carpeta>`. Se detecta con un **intento real de escritura**, nunca con una heuristica de ruta, y queda una linea en el log.
+- **macOS: fuera del bundle**, en `~/Library/Application Support/LGA/VideoDownloader/`. Escribir adentro del `.app` rompe la firma. Esto NO cambia.
+- **AppData (Roaming) es solo para settings**: `config.ini` y cosas de pocos KB. Nada pesado.
+- Todo esto sale de un solo lugar: `AppPaths::heavyDataDir()` (`src/utils/apppaths.cpp`). No repetir `QStandardPaths` por ahi.
+
 ## Tools en runtime (yt-dlp y deno)
 
-- Se instalan y actualizan solas al abrir la app (`ToolsUpdater`), desde GitHub con tag fijo y SHA-256 obligatorio, en `%LOCALAPPDATA%\LGA\VideoDownloader\tools` (macOS `~/Library/Application Support/LGA/VideoDownloader/tools`). Nunca se escriben dentro de la instalacion ni del bundle.
-- Orden de resolucion: carpeta de usuario → copia de la instalacion (`tools/`, `toolsmac/`) → PATH en macOS.
+- Se instalan y actualizan solas al abrir la app (`ToolsUpdater`), desde GitHub con tag fijo y SHA-256 obligatorio, en la carpeta de tools que define `AppPaths` (ver arriba). En Windows es la MISMA carpeta que siembra el instalador: se actualiza en el lugar.
+- Por eso el instalador pone `yt-dlp.exe` y `deno.exe` con `onlyifdoesntexist` (y sin `ignoreversion`): si los pisara, cada update de la app tiraria abajo la tool nueva. El `[UninstallDelete]` borra `{app}\tools` y `{app}\session-cookies`, que Inno no instalo y no borraria solo.
+- `AppPaths::migrateLegacyWindowsData()` corre al arrancar: mueve a la carpeta de la app las tools de `%LOCALAPPDATA%` que sean mas nuevas y borra esa carpeta entera. Lo que quede en uso se reintenta al proximo arranque.
+- Orden de resolucion: carpeta del updater → copia de la instalacion (`tools/`, `toolsmac/`) → PATH en macOS.
 - El swap de un binario verificado se hace en UN solo punto: al arrancar y antes de lanzar cada proceso de yt-dlp (`ToolsManager::applyStagedTools`).
 - Para probar sin publicar: `LGA_VD_GITHUB_BASE` (tools y app), que solo acepta `localhost`/`127.0.0.1`.
 

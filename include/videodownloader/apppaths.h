@@ -1,0 +1,38 @@
+#ifndef APPPATHS_H
+#define APPPATHS_H
+
+#include <QString>
+#include <QStringList>
+
+// Donde viven los datos pesados que escribe la app en runtime (tools auto-actualizadas y
+// cookies temporales de la extension).
+//
+// Regla de las apps LGA:
+// - Windows: todo lo pesado DENTRO de la carpeta de la app (`<carpeta del exe>/<nombre>`).
+//   Si esa carpeta no es escribible (p.ej. instalada en Program Files) se cae a
+//   `%LOCALAPPDATA%/LGA/VideoDownloader/<nombre>`, detectado con un intento real de escritura.
+// - macOS: FUERA del bundle, en `~/Library/Application Support/LGA/VideoDownloader/<nombre>`,
+//   porque escribir dentro del .app rompe la firma. No cambia.
+// - AppData (Roaming) queda solo para settings chicos.
+namespace AppPaths {
+
+// Carpeta para `name` ("tools", "session-cookies"). No la crea salvo para probar escritura
+// en Windows. El resultado se resuelve una vez por nombre y queda fijo durante el proceso.
+QString heavyDataDir(const QString &name);
+
+// `%LOCALAPPDATA%/LGA/VideoDownloader/<name>` (macOS: Application Support). Es la ubicacion
+// del diseno anterior en Windows y la vigente en macOS.
+QString userDataDir(const QString &name);
+
+// true si en Windows la carpeta de `name` tuvo que caer a LOCALAPPDATA.
+bool usesFallback(const QString &name);
+
+// Windows: mueve a `<app>/tools` las tools de LOCALAPPDATA que sean mas nuevas y borra la
+// carpeta vieja entera (y `session-cookies` si quedo vacia). Si algo no se puede mover o
+// borrar, queda para el proximo arranque. En macOS no hace nada. Devuelve lineas para el log
+// visible (vacio si no hubo nada que hacer).
+QStringList migrateLegacyWindowsData();
+
+} // namespace AppPaths
+
+#endif // APPPATHS_H

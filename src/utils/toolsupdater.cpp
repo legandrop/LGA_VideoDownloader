@@ -1,4 +1,5 @@
 #include "videodownloader/toolsupdater.h"
+#include "videodownloader/apppaths.h"
 #include "videodownloader/updateurls.h"
 
 #include <QCoreApplication>
@@ -15,7 +16,6 @@
 #include <QProcess>
 #include <QRegularExpression>
 #include <QSaveFile>
-#include <QStandardPaths>
 #include <QSysInfo>
 #include <QThread>
 #include <QTimer>
@@ -123,10 +123,9 @@ ToolsUpdater::~ToolsUpdater()
 
 QString ToolsUpdater::toolsDir()
 {
-    // GenericDataLocation: %LOCALAPPDATA% en Windows (no Roaming: 20-90 MB no deben viajar
-    // con el perfil) y ~/Library/Application Support en macOS.
-    return QStandardPaths::writableLocation(QStandardPaths::GenericDataLocation)
-           + QStringLiteral("/LGA/VideoDownloader/tools");
+    // Windows: `<app>/tools`, la misma carpeta que siembra el instalador (fallback a
+    // %LOCALAPPDATA% si no es escribible). macOS: Application Support, fuera del bundle.
+    return AppPaths::heavyDataDir(QStringLiteral("tools"));
 }
 
 QString ToolsUpdater::binaryName(Tool tool)

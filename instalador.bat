@@ -86,7 +86,20 @@ if exist resources\icons\LGA_VideoDownloader.ico (
 
 echo. >> VideoDownloader_installer.iss
 echo [Files] >> VideoDownloader_installer.iss
-echo Source: "deploy\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs >> VideoDownloader_installer.iss
+REM Las tools que el auto-update mantiene (yt-dlp y deno) viven en {app}\tools y se actualizan
+REM ahi mismo: si el instalador las pisara, cada update de la app tiraria abajo la version
+REM nueva y habria que volver a bajarla. Se instalan SOLO si faltan (onlyifdoesntexist, sin
+REM ignoreversion) y quedan excluidas de la copia general. ffmpeg y sus DLL no se auto-
+REM actualizan, asi que siguen viniendo con el instalador y se pisan como siempre.
+echo Source: "deploy\*"; DestDir: "{app}"; Excludes: "\tools\yt-dlp.exe,\tools\deno.exe"; Flags: ignoreversion recursesubdirs createallsubdirs >> VideoDownloader_installer.iss
+echo Source: "deploy\tools\yt-dlp.exe"; DestDir: "{app}\tools"; Flags: onlyifdoesntexist skipifsourcedoesntexist >> VideoDownloader_installer.iss
+echo Source: "deploy\tools\deno.exe"; DestDir: "{app}\tools"; Flags: onlyifdoesntexist skipifsourcedoesntexist >> VideoDownloader_installer.iss
+echo. >> VideoDownloader_installer.iss
+REM Al desinstalar, lo que escribio la app en su carpeta (tools actualizadas, tools.json,
+REM .staging, .old y las cookies temporales) no lo instalo Inno y no se borraria solo.
+echo [UninstallDelete] >> VideoDownloader_installer.iss
+echo Type: filesandordirs; Name: "{app}\tools" >> VideoDownloader_installer.iss
+echo Type: filesandordirs; Name: "{app}\session-cookies" >> VideoDownloader_installer.iss
 echo. >> VideoDownloader_installer.iss
 echo [Icons] >> VideoDownloader_installer.iss
 echo Name: "{group}\VideoDownloader"; Filename: "{app}\VideoDownloader.exe" >> VideoDownloader_installer.iss
@@ -148,7 +161,8 @@ echo   ResultCode: Integer; >> VideoDownloader_installer.iss
 echo begin >> VideoDownloader_installer.iss
 echo   if CurUninstallStep = usPostUninstall then >> VideoDownloader_installer.iss
 echo   begin >> VideoDownloader_installer.iss
-REM yt-dlp y deno que baja el auto-update viven en LocalAppData: son cache, se borran sin preguntar.
+REM Restos de versiones anteriores, que bajaban yt-dlp y deno a LocalAppData (y de una
+REM instalacion en carpeta no escribible, donde siguen yendo ahi): son cache, se borran sin preguntar.
 echo     DelTree(ExpandConstant('{localappdata}\LGA\VideoDownloader\tools'), True, True, True); >> VideoDownloader_installer.iss
 echo     ConfigPath := ExpandConstant('{userappdata}\LGA\VideoDownloader'); >> VideoDownloader_installer.iss
 echo     if DirExists(ConfigPath) then >> VideoDownloader_installer.iss

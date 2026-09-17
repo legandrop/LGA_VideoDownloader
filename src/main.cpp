@@ -1,5 +1,6 @@
 #include "videodownloader/mainwindow.h"
 #include "videodownloader/LgaRegistry.h"
+#include "videodownloader/apppaths.h"
 #include "videodownloader/appinstance.h"
 #include "videodownloader/hostregistration.h"
 #include "videodownloader/nativehost.h"
@@ -172,11 +173,15 @@ int main(int argc, char *argv[])
     const bool walkthrough = app.arguments().contains(QStringLiteral("--qa-walkthrough"));
     AppInstance instance;
     int sweptSessionFiles = 0;
+    QStringList migrationLines;
     if (!walkthrough) {
         if (!instance.acquire()) {
             AppInstance::sendActivate(5000);
             return 0;
         }
+        // Windows: las tools del diseno anterior (%LOCALAPPDATA%) pasan a la carpeta de la app.
+        // Va antes de ToolsManager, que hace el swap y la limpieza de .old al construirse.
+        migrationLines = AppPaths::migrateLegacyWindowsData();
         // Restos de un cierre abrupto durante una descarga con la sesion de la extension.
         sweptSessionFiles = SessionCookies::sweep();
     }
@@ -215,6 +220,13 @@ int main(int argc, char *argv[])
     }
     if (!hostStatus.isEmpty()) {
         window.log(hostStatus);
+    }
+    for (const QString &line : migrationLines) {
+        window.log(line);
+    }
+    if (AppPaths::usesFallback(QStringLiteral("tools"))) {
+        window.log(QStringLiteral("The app folder is not writable; tools are kept in %1")
+                       .arg(QDir::toNativeSeparators(AppPaths::heavyDataDir(QStringLiteral("tools")))));
     }
     window.show();
 

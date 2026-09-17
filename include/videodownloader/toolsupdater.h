@@ -16,7 +16,7 @@ class QProcess;
 class QSaveFile;
 class QTimer;
 
-// Instala y actualiza yt-dlp y deno en la carpeta de datos del usuario, en silencio.
+// Instala y actualiza yt-dlp y deno en silencio, en la carpeta de tools de AppPaths.
 //
 // - Fuente: GitHub directo, sin API. El tag se resuelve UNA vez leyendo el redirect de
 //   `/releases/latest`; despues todo se baja del tag fijo, asi un release nuevo publicado
@@ -26,8 +26,9 @@ class QTimer;
 //   directa sobre el binario final.
 // - Lo verificado queda en `<tools>/.staging` y se activa con applyStaged(), que es el
 //   UNICO punto de swap: lo llaman el arranque y DownloadQueue antes de lanzar cada proceso.
-// - Carpeta: Windows `%LOCALAPPDATA%/LGA/VideoDownloader/tools`,
-//   macOS `~/Library/Application Support/LGA/VideoDownloader/tools`.
+// - Carpeta: Windows `<carpeta del exe>/tools` (la misma que siembra el instalador; si no es
+//   escribible, `%LOCALAPPDATA%/LGA/VideoDownloader/tools`). macOS
+//   `~/Library/Application Support/LGA/VideoDownloader/tools`, fuera del bundle por la firma.
 class ToolsUpdater : public QObject
 {
     Q_OBJECT
@@ -38,13 +39,13 @@ public:
     explicit ToolsUpdater(QObject *parent = nullptr);
     ~ToolsUpdater() override;
 
-    // Carpeta de tools del usuario (no la crea).
+    // Carpeta de tools donde escribe el updater (ver AppPaths::heavyDataDir).
     static QString toolsDir();
     // Nombre del binario final: "yt-dlp.exe"/"deno.exe" en Windows, sin extension en macOS.
     static QString binaryName(Tool tool);
     // Clave en tools.json y en los logs: "yt-dlp" / "deno".
     static QString toolKey(Tool tool);
-    // Ruta del binario en la carpeta de usuario, o vacio si no existe.
+    // Ruta del binario en la carpeta de tools, o vacio si no existe.
     static QString installedBinary(Tool tool);
     // Version registrada en tools.json para el binario instalado; vacio si no hay.
     static QString installedVersion(Tool tool);

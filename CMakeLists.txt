@@ -92,6 +92,7 @@ set(SOURCES
     src/core/updateservice.cpp
     src/core/nativehost.cpp
     src/core/appinstance.cpp
+    src/utils/apppaths.cpp
     src/utils/browserdetect.cpp
     src/utils/hostregistration.cpp
     src/utils/sessioncookies.cpp
@@ -114,6 +115,7 @@ set(HEADERS
     include/videodownloader/logview.h
     include/videodownloader/helpdialog.h
     include/videodownloader/uishot.h
+    include/videodownloader/apppaths.h
     include/videodownloader/browserdetect.h
     include/videodownloader/linkparser.h
     include/videodownloader/loglevel.h

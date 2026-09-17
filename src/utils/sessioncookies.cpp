@@ -1,10 +1,10 @@
 #include "videodownloader/sessioncookies.h"
+#include "videodownloader/apppaths.h"
 
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonObject>
-#include <QStandardPaths>
 #include <QTemporaryFile>
 #include <QThread>
 
@@ -89,8 +89,8 @@ QByteArray toNetscape(const QJsonArray &cookies, int *accepted)
 
 QString directory()
 {
-    return QDir(QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation))
-        .filePath(QStringLiteral("session-cookies"));
+    // Windows: `<app>/session-cookies` (fallback a %LOCALAPPDATA%). macOS: Application Support.
+    return AppPaths::heavyDataDir(QStringLiteral("session-cookies"));
 }
 
 QString writeTempFile(const QByteArray &content)
@@ -100,7 +100,7 @@ QString writeTempFile(const QByteArray &content)
         return QString();
     }
     // QTemporaryFile crea el archivo en exclusiva, con nombre aleatorio y permisos 0600 en Unix;
-    // en Windows hereda la ACL de %LOCALAPPDATA% (solo el usuario).
+    // en Windows hereda la ACL de la carpeta que lo contiene.
     QTemporaryFile file(QDir(dir).filePath(QStringLiteral("XXXXXXXXXXXX.txt")));
     file.setAutoRemove(false);
     if (!file.open()) {

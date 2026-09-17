@@ -9,7 +9,8 @@
 //
 // Viven en memoria (DownloadOptions::sessionCookies) mientras el item esta en la lista, y en
 // disco solo mientras corre yt-dlp: un archivo temporal por descarga en
-// <AppLocalData>/session-cookies/, que se borra cuando el proceso termina (ok, error, cancel o
+// AppPaths::heavyDataDir("session-cookies") (Windows `<app>/session-cookies`, macOS Application
+// Support), que se borra cuando el proceso termina (ok, error, cancel o
 // cierre) y se barre al arrancar por si la app murio a mitad. Nunca van a config, log ni
 // argumentos (solo la ruta del archivo).
 namespace SessionCookies {
@@ -20,7 +21,7 @@ namespace SessionCookies {
 // Expiracion entera (floor) o 0 si es de sesion. Las cookies invalidas se saltean.
 QByteArray toNetscape(const QJsonArray &cookies, int *accepted = nullptr);
 
-// <AppLocalData>/session-cookies
+// Carpeta de los temporales (ver AppPaths::heavyDataDir).
 QString directory();
 
 // Escribe el contenido en un archivo nuevo y lo CIERRA. Devuelve la ruta o vacio si falla.

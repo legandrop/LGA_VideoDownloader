@@ -7,13 +7,15 @@ How the download tools, browser sessions and app updates behave on each platform
 | | Windows | macOS |
 |---|---|---|
 | Bundled copy ("seed") | `<app>/tools/` (`ffmpeg.exe` + DLLs; `yt-dlp.exe`/`deno.exe` only if the build copied them) | `LGA Video Downloader.app/Contents/MacOS/toolsmac/` |
-| Auto-updated copy | `%LOCALAPPDATA%\LGA\VideoDownloader\tools\` | `~/Library/Application Support/LGA/VideoDownloader/tools/` |
-| Resolution order (yt-dlp, deno) | user folder → seed | user folder → seed → Homebrew/PATH |
+| Auto-updated copy | `<app>\tools\` — the same folder, updated in place (fallback: `%LOCALAPPDATA%\LGA\VideoDownloader\tools\` when the app folder is not writable) | `~/Library/Application Support/LGA/VideoDownloader/tools/` (never inside the bundle: writing there breaks the signature) |
+| Resolution order (yt-dlp, deno) | updater folder → seed | updater folder → seed → Homebrew/PATH |
 | ffmpeg | seed only | seed → Homebrew/PATH |
 
 - `ToolsUpdater` checks GitHub at startup for yt-dlp and deno: the tag is resolved once from the `releases/latest` redirect, the binary is streamed to disk and verified against the release SHA-256 file (no hash, no install).
 - Verified binaries wait in `tools/.staging` and are swapped in only when no yt-dlp process is running (at startup, before each download, or when the update ends with an idle queue).
 - ffmpeg is not auto-updated.
+- **Windows:** the installer seeds `yt-dlp.exe`/`deno.exe` only if they are missing, so installing a new app version never overwrites a newer tool; uninstalling removes `{app}\tools` and `{app}\session-cookies` whole. Tools left in `%LOCALAPPDATA%` by older versions are moved into the app folder at startup (only the newer ones) and that folder is then deleted.
+- Session cookie files from the extension follow the same rule: `<app>\session-cookies` on Windows, Application Support on macOS.
 - Downloads added while the tools are still installing wait in the queue and start by themselves.
 - YouTube needs deno: its path is passed with `--js-runtimes deno:<path>`.
 

@@ -15,8 +15,9 @@
 namespace {
 
 // Copia que viene con la instalacion (Windows `<app>/tools`) o adentro del bundle (macOS
-// `Contents/MacOS/toolsmac`). Es el "seed": se usa mientras la carpeta de usuario no tenga
-// su propia copia actualizada. Vacio si no existe.
+// `Contents/MacOS/toolsmac`). Es el "seed". En Windows normalmente coincide con la carpeta del
+// updater (que actualiza en el lugar); solo difiere si la carpeta de la app no es escribible.
+// En macOS el updater escribe fuera del bundle. Vacio si no existe.
 QString seedToolPath(ToolsUpdater::Tool tool)
 {
 #ifdef Q_OS_WIN
@@ -27,7 +28,7 @@ QString seedToolPath(ToolsUpdater::Tool tool)
     return QFileInfo(path).isFile() ? path : QString();
 }
 
-// Orden de resolucion de yt-dlp/deno: carpeta de usuario -> seed. Vacio si no hay ninguno
+// Orden de resolucion de yt-dlp/deno: carpeta del updater -> seed. Vacio si no hay ninguno
 // (en macOS el llamador cae despues a Homebrew/PATH).
 QString localToolPath(ToolsUpdater::Tool tool)
 {
