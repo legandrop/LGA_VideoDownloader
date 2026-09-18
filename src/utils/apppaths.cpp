@@ -36,6 +36,11 @@ QHash<QString, Resolved> s_cache;
 // Windows no reflejan las ACL.
 bool canWriteInto(const QString &dir)
 {
+    // Si la ruta existe pero no es una carpeta (un archivo con ese nombre), no se va a poder
+    // crear ahi: hay que caer al fallback, no probar en el padre.
+    if (QFileInfo::exists(dir) && !QFileInfo(dir).isDir()) {
+        return false;
+    }
     const QString probeDir = QFileInfo(dir).isDir() ? dir : QFileInfo(dir).absolutePath();
     if (!QFileInfo(probeDir).isDir()) {
         return false;

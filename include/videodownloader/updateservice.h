@@ -65,6 +65,9 @@ public:
     static QString legacyTempUpdateDir();
     static QStringList installerSweepDirs(const QString &appDir, const QString &fallbackDir);
     static int removeOldInstallers(const QStringList &dirs, const QString &keepName);
+    // Apaga el barrido automatico (arranque, reintento y antes de bajar) en todo el proceso. Lo
+    // llaman los modos de QA, que no deben tocar las carpetas reales.
+    static void disableAutoSweep();
 
     // Se llama justo antes de lanzar el instalador: debe cortar la cola y matar yt-dlp y sus
     // hijos, porque el instalador solo cierra VideoDownloader.exe y bloquearian la copia.

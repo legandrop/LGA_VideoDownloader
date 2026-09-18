@@ -7,6 +7,8 @@
 
 #include <QCoreApplication>
 #include <QCryptographicHash>
+#include <QDateTime>
+#include <QTimeZone>
 #include <QDebug>
 #include <QDesktopServices>
 #include <QDir>
@@ -21,6 +23,10 @@
 #include <QStandardPaths>
 #include <QTimer>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
+
 namespace {
 
 const QString kRepoSlug = QStringLiteral("legandrop/LGA_VideoDownloader");
@@ -34,7 +40,38 @@ QString userAgent()
     return QStringLiteral("LGA_VideoDownloader/%1").arg(QCoreApplication::applicationVersion());
 }
 
-constexpr int kResweepDelayMs = 3 * 60 * 1000;
+constexpr int kResweepDelayMs = 5 * 60 * 1000;
+// Un instalador escrito hace menos que esto no se barre: puede ser el que otra copia de la app
+// acaba de verificar y esta por lanzar (%TEMP% y el fallback de LOCALAPPDATA son compartidos).
+// Una vez lanzado, el instalador lo tiene abierto y el borrado falla solo.
+constexpr qint64 kMinInstallerAgeSecs = 2 * 60;
+
+bool s_autoSweepDisabled = false;
+
+// La carpeta ES un enlace (junction, symlink de carpeta u otro reparse point). Barrerla borraria
+// archivos del otro lado, en una carpeta que no es de la app: se saltea entera.
+bool isReparsePoint(const QString &path)
+{
+#ifdef Q_OS_WIN
+    const QString native = QDir::toNativeSeparators(QDir::cleanPath(path));
+    const DWORD attributes = GetFileAttributesW(reinterpret_cast<const wchar_t *>(native.utf16()));
+    return attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0;
+#else
+    return QFileInfo(path).isSymLink();
+#endif
+}
+
+// Nombre EXACTO del asset de update de esta plataforma, con version numerica. Un comodin se
+// llevaba "..._v0.8 (copia).exe" o "..._v.exe", que no son de la app.
+bool isInstallerAssetName(const QString &name)
+{
+#ifdef Q_OS_WIN
+    static const QRegularExpression re(QStringLiteral("^VideoDownloader_Setup_v[0-9]+(\\.[0-9]+)*\\.exe$"));
+#else
+    static const QRegularExpression re(QStringLiteral("^LGA_Video_Downloader_Mac_v[0-9]+(\\.[0-9]+)*\\.zip$"));
+#endif
+    return re.match(name).hasMatch();
+}
 
 QString updateDirPath()
 {
@@ -78,22 +115,30 @@ QStringList UpdateService::installerSweepDirs(const QString &appDir, const QStri
 }
 
 // Borra los instaladores de updates (~80 MB cada uno) que hayan quedado en `dirs`, salvo
-// keepName. Solo archivos con nombre de asset: lo demas que haya en esas carpetas no se toca.
-// Si uno sigue en uso (el instalador todavia corriendo) el borrado falla y se reintenta la
-// proxima vez. Una carpeta que queda vacia se borra. Devuelve cuantos borro.
+// keepName. Solo archivos con el nombre exacto del asset de esta plataforma y escritos hace mas
+// de kMinInstallerAgeSecs: lo demas que haya en esas carpetas no se toca. Una carpeta que es un
+// enlace se saltea entera. Si un instalador sigue en uso (todavia corriendo) el borrado falla y
+// se reintenta la proxima vez. Una carpeta que queda vacia se borra. Devuelve cuantos borro.
 int UpdateService::removeOldInstallers(const QStringList &dirs, const QString &keepName)
 {
     int removed = 0;
-    const QStringList filters = {QStringLiteral("VideoDownloader_Setup_v*.exe"),
-                                 QStringLiteral("LGA_Video_Downloader_Mac_v*.zip")};
+    const QDateTime now = QDateTime::currentDateTimeUtc();
     for (const QString &path : dirs) {
         QDir dir(path);
         if (path.isEmpty() || !dir.exists()) {
             continue;
         }
-        const QFileInfoList entries = dir.entryInfoList(filters, QDir::Files | QDir::Hidden | QDir::NoSymLinks);
+        if (isReparsePoint(path)) {
+            qWarning() << "[UpdateService] La carpeta de updates es un enlace, no se barre:" << path;
+            continue;
+        }
+        const QFileInfoList entries = dir.entryInfoList(QDir::Files | QDir::Hidden | QDir::NoSymLinks);
         for (const QFileInfo &entry : entries) {
-            if (entry.fileName() == keepName) {
+            if (entry.fileName() == keepName || !isInstallerAssetName(entry.fileName())) {
+                continue;
+            }
+            if (entry.lastModified(QTimeZone::UTC).secsTo(now) < kMinInstallerAgeSecs) {
+                qDebug() << "[UpdateService] Instalador reciente, no se borra todavia:" << entry.absoluteFilePath();
                 continue;
             }
             if (QFile::remove(entry.absoluteFilePath())) {
@@ -109,8 +154,19 @@ int UpdateService::removeOldInstallers(const QStringList &dirs, const QString &k
     return removed;
 }
 
+void UpdateService::disableAutoSweep()
+{
+    s_autoSweepDisabled = true;
+}
+
 void UpdateService::sweepInstallers(const QString &keepName)
 {
+    // Los modos de QA arman la ventana real pero no deben tocar carpetas reales, y un build de
+    // desarrollo no baja instaladores (installBlockedReason): no tiene nada propio que barrer y
+    // podria borrarle a la copia instalada uno recien bajado.
+    if (s_autoSweepDisabled || LgaRegistry::isDevelopmentBuild()) {
+        return;
+    }
     removeOldInstallers(installerSweepDirs(QCoreApplication::applicationDirPath(),
                                            AppPaths::userDataDir(QStringLiteral("updates"))),
                         keepName);
