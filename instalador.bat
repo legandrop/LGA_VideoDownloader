@@ -157,18 +157,25 @@ echo end; >> VideoDownloader_installer.iss
 echo. >> VideoDownloader_installer.iss
 echo function PrepareToInstall(var NeedsRestart: Boolean): String; >> VideoDownloader_installer.iss
 echo var >> VideoDownloader_installer.iss
-echo   ScriptPath, Prefixes: String; >> VideoDownloader_installer.iss
+echo   ScriptPath, Prefixes, HelperDirs: String; >> VideoDownloader_installer.iss
 echo begin >> VideoDownloader_installer.iss
 echo   Result := ''; >> VideoDownloader_installer.iss
-REM Se cierran SOLO las copias que corren desde la carpeta de destino o desde la instalacion
-REM legacy, por la ruta real del proceso (tools\close_by_path.ps1). Antes era un taskkill por
-REM nombre, que cerraba tambien cualquier otra copia: un build, otro checkout. -ExeName deja
-REM afuera al propio instalador del auto-update, que corre desde {app}\updates. Si el script
-REM no puede correr o rechaza la ruta, no cierra nada e Inno avisa "archivo en uso".
+REM La app es de instancia unica: al instalar se cierran TODAS las copias de VideoDownloader.exe
+REM (la instalada, un build, otro checkout) con sus yt-dlp, deno y ffmpeg, cada uno por la
+REM carpeta de su instancia o por las de HelperDirs: {app}, la instalacion legacy y la carpeta de
+REM tools de fallback de %LOCALAPPDATA%. Nunca por nombre solo: el yt-dlp o el ffmpeg de otra
+REM app se deja vivo (tools\close_by_path.ps1 -AllInstances). -ExeName deja afuera al propio
+REM instalador del auto-update, que corre desde {app}\updates. El nombre viejo, VimeoDownloader.exe,
+REM se sigue cerrando solo en {app} y en la carpeta legacy. Sin -Tree a proposito: todo lo que
+REM lanza la app ya esta en -Helpers, y con -Tree este mismo instalador, lanzado como hijo de la
+REM app desde {app}\updates, podia cerrarse a si mismo si la app todavia no habia terminado de
+REM salir. Si el script no puede correr o rechaza la ruta, no cierra nada e Inno avisa "archivo
+REM en uso".
 echo   ExtractTemporaryFile('close_by_path.ps1'); >> VideoDownloader_installer.iss
 echo   ScriptPath := ExpandConstant('{tmp}\close_by_path.ps1'); >> VideoDownloader_installer.iss
 echo   Prefixes := ExpandConstant('{app}') + ',' + LegacyInstallDir; >> VideoDownloader_installer.iss
-echo   CloseByPath(ScriptPath, '-ExeName VideoDownloader.exe -Prefix ' + #34 + Prefixes + #34); >> VideoDownloader_installer.iss
+echo   HelperDirs := Prefixes + ',' + ExpandConstant('{localappdata}\LGA\VideoDownloader'); >> VideoDownloader_installer.iss
+echo   CloseByPath(ScriptPath, '-ExeName VideoDownloader.exe -AllInstances -Helpers yt-dlp.exe,deno.exe,ffmpeg.exe -HelperPrefix ' + #34 + HelperDirs + #34); >> VideoDownloader_installer.iss
 echo   CloseByPath(ScriptPath, '-ExeName VimeoDownloader.exe -Prefix ' + #34 + Prefixes + #34); >> VideoDownloader_installer.iss
 echo   Sleep(1000); >> VideoDownloader_installer.iss
 echo   RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, LegacyUninstallKey); >> VideoDownloader_installer.iss

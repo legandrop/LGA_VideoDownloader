@@ -43,6 +43,11 @@ Lo que mas cuesta si no se lee:
 - Al compilar, usar SIEMPRE el script del repo — NUNCA `cmake`, `ninja` o `make` a mano:
   - Windows: `./compilar.bat`
   - macOS: `./compilar.sh`
+- **La app es de INSTANCIA UNICA, y el cierre antes de compilar o instalar sigue esa regla** (Lega, 2026-09-18; mecanismo en `tools/close_by_path.ps1`, copia identica de la Base):
+  - `compilar.bat` normal (compila y lanza) cierra TODAS las copias de `VideoDownloader.exe` —la instalada, la de `build\`, las de otros checkouts— y sus `yt-dlp.exe`, `deno.exe` y `ffmpeg.exe`, cada uno por la carpeta de su instancia, el repo o `%LOCALAPPDATA%\LGA\VideoDownloader`: nunca los de otra app con el mismo nombre de proceso (`-AllInstances -Helpers ... -HelperPrefix "%APP_ROOT%.,..."`; el `.` evita que la `\` final de `APP_ROOT` escape la comilla). Va sin `-Tree` a proposito, aca y en el instalador: todo lo que lanza la app ya esta en `-Helpers`, y con `-Tree` caeria el instalador del auto-update, que la app lanza como hijo desde `{app}\updates`.
+  - `compilar.bat --no-run` cierra SOLO la copia que va a pisar, `build\VideoDownloader.exe` (`-ExactPath`).
+  - El instalador (`PrepareToInstall`) cierra TODAS las copias con sus auxiliares al instalar, con `{app}`, la carpeta legacy y la de fallback de `%LOCALAPPDATA%` como carpetas de auxiliares. Hoy no cierra nada al desinstalar; si se agrega, cierra solo `{app}`.
+  - **Toda corrida automatizada o delegada compila SIEMPRE con `--no-run`.** La entrega final se abre con `explorer.exe "<ruta al exe>"`, nunca desde la terminal de esa corrida: quedaria dentro del contenedor MSIX de la app de escritorio.
 - No hacer builds limpios automaticamente. No borrar `build/` salvo pedido explicito.
 - Si la compilacion falla, corregir el problema SIN limpiar primero.
 - **Capturas de QA sin escritorio**: `VideoDownloader.exe --ui-shot <estado> <out.png> [--dpr N] [--size WxH]` construye la ventana real con datos de prueba (estados `empty`, `downloading`, `error`, `tools`, `other-errors` —texto sin links, vivo, cancelada, chips de sitio y sitio no soportado—, `help`, `help-update`, `help-downloading`), la dibuja a un PNG nuevo sin mostrarla ni tomar el foco y deja al lado un `<out.png>.json` con la geometria de los widgets y las fuentes resueltas.

@@ -8,10 +8,24 @@ cd /d "%APP_ROOT%"
 
 echo Compilando VideoDownloader...
 
-REM Cerrar SOLO la copia de build\: el linker necesita libre ese archivo y ningun otro.
-REM Antes era un taskkill por nombre, que cerraba tambien la app instalada y le cortaba
-REM las descargas en curso. La decision la toma la ruta real del proceso.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%APP_ROOT%tools\close_by_path.ps1" -ExeName VideoDownloader.exe -ExactPath "%APP_ROOT%build\VideoDownloader.exe"
+REM Cierre antes de compilar (Windows bloquea el .exe mientras corre y el link fallaria). La
+REM decision la toma la ruta real de cada proceso (tools\close_by_path.ps1), nunca el nombre solo.
+REM - Sin --no-run (compila y LANZA): la app es de instancia unica, asi que se cierran TODAS las
+REM   copias de VideoDownloader.exe (la instalada, la de build, las de otros checkouts) con sus
+REM   yt-dlp, deno y ffmpeg, cada uno por la carpeta de su instancia: nunca los de otra app con el
+REM   mismo nombre de proceso. %LOCALAPPDATA%\LGA\VideoDownloader es la carpeta de tools de
+REM   fallback, compartida por las copias instaladas en una carpeta no escribible. El "." final
+REM   evita que la \ de APP_ROOT escape la comilla de cierre. Sin -Tree a proposito: todo lo
+REM   que lanza la app ya esta en -Helpers, y con -Tree caeria el instalador del auto-update,
+REM   que la app lanza como hijo desde {app}\updates (o desde la carpeta de fallback).
+REM - Con --no-run (el modo de toda corrida automatizada): SOLO la copia de build\, el archivo que
+REM   el linker necesita libre.
+REM Sale con 2 solo si rechazo los parametros: ahi se corta.
+if defined NO_RUN (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%APP_ROOT%tools\close_by_path.ps1" -ExeName VideoDownloader.exe -ExactPath "%APP_ROOT%build\VideoDownloader.exe"
+) else (
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%APP_ROOT%tools\close_by_path.ps1" -ExeName VideoDownloader.exe -AllInstances -Helpers yt-dlp.exe,deno.exe,ffmpeg.exe -HelperPrefix "%APP_ROOT%.,%LOCALAPPDATA%\LGA\VideoDownloader"
+)
 if %ERRORLEVEL% equ 2 ( echo Error: close_by_path rechazo los parametros & exit /b 1 )
 
 REM Añadir Qt y MinGW al PATH

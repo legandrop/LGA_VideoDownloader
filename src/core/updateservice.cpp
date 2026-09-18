@@ -505,8 +505,9 @@ void UpdateService::onDownloadFinished()
 
 void UpdateService::launchInstaller(const QString &installerPath)
 {
-    // Primero se corta la cola y se matan yt-dlp y sus hijos (ffmpeg, deno): el instalador
-    // solo cierra VideoDownloader.exe y un binario de {app}\tools en uso bloquearia la copia.
+    // Primero se corta la cola y se matan yt-dlp y sus hijos (ffmpeg, deno): un binario de
+    // {app}\tools en uso bloquearia la copia. El instalador tambien los cierra (por carpeta,
+    // junto con VideoDownloader.exe), pero aca la cola se corta en orden y antes de salir.
     if (m_beforeInstallHook) {
         m_beforeInstallHook();
     }
