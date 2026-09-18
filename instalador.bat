@@ -138,9 +138,26 @@ echo const >> VideoDownloader_installer.iss
 echo   LegacyUninstallKey = 'Software\Microsoft\Windows\CurrentVersion\Uninstall\VimeoDownloader_is1'; >> VideoDownloader_installer.iss
 echo   LegacyInstallDir = 'C:\Portable\LGA\VimeoDownloader'; >> VideoDownloader_installer.iss
 echo. >> VideoDownloader_installer.iss
-echo function PrepareToInstall(var NeedsRestart: Boolean): String; >> VideoDownloader_installer.iss
+REM Bloque de close_by_path de la Base (Doc_Instaladores_Inno.md, seccion 5.1): powershell.exe
+REM por su ruta de {sys} [con el nombre suelto se buscaria antes en la carpeta desde la que
+REM corre el setup], -NonInteractive [oculto y con espera, un pedido de respuesta colgaria el
+REM setup] y las comillas como #34 [una comilla literal en un echo cambia como cmd.exe lee el
+REM resto de la linea].
+echo procedure CloseByPath(const ScriptPath, Params: String); >> VideoDownloader_installer.iss
 echo var >> VideoDownloader_installer.iss
 echo   ResultCode: Integer; >> VideoDownloader_installer.iss
+echo   CmdLine: String; >> VideoDownloader_installer.iss
+echo begin >> VideoDownloader_installer.iss
+echo   CmdLine := '-NoProfile -NonInteractive -ExecutionPolicy Bypass -File ' + #34 + ScriptPath + #34 + ' ' + Params; >> VideoDownloader_installer.iss
+echo   if Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), CmdLine, '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then >> VideoDownloader_installer.iss
+echo     Log('close_by_path ' + Params + ': codigo ' + IntToStr(ResultCode)) >> VideoDownloader_installer.iss
+echo   else >> VideoDownloader_installer.iss
+echo     Log('close_by_path no se pudo ejecutar, no se cierra nada: ' + SysErrorMessage(ResultCode)); >> VideoDownloader_installer.iss
+echo end; >> VideoDownloader_installer.iss
+echo. >> VideoDownloader_installer.iss
+echo function PrepareToInstall(var NeedsRestart: Boolean): String; >> VideoDownloader_installer.iss
+echo var >> VideoDownloader_installer.iss
+echo   ScriptPath, Prefixes: String; >> VideoDownloader_installer.iss
 echo begin >> VideoDownloader_installer.iss
 echo   Result := ''; >> VideoDownloader_installer.iss
 REM Se cierran SOLO las copias que corren desde la carpeta de destino o desde la instalacion
@@ -149,8 +166,10 @@ REM nombre, que cerraba tambien cualquier otra copia: un build, otro checkout. -
 REM afuera al propio instalador del auto-update, que corre desde {app}\updates. Si el script
 REM no puede correr o rechaza la ruta, no cierra nada e Inno avisa "archivo en uso".
 echo   ExtractTemporaryFile('close_by_path.ps1'); >> VideoDownloader_installer.iss
-echo   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\close_by_path.ps1') + '" -ExeName VideoDownloader.exe -Prefix "' + ExpandConstant('{app}') + ',' + LegacyInstallDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode); >> VideoDownloader_installer.iss
-echo   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\close_by_path.ps1') + '" -ExeName VimeoDownloader.exe -Prefix "' + ExpandConstant('{app}') + ',' + LegacyInstallDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode); >> VideoDownloader_installer.iss
+echo   ScriptPath := ExpandConstant('{tmp}\close_by_path.ps1'); >> VideoDownloader_installer.iss
+echo   Prefixes := ExpandConstant('{app}') + ',' + LegacyInstallDir; >> VideoDownloader_installer.iss
+echo   CloseByPath(ScriptPath, '-ExeName VideoDownloader.exe -Prefix ' + #34 + Prefixes + #34); >> VideoDownloader_installer.iss
+echo   CloseByPath(ScriptPath, '-ExeName VimeoDownloader.exe -Prefix ' + #34 + Prefixes + #34); >> VideoDownloader_installer.iss
 echo   Sleep(1000); >> VideoDownloader_installer.iss
 echo   RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, LegacyUninstallKey); >> VideoDownloader_installer.iss
 echo   RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE, LegacyUninstallKey); >> VideoDownloader_installer.iss
