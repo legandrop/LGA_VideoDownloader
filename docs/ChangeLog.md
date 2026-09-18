@@ -1,5 +1,7 @@
 v0.96:
 
+        - `HELP / LA VERSION DE FFMPEG CORTABA SU FILA` En la ventana de Help la fila de FFmpeg se veia cortada: "Merges audio and vid" y la version truncada. El ffmpeg que se distribuye es un build nocturno y su version (`N-117208-gbd22d7e601-20240927`, 203 px) no entra en la fila de ancho fijo, asi que el rol y la version quedaban en 137 px cada uno. La captura de QA usaba `7.1-full_build` y nunca lo mostro. Ahora los nocturnos se muestran por su fecha (`2024-09-27`), cualquier version de mas de 16 caracteres se recorta, y la cadena completa queda en el tooltip. `--ui-shot help` usa la version real y su `.json` anota el ancho que pide cada texto (`hintWidth`), para detectar recortes. [ Help - La version de FFmpeg cortaba su fila ]
+
         - `SCRIPTS / COMPILAR Y DEPLOY YA NO CIERRAN LA APP INSTALADA` `compilar.bat` y `deploy.bat` hacian `taskkill /F /IM VideoDownloader.exe`, que cierra por nombre todas las copias: cada build cerraba tambien la app instalada y le cortaba las descargas en curso. Ahora cierran por la ruta real del proceso con `tools/close_by_path.ps1`, copia sin cambios de la pieza de LGA_Base_QT_C_Py (rev 2): `compilar` solo cierra `build\VideoDownloader.exe`, y `deploy` ademas lo que corra desde `deploy\`, antes de borrar esa carpeta. Los dos suman `--no-run` para compilar sin abrir la app. [ Scripts - Compilar y deploy no cierran la app instalada ]
 
 v0.95:

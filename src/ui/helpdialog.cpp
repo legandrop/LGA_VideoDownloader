@@ -9,6 +9,7 @@
 #include <QPainter>
 #include <QProgressBar>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QVBoxLayout>
 
 namespace {
@@ -20,6 +21,25 @@ QString link(const QString &url, const QString &text)
 {
     return QStringLiteral("<a href=\"%1\" style=\"color:%2; text-decoration:none;\">%3</a>")
         .arg(url, QLatin1String(Theme::kLink), text.toHtmlEscaped());
+}
+
+// Version de una tool tal como entra en la fila de creditos. El ancho de la fila es fijo
+// (DIALOG_WIDTH) y la version comparte el lugar con el rol: con un build nocturno de ffmpeg
+// ("N-117208-gbd22d7e601-20240927", 203 px) se comia el rol y los dos quedaban cortados. Los
+// nocturnos se muestran por su fecha y cualquier otra cadena larga se recorta; la completa va
+// en el tooltip.
+QString shortToolVersion(const QString &version)
+{
+    static const QRegularExpression nightly(QStringLiteral("^N-\\d+-g[0-9a-f]+-(\\d{4})(\\d{2})(\\d{2})$"));
+    const QRegularExpressionMatch match = nightly.match(version);
+    if (match.hasMatch()) {
+        return QStringLiteral("%1-%2-%3").arg(match.captured(1), match.captured(2), match.captured(3));
+    }
+    constexpr int kMaxChars = 16;
+    if (version.size() > kMaxChars) {
+        return version.left(kMaxChars - 1) + QChar(0x2026);
+    }
+    return version;
 }
 
 QLabel *label(const QString &text, const char *name, QWidget *parent)
@@ -253,13 +273,20 @@ HelpDialog::HelpDialog(QWidget *parent)
 
 void HelpDialog::setToolVersions(const QMap<QString, QString> &versions)
 {
-    const auto shown = [&versions](const char *key) {
+    const auto show = [&versions](QLabel *target, const char *key) {
         const QString value = versions.value(QLatin1String(key));
-        return value.isEmpty() ? QStringLiteral("not found") : value;
+        if (value.isEmpty()) {
+            target->setText(QStringLiteral("not found"));
+            target->setToolTip(QString());
+            return;
+        }
+        const QString shown = shortToolVersion(value);
+        target->setText(shown);
+        target->setToolTip(shown == value ? QString() : value);
     };
-    m_ytdlpVersion->setText(shown("yt-dlp"));
-    m_ffmpegVersion->setText(shown("ffmpeg"));
-    m_denoVersion->setText(shown("deno"));
+    show(m_ytdlpVersion, "yt-dlp");
+    show(m_ffmpegVersion, "ffmpeg");
+    show(m_denoVersion, "deno");
 }
 
 void HelpDialog::setUpdateView(const UpdateView &view)

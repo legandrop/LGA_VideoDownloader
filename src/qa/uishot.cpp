@@ -577,7 +577,7 @@ int runUiShot(const QStringList &args)
         // Hijo comun dentro de la ventana, no una ventana propia: se dibuja con el mismo render.
         dialog->setWindowFlags(Qt::Widget);
         dialog->setToolVersions({{QStringLiteral("yt-dlp"), QStringLiteral("2026.08.19")},
-                                 {QStringLiteral("ffmpeg"), QStringLiteral("7.1-full_build")},
+                                 {QStringLiteral("ffmpeg"), QStringLiteral("N-117208-gbd22d7e601-20240927")},
                                  {QStringLiteral("deno"), QStringLiteral("2.9.6")}});
         UpdateView view;
         view.currentVersion = QStringLiteral(VIDEODOWNLOADER_VERSION);
@@ -664,6 +664,11 @@ int runUiShot(const QStringList &args)
         entry.insert(QStringLiteral("name"), widget->objectName());
         if (auto *labelWidget = qobject_cast<QLabel *>(widget)) {
             entry.insert(QStringLiteral("text"), labelWidget->text().left(60));
+            // Ancho que pide el texto: si el rectangulo es mas angosto, el label esta recortado.
+            entry.insert(QStringLiteral("hintWidth"), labelWidget->sizeHint().width());
+            if (!labelWidget->toolTip().isEmpty()) {
+                entry.insert(QStringLiteral("toolTip"), labelWidget->toolTip());
+            }
         } else if (auto *button = qobject_cast<QAbstractButton *>(widget)) {
             entry.insert(QStringLiteral("text"), button->text());
         }
