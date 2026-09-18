@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 
 #include <functional>
@@ -57,6 +58,14 @@ public:
     // Motivo por el que no se puede instalar desde esta copia (build de desarrollo); vacio si se puede.
     QString installBlockedReason() const;
 
+    // Carpetas del instalador descargado. Windows: `<app>/updates`, o
+    // `%LOCALAPPDATA%/LGA/VideoDownloader/updates` si la instalacion no es escribible
+    // (AppPaths::heavyDataDir). Las versiones <= 0.95 lo bajaban a %TEMP%: esa carpeta se sigue
+    // barriendo. Publicas para `--qa-update-dirs`, que las prueba con carpetas de prueba.
+    static QString legacyTempUpdateDir();
+    static QStringList installerSweepDirs(const QString &appDir, const QString &fallbackDir);
+    static int removeOldInstallers(const QStringList &dirs, const QString &keepName);
+
     // Se llama justo antes de lanzar el instalador: debe cortar la cola y matar yt-dlp y sus
     // hijos, porque el taskkill del instalador no los alcanza y bloquearian la copia.
     void setBeforeInstallHook(std::function<void()> hook) { m_beforeInstallHook = std::move(hook); }
@@ -85,6 +94,7 @@ private:
     void onDownloadFinished();
     void launchInstaller(const QString &installerPath);
     void discardPartialDownload();
+    void sweepInstallers(const QString &keepName);
 
     QNetworkAccessManager *m_network = nullptr;
     QNetworkReply *m_checkReply = nullptr;

@@ -20,6 +20,12 @@ int runParseCheck(const QStringList &args);
 // que movio y como quedaron las dos carpetas.
 int runMigrateCheck(const QStringList &args);
 
+// `--qa-update-dirs <carpeta-app> <carpeta-fallback>`: sin red y sin lanzar nada, resuelve la
+// carpeta del instalador del auto-update como lo hace la app (`<carpeta-app>/updates` si acepta
+// una escritura real; si no, el fallback) y corre el barrido de instaladores viejos sobre esas
+// carpetas y la de %TEMP% del proceso (TMP/TEMP). Imprime lo que resolvio y lo que quedo.
+int runUpdateDirsCheck(const QStringList &args);
+
 // `--qa-cookies`: test sin red del armado de cookies.txt y de la validacion del protocolo de
 // la extension. Imprime PASS/FAIL por caso y devuelve 0 si pasan todos.
 int runCookiesCheck();

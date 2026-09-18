@@ -16,13 +16,19 @@
 // - AppData (Roaming) queda solo para settings chicos.
 namespace AppPaths {
 
-// Carpeta para `name` ("tools", "session-cookies"). No la crea salvo para probar escritura
+// Carpeta para `name` ("tools", "session-cookies", "updates"). No la crea salvo para probar escritura
 // en Windows. El resultado se resuelve una vez por nombre y queda fijo durante el proceso.
 QString heavyDataDir(const QString &name);
 
 // `%LOCALAPPDATA%/LGA/VideoDownloader/<name>` (macOS: Application Support). Es la ubicacion
 // del diseno anterior en Windows y la vigente en macOS.
 QString userDataDir(const QString &name);
+
+// Nucleo de heavyDataDir(), sin cache y con las dos carpetas explicitas: `inAppDir` si acepta
+// una escritura real (sin crearla: se prueba en el padre si todavia no existe), y si no
+// `fallbackDir`. Fuera de Windows devuelve siempre `fallbackDir`. Lo usa `--qa-update-dirs`
+// para probar la eleccion con carpetas de prueba.
+QString chooseHeavyDataDir(const QString &inAppDir, const QString &fallbackDir, bool *usedFallback = nullptr);
 
 // true si en Windows la carpeta de `name` tuvo que caer a LOCALAPPDATA.
 bool usesFallback(const QString &name);

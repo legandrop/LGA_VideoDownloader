@@ -271,21 +271,36 @@ QString heavyDataDir(const QString &name)
     Resolved resolved;
 #ifdef Q_OS_WIN
     // Windows: dentro de la carpeta de la app, salvo que no se pueda escribir ahi.
-    const QString inApp = QCoreApplication::applicationDirPath() + QLatin1Char('/') + name;
-    if (canWriteInto(inApp)) {
-        resolved.path = inApp;
-    } else {
-        resolved.path = userDataDir(name);
-        resolved.fallback = true;
-        qWarning() << "[AppPaths] La carpeta de la app no es escribible, se usa" << resolved.path
-                   << "en vez de" << inApp;
-    }
+    resolved.path = chooseHeavyDataDir(QCoreApplication::applicationDirPath() + QLatin1Char('/') + name,
+                                       userDataDir(name), &resolved.fallback);
 #else
     // macOS: fuera del bundle (escribir dentro del .app rompe la firma).
     resolved.path = userDataDir(name);
 #endif
     s_cache.insert(name, resolved);
     return resolved.path;
+}
+
+QString chooseHeavyDataDir(const QString &inAppDir, const QString &fallbackDir, bool *usedFallback)
+{
+#ifdef Q_OS_WIN
+    const bool writable = canWriteInto(inAppDir);
+    if (usedFallback) {
+        *usedFallback = !writable;
+    }
+    if (writable) {
+        return inAppDir;
+    }
+    qWarning() << "[AppPaths] La carpeta de la app no es escribible, se usa" << fallbackDir
+               << "en vez de" << inAppDir;
+    return fallbackDir;
+#else
+    Q_UNUSED(inAppDir);
+    if (usedFallback) {
+        *usedFallback = true;
+    }
+    return fallbackDir;
+#endif
 }
 
 bool usesFallback(const QString &name)

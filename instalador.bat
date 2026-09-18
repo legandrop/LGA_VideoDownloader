@@ -96,10 +96,12 @@ echo Source: "deploy\tools\yt-dlp.exe"; DestDir: "{app}\tools"; Flags: onlyifdoe
 echo Source: "deploy\tools\deno.exe"; DestDir: "{app}\tools"; Flags: onlyifdoesntexist skipifsourcedoesntexist >> VideoDownloader_installer.iss
 echo. >> VideoDownloader_installer.iss
 REM Al desinstalar, lo que escribio la app en su carpeta (tools actualizadas, tools.json,
-REM .staging, .old y las cookies temporales) no lo instalo Inno y no se borraria solo.
+REM .staging, .old, las cookies temporales y el instalador que bajo el auto-update) no lo
+REM instalo Inno y no se borraria solo.
 echo [UninstallDelete] >> VideoDownloader_installer.iss
 echo Type: filesandordirs; Name: "{app}\tools" >> VideoDownloader_installer.iss
 echo Type: filesandordirs; Name: "{app}\session-cookies" >> VideoDownloader_installer.iss
+echo Type: filesandordirs; Name: "{app}\updates" >> VideoDownloader_installer.iss
 echo. >> VideoDownloader_installer.iss
 echo [Icons] >> VideoDownloader_installer.iss
 echo Name: "{group}\VideoDownloader"; Filename: "{app}\VideoDownloader.exe" >> VideoDownloader_installer.iss
@@ -162,9 +164,11 @@ echo begin >> VideoDownloader_installer.iss
 echo   if CurUninstallStep = usPostUninstall then >> VideoDownloader_installer.iss
 echo   begin >> VideoDownloader_installer.iss
 REM Restos de versiones anteriores, que bajaban yt-dlp y deno a LocalAppData (y de una
-REM instalacion en carpeta no escribible, donde siguen yendo ahi): son cache, se borran sin preguntar.
+REM instalacion en carpeta no escribible, donde siguen yendo ahi las tools y el instalador del
+REM auto-update): son cache, se borran sin preguntar.
 echo     DelTree(ExpandConstant('{localappdata}\LGA\VideoDownloader\tools'), True, True, True); >> VideoDownloader_installer.iss
 echo     DelTree(ExpandConstant('{localappdata}\LGA\VideoDownloader\session-cookies'), True, True, True); >> VideoDownloader_installer.iss
+echo     DelTree(ExpandConstant('{localappdata}\LGA\VideoDownloader\updates'), True, True, True); >> VideoDownloader_installer.iss
 echo     ConfigPath := ExpandConstant('{userappdata}\LGA\VideoDownloader'); >> VideoDownloader_installer.iss
 echo     if DirExists(ConfigPath) then >> VideoDownloader_installer.iss
 echo     begin >> VideoDownloader_installer.iss

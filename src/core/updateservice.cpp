@@ -1,5 +1,6 @@
 #include "videodownloader/updateservice.h"
 #include "videodownloader/LgaRegistry.h"
+#include "videodownloader/apppaths.h"
 #include "videodownloader/toolsupdater.h"
 #include "videodownloader/updateurls.h"
 #include "videodownloader/versioncompare.h"
@@ -33,38 +34,87 @@ QString userAgent()
     return QStringLiteral("LGA_VideoDownloader/%1").arg(QCoreApplication::applicationVersion());
 }
 
+constexpr int kResweepDelayMs = 3 * 60 * 1000;
+
 QString updateDirPath()
+{
+#ifdef Q_OS_WIN
+    // Dentro de la instalacion (`<app>/updates`), con fallback a LOCALAPPDATA si la carpeta de
+    // la app no acepta una escritura real: la regla LGA de datos pesados (AppPaths).
+    return AppPaths::heavyDataDir(QStringLiteral("updates"));
+#else
+    // macOS no baja el instalador (abre la pagina del release); si algun dia lo hace, fuera
+    // del bundle.
+    return UpdateService::legacyTempUpdateDir();
+#endif
+}
+
+} // namespace
+
+// Carpeta de updates de las versiones <= 0.95 en Windows (y la vigente en macOS). Sale de
+// TempLocation, que en Windows respeta TMP/TEMP.
+QString UpdateService::legacyTempUpdateDir()
 {
     return QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
         .filePath(QStringLiteral("LGA_VideoDownloader_updates"));
 }
 
-// Borra los instaladores de updates anteriores (~80 MB cada uno) que quedan en la carpeta
-// de updates, salvo keepName. Solo mira esa carpeta y solo archivos con nombre de asset;
-// si uno sigue en uso (instalador todavia corriendo) el borrado falla y se reintenta la
-// proxima vez.
-void removeOldInstallers(const QString &keepName)
+// Todas las carpetas donde puede haber quedado un instalador: la de la instalacion, la del
+// fallback (una instalacion que alguna vez no fue escribible) y la de %TEMP% de antes.
+QStringList UpdateService::installerSweepDirs(const QString &appDir, const QString &fallbackDir)
 {
-    QDir dir(updateDirPath());
-    if (!dir.exists()) {
-        return;
+    QStringList dirs;
+#ifdef Q_OS_WIN
+    dirs << QDir(appDir).filePath(QStringLiteral("updates")) << fallbackDir;
+#else
+    Q_UNUSED(appDir);
+    Q_UNUSED(fallbackDir);
+#endif
+    const QString legacy = legacyTempUpdateDir();
+    if (!dirs.contains(legacy)) {
+        dirs << legacy;
     }
-    const QStringList filters = {QStringLiteral("VideoDownloader_Setup_v*.exe"),
-                                 QStringLiteral("LGA_Video_Downloader_Mac_v*.zip")};
-    const QFileInfoList entries = dir.entryInfoList(filters, QDir::Files | QDir::Hidden | QDir::NoSymLinks);
-    for (const QFileInfo &entry : entries) {
-        if (entry.fileName() == keepName) {
-            continue;
-        }
-        if (QFile::remove(entry.absoluteFilePath())) {
-            qDebug() << "[UpdateService] Instalador viejo borrado" << entry.fileName();
-        } else {
-            qDebug() << "[UpdateService] No se pudo borrar el instalador viejo" << entry.fileName();
-        }
-    }
+    return dirs;
 }
 
-} // namespace
+// Borra los instaladores de updates (~80 MB cada uno) que hayan quedado en `dirs`, salvo
+// keepName. Solo archivos con nombre de asset: lo demas que haya en esas carpetas no se toca.
+// Si uno sigue en uso (el instalador todavia corriendo) el borrado falla y se reintenta la
+// proxima vez. Una carpeta que queda vacia se borra. Devuelve cuantos borro.
+int UpdateService::removeOldInstallers(const QStringList &dirs, const QString &keepName)
+{
+    int removed = 0;
+    const QStringList filters = {QStringLiteral("VideoDownloader_Setup_v*.exe"),
+                                 QStringLiteral("LGA_Video_Downloader_Mac_v*.zip")};
+    for (const QString &path : dirs) {
+        QDir dir(path);
+        if (path.isEmpty() || !dir.exists()) {
+            continue;
+        }
+        const QFileInfoList entries = dir.entryInfoList(filters, QDir::Files | QDir::Hidden | QDir::NoSymLinks);
+        for (const QFileInfo &entry : entries) {
+            if (entry.fileName() == keepName) {
+                continue;
+            }
+            if (QFile::remove(entry.absoluteFilePath())) {
+                ++removed;
+                qDebug() << "[UpdateService] Instalador viejo borrado" << entry.absoluteFilePath();
+            } else {
+                qDebug() << "[UpdateService] No se pudo borrar el instalador viejo" << entry.absoluteFilePath();
+            }
+        }
+        // rmdir solo borra una carpeta vacia: si queda cualquier otra cosa, no pasa nada.
+        QDir().rmdir(path);
+    }
+    return removed;
+}
+
+void UpdateService::sweepInstallers(const QString &keepName)
+{
+    removeOldInstallers(installerSweepDirs(QCoreApplication::applicationDirPath(),
+                                           AppPaths::userDataDir(QStringLiteral("updates"))),
+                        keepName);
+}
 
 // Asset de update por plataforma. En Windows el instalador conserva el nombre
 // VideoDownloader (regla del repo); en macOS es el .zip que produce deploy.sh.
@@ -81,7 +131,15 @@ UpdateService::UpdateService(QObject *parent)
     : QObject(parent)
     , m_network(new QNetworkAccessManager(this))
 {
-    removeOldInstallers(QString());
+    sweepInstallers(QString());
+    // Despues de un update, la app nueva arranca mientras el instalador todavia corre (el
+    // [Run] de Inno la lanza antes de terminar) y el barrido de arriba no puede borrarlo. Se
+    // reintenta una vez mas tarde, en la misma sesion.
+    QTimer::singleShot(kResweepDelayMs, this, [this]() {
+        if (m_state != State::Downloading && m_state != State::Installing) {
+            sweepInstallers(m_assetName);
+        }
+    });
 }
 
 UpdateService::~UpdateService()
@@ -267,13 +325,14 @@ void UpdateService::installAppUpdate()
         return;
     }
 
+    // El barrido va ANTES del mkpath: borra las carpetas de updates que quedan vacias.
+    discardPartialDownload();
+    sweepInstallers(m_assetName);
     const QString updateDir = updateDirPath();
     if (!QDir().mkpath(updateDir)) {
         failInstall(QStringLiteral("The update folder could not be created."));
         return;
     }
-    discardPartialDownload();
-    removeOldInstallers(m_assetName);
     m_downloadTargetPath = QDir(updateDir).filePath(m_assetName);
     m_downloadFile = new QSaveFile(m_downloadTargetPath);
     if (!m_downloadFile->open(QIODevice::WriteOnly)) {
@@ -408,6 +467,8 @@ void UpdateService::launchInstaller(const QString &installerPath)
 #endif
     qInfo() << "[UpdateService] Lanzando instalador" << installerPath << "sobre" << appDir;
     if (!process.startDetached()) {
+        // Sin lanzarse no sirve: no se deja el instalador ocupando lugar.
+        QFile::remove(installerPath);
         failInstall(QStringLiteral("The update installer could not be started."));
         return;
     }

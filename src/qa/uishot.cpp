@@ -12,6 +12,7 @@
 #include "videodownloader/nativehost.h"
 #include "videodownloader/sessioncookies.h"
 #include "videodownloader/toolsmanager.h"
+#include "videodownloader/updateservice.h"
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -293,6 +294,39 @@ int runMigrateCheck(const QStringList &args)
     dump("legacy-staging", legacyDir + QStringLiteral("/.staging"));
     dump("target", targetDir);
     dump("target-staging", targetDir + QStringLiteral("/.staging"));
+    return 0;
+}
+
+int runUpdateDirsCheck(const QStringList &args)
+{
+    const int index = args.indexOf(QStringLiteral("--qa-update-dirs"));
+    const QString appDir = args.value(index + 1);
+    const QString fallbackDir = args.value(index + 2);
+    if (appDir.isEmpty() || fallbackDir.isEmpty()) {
+        fprintf(stderr, "qa-update-dirs: needs <app folder> <fallback folder>\n");
+        return 2;
+    }
+    // La misma eleccion que hace la app con su propia carpeta, pero sobre carpetas de prueba.
+    bool fallback = false;
+    const QString resolved = AppPaths::chooseHeavyDataDir(QDir(appDir).filePath(QStringLiteral("updates")),
+                                                          fallbackDir, &fallback);
+    fprintf(stdout, "resolved %s fallback=%d\n", qPrintable(QDir::toNativeSeparators(resolved)), fallback ? 1 : 0);
+    fprintf(stdout, "temp %s\n", qPrintable(QDir::toNativeSeparators(UpdateService::legacyTempUpdateDir())));
+
+    // El barrido del arranque, sobre las carpetas de prueba y la de %TEMP% (TMP/TEMP del proceso).
+    const QStringList dirs = UpdateService::installerSweepDirs(appDir, fallbackDir);
+    const int removed = UpdateService::removeOldInstallers(dirs, QString());
+    fprintf(stdout, "removed %d\n", removed);
+    for (const QString &dir : dirs) {
+        if (!QDir(dir).exists()) {
+            fprintf(stdout, "left %s <gone>\n", qPrintable(QDir::toNativeSeparators(dir)));
+            continue;
+        }
+        const QStringList entries = QDir(dir).entryList(QDir::Files | QDir::Dirs | QDir::NoDotAndDotDot | QDir::Hidden,
+                                                        QDir::Name);
+        fprintf(stdout, "left %s [%s]\n", qPrintable(QDir::toNativeSeparators(dir)),
+                qPrintable(entries.join(QStringLiteral(", "))));
+    }
     return 0;
 }
 

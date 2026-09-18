@@ -166,6 +166,9 @@ int main(int argc, char *argv[])
     if (app.arguments().contains(QStringLiteral("--qa-migrate"))) {
         return runMigrateCheck(app.arguments());
     }
+    if (app.arguments().contains(QStringLiteral("--qa-update-dirs"))) {
+        return runUpdateDirsCheck(app.arguments());
+    }
     if (app.arguments().contains(QStringLiteral("--ui-shot"))) {
         Theme::apply(app);
         return runUiShot(app.arguments());
