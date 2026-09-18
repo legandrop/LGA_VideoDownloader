@@ -1,4 +1,9 @@
 @echo off
+REM Uso: instalador.bat [--no-run]
+REM   --no-run  arma el instalador y su SHA256SUMS, y no pregunta si ejecutarlo.
+set "NO_RUN="
+if /I "%~1"=="--no-run" set "NO_RUN=1"
+
 echo Preparando instalador para VideoDownloader...
 
 REM Verificar que deploy tenga el ejecutable actual.
@@ -219,10 +224,24 @@ echo Instalador creado exitosamente en la carpeta 'installer'.
 echo Archivo: installer\VideoDownloader_Setup_v%APP_VERSION%.exe 
 echo. 
 
+REM Ejecutar el instalador recien armado SOLO si lo confirma alguien en una consola. Sin
+REM consola (corrida encadenada, automatizada o con la entrada redirigida) el choice podia
+REM leer una respuesta de la entrada y terminar ejecutando el instalador; ahora en ese caso no
+REM se ejecuta. Si PowerShell no corre, tampoco: no ejecutar es la direccion segura.
+if defined NO_RUN (
+    echo Instalador no ejecutado ^(--no-run^).
+    exit /b 0
+)
+powershell -NoProfile -Command "if ([Console]::IsInputRedirected) { exit 3 } else { exit 0 }"
+if errorlevel 1 (
+    echo Sin consola interactiva: el instalador no se ejecuta.
+    exit /b 0
+)
 choice /C YN /M "¿Desea ejecutar el instalador ahora mismo?"
-if %ERRORLEVEL%==1 (
+if "%ERRORLEVEL%"=="1" (
     echo Ejecutando el instalador...
     start "" "installer\VideoDownloader_Setup_v%APP_VERSION%.exe"
 ) else (
     echo Instalador no ejecutado.
 )
+exit /b 0

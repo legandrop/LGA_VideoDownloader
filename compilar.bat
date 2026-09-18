@@ -1,6 +1,6 @@
 @echo off
 REM Uso: compilar.bat [--no-run]
-REM   --no-run  compila y prepara build	ools, pero no abre la app al terminar.
+REM   --no-run  compila y prepara build\tools, pero no abre la app al terminar.
 set "NO_RUN="
 if /I "%~1"=="--no-run" set "NO_RUN=1"
 set "APP_ROOT=%~dp0"
