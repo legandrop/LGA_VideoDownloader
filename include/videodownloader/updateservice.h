@@ -67,7 +67,7 @@ public:
     static int removeOldInstallers(const QStringList &dirs, const QString &keepName);
 
     // Se llama justo antes de lanzar el instalador: debe cortar la cola y matar yt-dlp y sus
-    // hijos, porque el taskkill del instalador no los alcanza y bloquearian la copia.
+    // hijos, porque el instalador solo cierra VideoDownloader.exe y bloquearian la copia.
     void setBeforeInstallHook(std::function<void()> hook) { m_beforeInstallHook = std::move(hook); }
 
 public slots:

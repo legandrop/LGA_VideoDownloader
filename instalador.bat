@@ -94,6 +94,8 @@ REM actualizan, asi que siguen viniendo con el instalador y se pisan como siempr
 echo Source: "deploy\*"; DestDir: "{app}"; Excludes: "\tools\yt-dlp.exe,\tools\deno.exe"; Flags: ignoreversion recursesubdirs createallsubdirs >> VideoDownloader_installer.iss
 echo Source: "deploy\tools\yt-dlp.exe"; DestDir: "{app}\tools"; Flags: onlyifdoesntexist skipifsourcedoesntexist >> VideoDownloader_installer.iss
 echo Source: "deploy\tools\deno.exe"; DestDir: "{app}\tools"; Flags: onlyifdoesntexist skipifsourcedoesntexist >> VideoDownloader_installer.iss
+REM El script de cierre por ruta viaja dentro del instalador y se extrae a {tmp} en PrepareToInstall.
+echo Source: "tools\close_by_path.ps1"; Flags: dontcopy >> VideoDownloader_installer.iss
 echo. >> VideoDownloader_installer.iss
 REM Al desinstalar, lo que escribio la app en su carpeta (tools actualizadas, tools.json,
 REM .staging, .old, las cookies temporales y el instalador que bajo el auto-update) no lo
@@ -136,8 +138,14 @@ echo var >> VideoDownloader_installer.iss
 echo   ResultCode: Integer; >> VideoDownloader_installer.iss
 echo begin >> VideoDownloader_installer.iss
 echo   Result := ''; >> VideoDownloader_installer.iss
-echo   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM VideoDownloader.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode); >> VideoDownloader_installer.iss
-echo   Exec(ExpandConstant('{sys}\taskkill.exe'), '/F /IM VimeoDownloader.exe', '', SW_HIDE, ewWaitUntilTerminated, ResultCode); >> VideoDownloader_installer.iss
+REM Se cierran SOLO las copias que corren desde la carpeta de destino o desde la instalacion
+REM legacy, por la ruta real del proceso (tools\close_by_path.ps1). Antes era un taskkill por
+REM nombre, que cerraba tambien cualquier otra copia: un build, otro checkout. -ExeName deja
+REM afuera al propio instalador del auto-update, que corre desde {app}\updates. Si el script
+REM no puede correr o rechaza la ruta, no cierra nada e Inno avisa "archivo en uso".
+echo   ExtractTemporaryFile('close_by_path.ps1'); >> VideoDownloader_installer.iss
+echo   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\close_by_path.ps1') + '" -ExeName VideoDownloader.exe -Prefix "' + ExpandConstant('{app}') + ',' + LegacyInstallDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode); >> VideoDownloader_installer.iss
+echo   Exec(ExpandConstant('{sys}\WindowsPowerShell\v1.0\powershell.exe'), '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{tmp}\close_by_path.ps1') + '" -ExeName VimeoDownloader.exe -Prefix "' + ExpandConstant('{app}') + ',' + LegacyInstallDir + '"', '', SW_HIDE, ewWaitUntilTerminated, ResultCode); >> VideoDownloader_installer.iss
 echo   Sleep(1000); >> VideoDownloader_installer.iss
 echo   RegDeleteKeyIncludingSubkeys(HKEY_CURRENT_USER, LegacyUninstallKey); >> VideoDownloader_installer.iss
 echo   RegDeleteKeyIncludingSubkeys(HKEY_LOCAL_MACHINE, LegacyUninstallKey); >> VideoDownloader_installer.iss
