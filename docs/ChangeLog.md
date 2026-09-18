@@ -1,3 +1,7 @@
+v0.96:
+
+        - `SCRIPTS / COMPILAR Y DEPLOY YA NO CIERRAN LA APP INSTALADA` `compilar.bat` y `deploy.bat` hacian `taskkill /F /IM VideoDownloader.exe`, que cierra por nombre todas las copias: cada build cerraba tambien la app instalada y le cortaba las descargas en curso. Ahora cierran por la ruta real del proceso con `tools/close_by_path.ps1`, copia sin cambios de la pieza de LGA_Base_QT_C_Py (rev 2): `compilar` solo cierra `build\VideoDownloader.exe`, y `deploy` ademas lo que corra desde `deploy\`, antes de borrar esa carpeta. Los dos suman `--no-run` para compilar sin abrir la app. [ Scripts - Compilar y deploy no cierran la app instalada ]
+
 v0.95:
 
         - `TOOLS / LA MIGRACION SOLO ACEPTA UNA CARPETA DE TOOLS` La migracion borra la carpeta de origen cuando termina, y no verificaba que esa carpeta fuera de tools: apuntada a una carpeta cualquiera, se la llevaba puesta con todo lo que tuviera adentro. Solo se podia llegar ahi por la bandera de prueba `--qa-migrate`, que igual viaja en el binario publicado. Ahora se exige que el origen tenga `yt-dlp.exe`, `deno.exe` o `tools.json` (sueltos o en `.staging`); si no, no se toca nada y la bandera sale con error explicando por que. [ Tools - La migracion solo acepta una carpeta de tools ]

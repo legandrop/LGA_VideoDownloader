@@ -1,14 +1,18 @@
 @echo off
+REM Uso: compilar.bat [--no-run]
+REM   --no-run  compila y prepara build	ools, pero no abre la app al terminar.
+set "NO_RUN="
+if /I "%~1"=="--no-run" set "NO_RUN=1"
+set "APP_ROOT=%~dp0"
+cd /d "%APP_ROOT%"
+
 echo Compilando VideoDownloader...
 
-REM Matar el proceso VideoDownloader si está en ejecución
-taskkill /F /IM VideoDownloader.exe 2>nul
-if %ERRORLEVEL% EQU 0 (
-    echo Proceso VideoDownloader terminado.
-    timeout /t 1 >nul
-) else (
-    echo No se encontró el proceso VideoDownloader en ejecución.
-)
+REM Cerrar SOLO la copia de build\: el linker necesita libre ese archivo y ningun otro.
+REM Antes era un taskkill por nombre, que cerraba tambien la app instalada y le cortaba
+REM las descargas en curso. La decision la toma la ruta real del proceso.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%APP_ROOT%tools\close_by_path.ps1" -ExeName VideoDownloader.exe -ExactPath "%APP_ROOT%build\VideoDownloader.exe"
+if %ERRORLEVEL% equ 2 ( echo Error: close_by_path rechazo los parametros & exit /b 1 )
 
 REM Añadir Qt y MinGW al PATH
 set PATH=%PATH%;C:\Qt\6.8.2\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin
@@ -52,8 +56,12 @@ if exist ..\tools\*.* (
 REM Ejecutar la aplicación
 echo.
 echo Compilación completada exitosamente.
-echo Ejecutando VideoDownloader...
-echo.
-start VideoDownloader.exe
+if defined NO_RUN (
+    echo Ejecucion omitida ^(--no-run^).
+) else (
+    echo Ejecutando VideoDownloader...
+    echo.
+    start VideoDownloader.exe
+)
 
 cd ..

@@ -1,12 +1,22 @@
 @echo off
+REM Uso: deploy.bat [--no-run]
+REM   --no-run  arma deploy\ pero no abre la app al terminar.
+set "NO_RUN="
+if /I "%~1"=="--no-run" set "NO_RUN=1"
+set "APP_ROOT=%~dp0"
+cd /d "%APP_ROOT%"
+
+REM Cerrar SOLO las copias del repo: la de build\ (se recompila) y la de deploy\ (se borra
+REM entera). Va antes del rmdir, que con el exe abierto dejaba la carpeta a medias. Antes era un
+REM taskkill por nombre que cerraba tambien la app instalada con sus descargas en curso.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%APP_ROOT%tools\close_by_path.ps1" -ExeName VideoDownloader.exe -ExactPath "%APP_ROOT%build\VideoDownloader.exe" -Prefix "%APP_ROOT%deploy"
+if %ERRORLEVEL% equ 2 ( echo Error: close_by_path rechazo los parametros & exit /b 1 )
+
 REM Eliminar carpeta deploy si existe para asegurar un entorno limpio
 echo Limpiando carpeta de deploy anterior...
 if exist deploy rmdir /S /Q deploy
 
 echo Implementando VideoDownloader...
-
-REM Matar procesos previos si están en ejecución
-taskkill /F /IM VideoDownloader.exe 2>nul
 
 REM Añadir Qt al PATH
 set PATH=%PATH%;C:\Qt\6.8.2\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin
@@ -72,5 +82,9 @@ echo La aplicacion portable esta en la carpeta 'deploy'.
 echo.
 
 REM Ejecutar la aplicación implementada
-echo Ejecutando VideoDownloader...
-start deploy\VideoDownloader.exe
+if defined NO_RUN (
+    echo Ejecucion omitida ^(--no-run^).
+) else (
+    echo Ejecutando VideoDownloader...
+    start deploy\VideoDownloader.exe
+)
