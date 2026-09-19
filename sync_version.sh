@@ -12,7 +12,7 @@ fi
 # Orden de busqueda del interprete. Cada candidato se PRUEBA corriendolo: en
 # Windows (Git Bash), "python" y "python3" existen en el PATH como alias del
 # Microsoft Store, imprimen "Python was not found" y salen con error, asi que
-# verificar que estan no alcanza. Ver la seccion "Python" de AGENTS.md.
+# verificar que estan no alcanza.
 PY=""
 for c in "$DIR/python_runtime/windows/python.exe" \
          "$DIR/python_runtime/macos/python3/python3" \

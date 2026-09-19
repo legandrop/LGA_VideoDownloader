@@ -5,20 +5,9 @@ installer/
 VideoDownloader_Installer/
 VideoDownloader_Installer.tar.gz
 deploy-old/
-.codex/
 # Artefacto generado: `instalador.bat` lo reescribe entero en cada corrida, asi
 # que versionarlo solo produce diffs de ruido. Se corrige en `instalador.bat`.
 VideoDownloader_installer.iss
-# Se ignora el CONTENIDO de .cursor/, no el directorio: Git no puede
-# re-incluir un archivo si su directorio padre esta excluido.
-.cursor/*
-# Las reglas del repo SI se versionan: son uno de los tres espejos
-# (CLAUDE.md / AGENTS.md / .cursor/rules/instructions.mdc). Se re-incluye SOLO
-# ese archivo: abrir el directorio entero deja que cualquier .mdc local de
-# Cursor entre al repo con un `git add -A`.
-!.cursor/rules/
-.cursor/rules/*
-!.cursor/rules/instructions.mdc
 
 # Python (los scripts de tools/)
 __pycache__/

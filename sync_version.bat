@@ -11,7 +11,7 @@ if not exist "%SCRIPT%" (
 rem Orden de busqueda del interprete. Cada candidato se PRUEBA corriendolo:
 rem en Windows, "python" y "python3" existen en el PATH como alias del
 rem Microsoft Store, imprimen "Python was not found" y salen con error, asi que
-rem verificar que estan no alcanza. Ver la seccion "Python" de AGENTS.md.
+rem verificar que estan no alcanza.
 set "PY="
 set "PYARGS="
 call :probar "%~dp0python_runtime\windows\python.exe"

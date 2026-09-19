@@ -1,10 +1,10 @@
-# Configuración del Linter VSCode/Cursor para Proyectos Qt/C++
+# Configuración del Linter VSCode para Proyectos Qt/C++
 
-Este documento explica cómo configurar correctamente el linter de VSCode/Cursor para proyectos Qt/C++ y evitar errores falsos del IntelliSense.
+Este documento explica cómo configurar correctamente el linter de VSCode para proyectos Qt/C++ y evitar errores falsos del IntelliSense.
 
 ## 🚨 Problema Común
 
-Cuando trabajas con proyectos Qt/C++ en VSCode/Cursor, es común ver errores falsos del linter como:
+Cuando trabajas con proyectos Qt/C++ en VSCode, es común ver errores falsos del linter como:
 - `#include errors detected`
 - `cannot open source file "QtCore/QObject"`
 - `identifier "QWidget" is undefined`
@@ -292,7 +292,7 @@ Este archivo define asociaciones de archivos para que VSCode reconozca correctam
 
 Después de crear estos archivos:
 
-1. **Reinicia VSCode/Cursor** para cargar la nueva configuración
+1. **Reinicia VSCode** para cargar la nueva configuración
 2. **Abre cualquier archivo .cpp** del proyecto
 3. **Verifica que no hay errores falsos** en el panel de problemas
 4. **Comprueba que el IntelliSense funciona** (autocompletado, definiciones)
@@ -311,7 +311,7 @@ code --list-extensions | grep ms-vscode.cpptools
 ### Problema: Aún veo errores después de la configuración
 
 **Solución:**
-1. Reinicia completamente VSCode/Cursor
+1. Reinicia completamente VSCode
 2. Verifica que las rutas de Qt son correctas para tu instalación
 3. Asegúrate que MinGW está instalado y en el PATH
 
@@ -362,7 +362,7 @@ tu-proyecto/
 - **Estos archivos son específicos del proyecto** - cada proyecto Qt necesita su propia configuración
 - **Se pueden versionar en Git** - otros desarrolladores se beneficiarán de la configuración
 - **Actualizar rutas** cuando cambies de versión de Qt
-- **Compatible con** VSCode, Cursor, y otros editores basados en VSCode
+- **Compatible con** VSCode y otros editores basados en VSCode
 
 ---
 
