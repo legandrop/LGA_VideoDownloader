@@ -120,6 +120,14 @@ echo. >> VideoDownloader_installer.iss
 REM Host de Native Messaging de la extension: una sola clave de HKCU que leen Chrome, Brave y
 REM Edge, apuntando al JSON junto al exe. Se borra al desinstalar.
 echo [Registry] >> VideoDownloader_installer.iss
+REM Los tres padres se borran SOLO si quedan sin subclaves ni valores (uninsdeletekeyifempty):
+REM Chrome/Brave/Edge pueden tener otras extensiones con host nativo bajo el mismo
+REM NativeMessagingHosts, y Software\Google\Chrome y Software\Google son de Chrome, no nuestros.
+REM Van ANTES de la clave propia: Inno deshace el registro en orden inverso, asi que la propia se
+REM borra primero y recien despues se revisan los padres, de adentro hacia afuera.
+echo Root: HKCU; Subkey: "Software\Google"; ValueType: none; Flags: uninsdeletekeyifempty >> VideoDownloader_installer.iss
+echo Root: HKCU; Subkey: "Software\Google\Chrome"; ValueType: none; Flags: uninsdeletekeyifempty >> VideoDownloader_installer.iss
+echo Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts"; ValueType: none; Flags: uninsdeletekeyifempty >> VideoDownloader_installer.iss
 echo Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.lga.videodownloader"; ValueType: string; ValueName: ""; ValueData: "{app}\com.lga.videodownloader.json"; Flags: uninsdeletekey >> VideoDownloader_installer.iss
 echo. >> VideoDownloader_installer.iss
 echo [Run] >> VideoDownloader_installer.iss
