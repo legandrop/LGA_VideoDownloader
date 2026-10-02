@@ -23,10 +23,13 @@ constexpr int CONTENT_WIDTH = DIALOG_WIDTH - 44;
 constexpr int RANGE_NOTES_MAX_HEIGHT = 220;
 constexpr int HISTORY_MAX_HEIGHT = 420;
 
+// Los links del Help van en #8C7ED9 sin subrayar: el mismo link a lega.com.ar en todas las apps.
+constexpr const char *HELP_LINK_COLOR = "#8C7ED9";
+
 QString link(const QString &url, const QString &text)
 {
     return QStringLiteral("<a href=\"%1\" style=\"color:%2; text-decoration:none;\">%3</a>")
-        .arg(url, QLatin1String(Theme::kLink), text.toHtmlEscaped());
+        .arg(url, QLatin1String(HELP_LINK_COLOR), text.toHtmlEscaped());
 }
 
 // Version de una tool tal como entra en la fila de creditos. El ancho de la fila es fijo
@@ -184,8 +187,8 @@ HelpDialog::HelpDialog(QWidget *parent)
     layout->addLayout(updatesRow);
 
     auto *authorRow = keyValueRow(QStringLiteral("Author"), "kvKey");
-    auto *author = label(QStringLiteral("Lega Pugliese · ") + link(QStringLiteral("https://github.com/legandrop"),
-                                                                 QStringLiteral("github.com/legandrop")), "kvValue", this);
+    auto *author = label(QStringLiteral("Lega Pugliese · ") + link(QStringLiteral("https://lega.com.ar"),
+                                                                 QStringLiteral("lega.com.ar")), "kvValue", this);
     author->setTextFormat(Qt::RichText);
     author->setOpenExternalLinks(true);
     authorRow->addWidget(author, 1);
