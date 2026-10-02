@@ -1,9 +1,10 @@
 #include "videodownloader/helpdialog.h"
 #include "videodownloader/theme.h"
 #include "videodownloader/uiwidgets.h"
+#include "videodownloader/whatsnewdialog.h"
 
 #include <QEvent>
-#include <QGraphicsDropShadowEffect>
+#include <QTextBrowser>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
@@ -16,6 +17,11 @@ namespace {
 
 constexpr int DIALOG_WIDTH = 520;
 constexpr int KEY_COLUMN = 96;
+constexpr int CONTENT_WIDTH = DIALOG_WIDTH - 44;
+// Notas debajo del update: acotadas para que la ayuda siga entrando en una pantalla chica. El
+// historial ocupa el lugar de la extension y los creditos, asi que puede ser mas alto.
+constexpr int RANGE_NOTES_MAX_HEIGHT = 220;
+constexpr int HISTORY_MAX_HEIGHT = 420;
 
 QString link(const QString &url, const QString &text)
 {
@@ -119,6 +125,10 @@ HelpDialog::HelpDialog(QWidget *parent)
     titleRow->setSpacing(8);
     titleRow->addWidget(label(QStringLiteral("LGA Video Downloader"), "helpTitle", this), 0, Qt::AlignBaseline);
     titleRow->addWidget(label(QStringLiteral("v" VIDEODOWNLOADER_VERSION), "helpVersion", this), 0, Qt::AlignBaseline);
+    titleRow->addSpacing(6);
+    m_whatsNewLink = label(QString(), "whatsNewLink", this);
+    m_whatsNewLink->setTextFormat(Qt::RichText);
+    titleRow->addWidget(m_whatsNewLink, 0, Qt::AlignBaseline);
     titleRow->addStretch(1);
     auto *close = Ui::button(QString(), QStringLiteral("ghost"), QStringLiteral("icon"), this);
     Ui::setIcon(close, Icon::X, Theme::color(Theme::kIcon));
@@ -159,6 +169,10 @@ HelpDialog::HelpDialog(QWidget *parent)
     updateLayout->addLayout(buttons);
     layout->addWidget(m_updateBox);
 
+    // Notas: lo nuevo del update ofrecido, o el historial completo si se abrio "What's new".
+    m_notesView = NotesView::create(this);
+    layout->addWidget(m_notesView);
+
     // Fila "Updates": ultimo chequeo y boton para chequear
     auto *updatesRow = keyValueRow(QStringLiteral("Updates"), "kvKey");
     m_checkStatus = label(QString(), "kvValue", this);
@@ -177,9 +191,15 @@ HelpDialog::HelpDialog(QWidget *parent)
     authorRow->addWidget(author, 1);
     layout->addLayout(authorRow);
 
+    // Extension y creditos: el historial de "What's new" ocupa su lugar mientras esta abierto.
+    m_details = new QWidget(this);
+    auto *details = new QVBoxLayout(m_details);
+    details->setContentsMargins(0, 0, 0, 0);
+    details->setSpacing(12);
+
     auto *rule = new QFrame(this);
     rule->setObjectName(QStringLiteral("helpRule"));
-    layout->addWidget(rule);
+    details->addWidget(rule);
 
     // Extension de navegador: como cargarla (sin Web Store, carpeta junto a la app).
     const auto strong = [](const QString &text) {
@@ -191,11 +211,11 @@ HelpDialog::HelpDialog(QWidget *parent)
     extensionRow->addStretch(1);
     auto *openExtension = Ui::button(QStringLiteral("Open extension folder"), QString(), QStringLiteral("sm"), this);
     extensionRow->addWidget(openExtension, 0, Qt::AlignVCenter);
-    layout->addLayout(extensionRow);
+    details->addLayout(extensionRow);
     auto *extensionIntro = label(QStringLiteral("Send the page you're on to the queue with one click, using your "
                                                 "browser session."), "helpBody", this);
     extensionIntro->setWordWrap(true);
-    layout->addWidget(extensionIntro);
+    details->addWidget(extensionIntro);
     const QStringList steps = {
         QStringLiteral("Open %1 (Chrome: %2).").arg(strong(QStringLiteral("brave://extensions")),
                                                     strong(QStringLiteral("chrome://extensions"))),
@@ -213,11 +233,11 @@ HelpDialog::HelpDialog(QWidget *parent)
         text->setTextFormat(Qt::RichText);
         stepsLayout->addWidget(text);
     }
-    layout->addLayout(stepsLayout);
+    details->addLayout(stepsLayout);
 
     auto *extensionRule = new QFrame(this);
     extensionRule->setObjectName(QStringLiteral("helpRule"));
-    layout->addWidget(extensionRule);
+    details->addWidget(extensionRule);
 
     // Creditos: la app es una interfaz; el trabajo lo hacen estas herramientas.
     auto *body = label(QStringLiteral("This app is a <span style=\"color:#F2F2F4;\">download queue for yt-dlp</span>. "
@@ -225,7 +245,7 @@ HelpDialog::HelpDialog(QWidget *parent)
                                       "support belongs to those projects."), "helpBody", this);
     body->setTextFormat(Qt::RichText);
     body->setWordWrap(true);
-    layout->addWidget(body);
+    details->addWidget(body);
 
     struct Credit { const char *name; const char *role; const char *url; const char *shown; QLabel **version; };
     const Credit credits[] = {
@@ -240,22 +260,17 @@ HelpDialog::HelpDialog(QWidget *parent)
         row->addWidget(*credit.version, 0, Qt::AlignVCenter);
         row->addStretch(1);
         row->addWidget(linkLabel(QString::fromLatin1(credit.url), QString::fromLatin1(credit.shown), this));
-        layout->addLayout(row);
+        details->addLayout(row);
     }
-    layout->addWidget(label(QStringLiteral("Each tool is distributed under its own license."), "caption", this));
+    details->addWidget(label(QStringLiteral("Each tool is distributed under its own license."), "caption", this));
+    layout->addWidget(m_details);
 
     auto *footer = new QHBoxLayout();
     footer->setContentsMargins(0, 4, 0, 0);
     footer->addStretch(1);
     auto *closeButton = Ui::button(QStringLiteral("Close"), QString(), QString(), this);
     closeButton->setObjectName(QStringLiteral("closeButton"));
-    closeButton->setDefault(true);
-    // Marca del boton de Enter (DialogStyle LGA): borde violeta y resplandor suave.
-    auto *glow = new QGraphicsDropShadowEffect(closeButton);
-    glow->setColor(QColor(0x4C, 0x30, 0x78, 140));
-    glow->setBlurRadius(16);
-    glow->setOffset(0, 0);
-    closeButton->setGraphicsEffect(glow);
+    m_closeButton = closeButton;
     footer->addWidget(closeButton);
     layout->addLayout(footer);
 
@@ -266,6 +281,12 @@ HelpDialog::HelpDialog(QWidget *parent)
     connect(m_install, &QPushButton::clicked, this, &HelpDialog::installRequested);
     connect(m_cancelInstall, &QPushButton::clicked, this, &HelpDialog::cancelInstallRequested);
     connect(openExtension, &QPushButton::clicked, this, &HelpDialog::openExtensionFolderRequested);
+    connect(m_whatsNewLink, &QLabel::linkActivated, this, [this]() {
+        setHistoryVisible(!m_showHistory);
+        if (m_showHistory) {
+            emit whatsNewRequested();
+        }
+    });
 
     setToolVersions({});
     setUpdateView(UpdateView());
@@ -377,6 +398,11 @@ void HelpDialog::setUpdateView(const UpdateView &view)
     m_install->setText(installText);
     m_install->setVisible(showInstall);
     m_install->setEnabled(view.blockedReason.isEmpty());
+    // Enter ejecuta la accion principal y ese boton va siempre marcado: Update (o Try again) si
+    // se puede instalar; si no, Close.
+    const bool installIsEnter = showInstall && view.blockedReason.isEmpty();
+    Ui::setEnterButton(m_install, installIsEnter);
+    Ui::setEnterButton(m_closeButton, !installIsEnter);
     m_later->setVisible(showLater);
     m_cancelInstall->setVisible(showCancel);
     m_checkStatus->setText(status);
@@ -385,6 +411,51 @@ void HelpDialog::setUpdateView(const UpdateView &view)
         m_updateBox->setProperty("accent", accent);
         Ui::repolish(m_updateBox);
     }
+    m_boxVisible = box;
+    m_rangeHtml = view.notesHtml;
+    refreshNotes();
+}
+
+void HelpDialog::setHistory(const QString &html)
+{
+    m_historyHtml = html;
+    refreshNotes();
+}
+
+void HelpDialog::setHistoryVisible(bool visible)
+{
+    m_showHistory = visible;
+    refreshNotes();
+}
+
+void HelpDialog::refreshNotes()
+{
+    m_whatsNewLink->setText(link(QStringLiteral("#whats-new"),
+                                 m_showHistory ? QStringLiteral("Hide what's new") : QStringLiteral("What's new")));
+    m_details->setVisible(!m_showHistory);
+    const QString html = m_showHistory ? m_historyHtml : (m_boxVisible ? m_rangeHtml : QString());
+    // Mismo contenido (cada tick del progreso de la descarga pasa por aca): no se recarga, asi no
+    // vuelve el scroll arriba mientras se lee.
+    const QString key = (m_showHistory ? QStringLiteral("history:") : QStringLiteral("range:")) + html;
+    if (key == m_shownNotesKey) {
+        fitHeight();
+        return;
+    }
+    m_shownNotesKey = key;
+    m_notesView->setVisible(false);
+    fitHeight();
+    if (html.isEmpty()) {
+        return;
+    }
+    // El dialogo no puede pasar el alto de la ventana: las notas se quedan con lo que sobra, entre
+    // un piso legible y su tope. Lo que no entra se lee con el scroll del bloque.
+    int maxHeight = m_showHistory ? HISTORY_MAX_HEIGHT : RANGE_NOTES_MAX_HEIGHT;
+    if (parentWidget()) {
+        const int spare = parentWidget()->window()->height() - 64 - height() - layout()->spacing();
+        maxHeight = qBound(m_showHistory ? 160 : 90, spare, maxHeight);
+    }
+    m_notesView->setVisible(true);
+    NotesView::setHtml(m_notesView, html, CONTENT_WIDTH, maxHeight);
     fitHeight();
 }
 

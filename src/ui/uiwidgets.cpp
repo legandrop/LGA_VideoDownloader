@@ -1,6 +1,7 @@
 #include "videodownloader/uiwidgets.h"
 #include "videodownloader/theme.h"
 
+#include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
 #include <QIconEngine>
 #include <QPainter>
@@ -459,6 +460,26 @@ void repolish(QWidget *widget)
     widget->style()->unpolish(widget);
     widget->style()->polish(widget);
     widget->update();
+}
+
+void setEnterButton(QPushButton *button, bool marked)
+{
+    button->setDefault(marked);
+    if (button->property("enterMark").toBool() != marked) {
+        button->setProperty("enterMark", marked);
+        repolish(button);
+    }
+    if (!marked) {
+        button->setGraphicsEffect(nullptr);
+        return;
+    }
+    if (!button->graphicsEffect()) {
+        auto *glow = new QGraphicsDropShadowEffect(button);
+        glow->setColor(QColor(0x4C, 0x30, 0x78, 140));
+        glow->setBlurRadius(16);
+        glow->setOffset(0, 0);
+        button->setGraphicsEffect(glow);
+    }
 }
 
 } // namespace Ui

@@ -10,6 +10,10 @@
 #include "videodownloader/toolsmanager.h"
 #include "videodownloader/updateservice.h"
 #include "videodownloader/videopassworddialog.h"
+#include "videodownloader/LgaRegistry.h"
+#include "videodownloader/theme.h"
+#include "videodownloader/whatsnew.h"
+#include "videodownloader/whatsnewdialog.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -230,6 +234,7 @@ void MainWindow::setupServices()
             m_helpDialog->setToolVersions(m_toolsManager->toolVersions());
         }
     });
+    connect(m_updateService, &UpdateService::notesChanged, this, &MainWindow::onNotesChanged);
 
     // yt-dlp y deno se instalan/actualizan solos y en silencio; la app solo chequea.
     QTimer::singleShot(AUTO_UPDATE_DELAY_MS, this, [this]() {
@@ -238,6 +243,7 @@ void MainWindow::setupServices()
             log(QStringLiteral("Automatic updates are off for this run"), LogLevel::Warning);
             return;
         }
+        checkAfterInstallNotes();
         m_toolsManager->startAutomaticUpdate();
         m_updateService->checkForUpdates();
     });
@@ -556,7 +562,114 @@ UpdateView MainWindow::currentUpdateView() const
     view.received = m_installReceived;
     view.total = m_installTotal;
     view.lastChecked = m_lastUpdateCheck;
+    // Lo nuevo entre la instalada y la ofrecida, en esta plataforma.
+    if (m_updateService && !view.availableVersion.isEmpty()
+        && m_updateService->notesStatus() == UpdateService::NotesStatus::Ready) {
+        const QList<WhatsNew::VersionNotes> range = WhatsNew::range(
+            m_updateService->notes(), view.currentVersion, view.availableVersion, WhatsNew::currentPlatform());
+        if (!range.isEmpty()) {
+            view.notesHtml = WhatsNew::toHtml(range);
+        }
+    }
     return view;
+}
+
+QString MainWindow::historyHtml() const
+{
+    WhatsNew::Notes notes;
+    if (m_updateService && m_updateService->notesStatus() == UpdateService::NotesStatus::Ready) {
+        notes = m_updateService->notes();
+    } else {
+        notes = UpdateService::cachedNotes();
+    }
+    const QList<WhatsNew::VersionNotes> all = WhatsNew::range(notes, QString(), QString(), WhatsNew::currentPlatform());
+    if (!all.isEmpty()) {
+        return WhatsNew::toHtml(all);
+    }
+    if (notes.valid) {
+        // Cargaron, pero ninguna nota es de esta plataforma.
+        return QStringLiteral("<p>There are no release notes for this version yet.</p>");
+    }
+    if (m_updateService && m_updateService->notesStatus() == UpdateService::NotesStatus::Loading) {
+        return QStringLiteral("<p>Loading what's new…</p>");
+    }
+    return QStringLiteral("<p>What's new couldn't be loaded. <a href=\"https://github.com/legandrop/LGA_VideoDownloader/releases\" "
+                          "style=\"color:%1; text-decoration:none;\">See the releases on GitHub</a></p>")
+        .arg(QLatin1String(Theme::kLink));
+}
+
+void MainWindow::checkAfterInstallNotes()
+{
+    // Un build de desarrollo comparte config.ini con la copia instalada: si marcara sus notas
+    // como vistas, la instalada nunca las mostraria.
+    if (LgaRegistry::isDevelopmentBuild()) {
+        return;
+    }
+    const QString key = QStringLiteral("updates/whats_new_last_seen");
+    const QString current = QStringLiteral(VIDEODOWNLOADER_VERSION);
+    const QString lastSeen = m_settings->value(key).toString();
+    switch (WhatsNew::afterInstallAction(lastSeen, current)) {
+    case WhatsNew::AfterInstall::Nothing:
+        return;
+    case WhatsNew::AfterInstall::SaveOnly:
+        // Instalacion nueva: nada que contar.
+        m_settings->setValue(key, current);
+        return;
+    case WhatsNew::AfterInstall::Show:
+        break;
+    }
+    m_afterInstallFrom = lastSeen;
+    // Lo normal es que esten en la cache: las bajo el chequeo que ofrecio este update.
+    if (!showAfterInstallNotes(UpdateService::cachedNotes())) {
+        m_afterInstallPending = true;
+        m_updateService->fetchNotes(QStringLiteral("v" VIDEODOWNLOADER_VERSION));
+    }
+}
+
+bool MainWindow::showAfterInstallNotes(const WhatsNew::Notes &notes)
+{
+    const QString current = QStringLiteral(VIDEODOWNLOADER_VERSION);
+    bool hasCurrent = false;
+    for (const WhatsNew::VersionNotes &entry : notes.versions) {
+        hasCurrent = hasCurrent || WhatsNew::compareVersions(entry.version, current) == 0;
+    }
+    if (!notes.valid || !hasCurrent) {
+        return false;
+    }
+    m_settings->setValue(QStringLiteral("updates/whats_new_last_seen"), current);
+    const QList<WhatsNew::VersionNotes> range =
+        WhatsNew::range(notes, m_afterInstallFrom, current, WhatsNew::currentPlatform());
+    if (range.isEmpty()) {
+        return true;
+    }
+    const QString html = WhatsNew::toHtml(range);
+    // Fuera de la llamada: puede venir de una senal de red o del arranque.
+    QTimer::singleShot(0, this, [this, html]() {
+        WhatsNewDialog dialog(QStringLiteral(VIDEODOWNLOADER_VERSION), html, this);
+        dialog.execOver(this);
+    });
+    return true;
+}
+
+void MainWindow::onNotesChanged()
+{
+    refreshUpdateNotice();
+    if (m_helpDialog) {
+        m_helpDialog->setHistory(historyHtml());
+    }
+    if (!m_afterInstallPending || m_updateService->notesStatus() == UpdateService::NotesStatus::Loading) {
+        return;
+    }
+    m_afterInstallPending = false;
+    const UpdateService::NotesStatus status = m_updateService->notesStatus();
+    if (status == UpdateService::NotesStatus::Ready && showAfterInstallNotes(m_updateService->notes())) {
+        return;
+    }
+    // Sin red se reintenta en el proximo arranque; si el release no trae notas, no hay nada que
+    // esperar.
+    if (status != UpdateService::NotesStatus::Failed) {
+        m_settings->setValue(QStringLiteral("updates/whats_new_last_seen"), QStringLiteral(VIDEODOWNLOADER_VERSION));
+    }
 }
 
 void MainWindow::refreshUpdateNotice()
@@ -599,6 +712,18 @@ void MainWindow::openHelp()
         m_toolsManager->refreshToolVersions();
     }
     dialog.setUpdateView(currentUpdateView());
+    dialog.setHistory(historyHtml());
+    connect(&dialog, &HelpDialog::whatsNewRequested, this, [this]() {
+        // Sin notas en memoria ni en cache: se piden las de la version que corre.
+        if (m_updateService && m_updateService->notesStatus() != UpdateService::NotesStatus::Ready
+            && m_updateService->notesStatus() != UpdateService::NotesStatus::Loading
+            && !UpdateService::cachedNotes().valid) {
+            m_updateService->fetchNotes(QStringLiteral("v" VIDEODOWNLOADER_VERSION));
+        }
+        if (m_helpDialog) {
+            m_helpDialog->setHistory(historyHtml());
+        }
+    });
     connect(&dialog, &HelpDialog::checkRequested, this, [this]() {
         if (m_updateService) {
             m_updateService->checkForUpdates();
@@ -639,6 +764,13 @@ void MainWindow::requestAppInstall()
     }
     m_installReceived = -1;
     m_installTotal = -1;
+    // Las notas de este update ya estaban a la vista en Help: la version nueva no las vuelve a
+    // mostrar al arrancar. Un build de desarrollo no instala ni toca la marca.
+    if (m_updateService->notesStatus() == UpdateService::NotesStatus::Ready && !LgaRegistry::isDevelopmentBuild()
+        && !m_updateService->availableVersion().isEmpty()) {
+        m_settings->setValue(QStringLiteral("updates/whats_new_last_seen"), m_updateService->availableVersion());
+        m_settings->sync();
+    }
     m_updateService->installAppUpdate();
 }
 

@@ -84,6 +84,12 @@ private:
     UpdateView currentUpdateView() const;
     void openHelp();
     void requestAppInstall();
+    // Historial de notas para Help: las del servicio, o la cache, o un aviso.
+    QString historyHtml() const;
+    // "Despues de instalar": al arrancar, si la version cambio sin que el usuario viera sus notas.
+    void checkAfterInstallNotes();
+    bool showAfterInstallNotes(const WhatsNew::Notes &notes);
+    void onNotesChanged();
 
     Mode m_mode;
     QSettings *m_settings = nullptr;
@@ -103,6 +109,9 @@ private:
     QDateTime m_lastUpdateCheck;
     qint64 m_installReceived = -1;
     qint64 m_installTotal = -1;
+    // Notas "despues de instalar" esperando la descarga; desde que version mostrarlas.
+    bool m_afterInstallPending = false;
+    QString m_afterInstallFrom;
 };
 
 #endif // MAINWINDOW_H

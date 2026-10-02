@@ -2,11 +2,14 @@
 #define UPDATESERVICE_H
 
 #include <QObject>
+#include <QPointer>
 #include <QString>
 #include <QStringList>
 #include <QUrl>
 
 #include <functional>
+
+#include "whatsnew.h"
 
 class QCryptographicHash;
 class QNetworkAccessManager;
@@ -73,6 +76,23 @@ public:
     // hijos, porque el instalador solo cierra VideoDownloader.exe y bloquearian la copia.
     void setBeforeInstallHook(std::function<void()> hook) { m_beforeInstallHook = std::move(hook); }
 
+    // Notas para el usuario (What's new). El chequeo las pide solo al ofrecer un update; el
+    // update se ofrece igual si no llegan. Missing = el release no trae `whats_new.json` (404).
+    enum class NotesStatus { None, Loading, Ready, Missing, Failed };
+    NotesStatus notesStatus() const { return m_notesStatus; }
+    // Validas solo con Ready: el historial completo hasta el release pedido.
+    const WhatsNew::Notes &notes() const { return m_notes; }
+    // Baja `whats_new.json` del release `tag`. Sin hash: el archivo se genera despues del release
+    // y viaja por el mismo HTTPS que SHA256SUMS; se valida estricto (WhatsNew::parse) y el texto
+    // se escapa al armar el HTML. Si falla, se usa la cache si trae la version de `tag`. Emite
+    // notesChanged() al terminar, tambien al fallar.
+    void fetchNotes(const QString &tag);
+    // Ultimas notas validas bajadas (`<updates>/whats_new.json`), o invalidas si no hay.
+    static WhatsNew::Notes cachedNotes();
+    // Carpeta de la cache: la de updates (AppPaths::heavyDataDir), salvo el override de QA.
+    static QString notesCacheDir();
+    static void setNotesCacheDirForQa(const QString &dir);
+
 public slots:
     // Chequeo asincronico; si ya hay uno o una instalacion en curso, no hace nada.
     void checkForUpdates();
@@ -85,6 +105,7 @@ signals:
     void stateChanged(UpdateService::State state);
     void appUpdateAvailable(const QString &version, const QUrl &notesUrl);
     void installProgress(qint64 received, qint64 total);
+    void notesChanged();
 
 private:
     void setState(State state);
@@ -98,8 +119,17 @@ private:
     void launchInstaller(const QString &installerPath);
     void discardPartialDownload();
     void sweepInstallers(const QString &keepName);
+    void onNotesFinished();
 
     QNetworkAccessManager *m_network = nullptr;
+    // QPointer: si la reply muere con el manager antes que este puntero se toque, queda en null
+    // en vez de colgando.
+    QPointer<QNetworkReply> m_notesReply;
+    QByteArray m_notesBuffer;
+    QString m_notesTag;
+    bool m_notesTooLarge = false;
+    NotesStatus m_notesStatus = NotesStatus::None;
+    WhatsNew::Notes m_notes;
     QNetworkReply *m_checkReply = nullptr;
     QNetworkReply *m_downloadReply = nullptr;
     State m_state = State::Idle;

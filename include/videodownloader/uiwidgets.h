@@ -115,6 +115,10 @@ QPushButton *button(const QString &text, const QString &variant = QString(), con
                     QWidget *parent = nullptr);
 void setIcon(QPushButton *button, Icon icon, const QColor &color, int size = 14);
 void repolish(QWidget *widget);
+// Boton de Enter de un dialogo: lo hace default y lo marca SIEMPRE con borde violeta y un
+// resplandor suave; con `marked` false le saca las dos cosas. El fondo no cambia: lo define la
+// variante del boton, no la marca.
+void setEnterButton(QPushButton *button, bool marked);
 } // namespace Ui
 
 #endif // UIWIDGETS_H

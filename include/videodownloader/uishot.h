@@ -30,4 +30,15 @@ int runUpdateDirsCheck(const QStringList &args);
 // la extension. Imprime PASS/FAIL por caso y devuelve 0 si pasan todos.
 int runCookiesCheck();
 
+// `--qa-whats-new [<whats_new.json> [<instalada> <ofrecida>]]`: test sin red de las notas (regla
+// de version, "despues de instalar", parse estricto, rango y escape). Con un archivo, imprime
+// el rango por plataforma. Devuelve 0 si pasan todos.
+int runWhatsNewCheck(const QStringList &args);
+
+// `--qa-whats-new-fetch <carpeta-cache> [--qa-close-after-ms N]`: con LGA_VD_GITHUB_BASE en un
+// servidor local, corre el chequeo real de update y la descarga de notas, con la cache en esa
+// carpeta. Con --qa-close-after-ms destruye el servicio N ms despues de ofrecer el update, con
+// la descarga de notas todavia en curso (el servidor tiene que demorarla).
+int runWhatsNewFetch(const QStringList &args);
+
 #endif // UISHOT_H

@@ -10,6 +10,7 @@
 class QLabel;
 class QProgressBar;
 class QPushButton;
+class QTextBrowser;
 
 // Estado del update tal como lo muestra el dialogo. Lo arma MainWindow desde UpdateService
 // (o la captura de QA con datos de prueba): el dialogo no conoce el servicio.
@@ -23,6 +24,7 @@ struct UpdateView {
     qint64 received = -1;
     qint64 total = -1;
     QDateTime lastChecked;
+    QString notesHtml;         // notas de lo nuevo entre la instalada y la ofrecida; vacio = sin notas
 };
 
 // Dialogo de ayuda: version, actualizaciones, extension de navegador, versiones de las tools
@@ -36,6 +38,11 @@ public:
 
     void setUpdateView(const UpdateView &view);
     void setToolVersions(const QMap<QString, QString> &versions);
+    // Historial completo de notas (o un aviso de que no se pudo cargar), en HTML.
+    void setHistory(const QString &html);
+    // El link "What's new" alterna entre la ayuda y el historial, que ocupa el lugar de la
+    // extension y los creditos.
+    void setHistoryVisible(bool visible);
 
     // Abre el dialogo modal centrado sobre la ventana, con el velo detras.
     int execOver(QWidget *window);
@@ -45,6 +52,7 @@ signals:
     void installRequested();
     void cancelInstallRequested();
     void openExtensionFolderRequested();
+    void whatsNewRequested();
 
 protected:
     void paintEvent(QPaintEvent *event) override;
@@ -52,6 +60,16 @@ protected:
 private:
     // Alto del dialogo segun el layout ya pulido (ver helpdialog.cpp).
     void fitHeight();
+    void refreshNotes();
+
+    QLabel *m_whatsNewLink;
+    QTextBrowser *m_notesView;
+    QWidget *m_details;
+    QString m_rangeHtml;
+    QString m_historyHtml;
+    QString m_shownNotesKey;  // lo que muestra el bloque de notas; vacio = nada cargado todavia
+    bool m_boxVisible = false;
+    bool m_showHistory = false;
 
     QLabel *m_dot;
     QLabel *m_updateTitle;
@@ -62,6 +80,7 @@ private:
     QPushButton *m_install;
     QPushButton *m_later;
     QPushButton *m_cancelInstall;
+    QPushButton *m_closeButton = nullptr;
     QLabel *m_ytdlpVersion;
     QLabel *m_ffmpegVersion;
     QLabel *m_denoVersion;

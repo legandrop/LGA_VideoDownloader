@@ -210,7 +210,9 @@ QLabel#helpBody { color: #a9a9ae; font-size: @fs13; }
 QFrame#helpRule { background-color: @border; border: none; min-height: 1px; max-height: 1px; }
 QProgressBar#updateProgress { background-color: @progressTrack; border: 1px solid @progressBorder; border-radius: 4px; min-height: 8px; max-height: 8px; }
 QProgressBar#updateProgress::chunk { background-color: @progressFill; border-radius: 3px; }
-QPushButton#closeButton { border: 1px solid #3B316A; }
+QPushButton[enterMark="true"] { border: 1px solid #3B316A; }
+QTextBrowser#whatsNewNotes { background-color: @field; border: 1px solid @fieldBorder; border-radius: 6px; color: #a9a9ae; font-size: @fs13; }
+QLabel#whatsNewLink { font-size: @fs13; }
 )QSS");
 
     const QList<QPair<const char *, QString>> tokens = {

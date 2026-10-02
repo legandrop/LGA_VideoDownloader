@@ -47,6 +47,7 @@ constexpr int kResweepDelayMs = 5 * 60 * 1000;
 constexpr qint64 kMinInstallerAgeSecs = 2 * 60;
 
 bool s_autoSweepDisabled = false;
+QString s_notesCacheDirForQa;
 
 // La carpeta ES un enlace (junction, symlink de carpeta u otro reparse point). Barrerla borraria
 // archivos del otro lado, en una carpeta que no es de la app: se saltea entera.
@@ -200,7 +201,10 @@ UpdateService::UpdateService(QObject *parent)
 
 UpdateService::~UpdateService()
 {
-    for (QNetworkReply *reply : {m_checkReply, m_downloadReply}) {
+    // El manager es hijo de este objeto y Qt lo destruye DESPUES de este cuerpo, con sus replies:
+    // aca todavia estan vivas. Se desconectan antes de abortar porque abort() emite finished()
+    // en el acto. La de las notas es QPointer por si algun dia cambia ese orden.
+    for (QNetworkReply *reply : {m_checkReply, m_downloadReply, m_notesReply.data()}) {
         if (reply) {
             reply->disconnect(this);
             reply->abort();
@@ -360,6 +364,114 @@ void UpdateService::onSumsFinished()
     qInfo() << "[UpdateService] Update disponible:" << m_availableVersion << m_assetUrl.toString();
     setState(State::UpdateAvailable);
     emit appUpdateAvailable(m_availableVersion, m_releasePageUrl);
+    fetchNotes(m_checkTag);
+}
+
+QString UpdateService::notesCacheDir()
+{
+    return s_notesCacheDirForQa.isEmpty() ? AppPaths::heavyDataDir(QStringLiteral("updates")) : s_notesCacheDirForQa;
+}
+
+void UpdateService::setNotesCacheDirForQa(const QString &dir)
+{
+    s_notesCacheDirForQa = dir;
+}
+
+WhatsNew::Notes UpdateService::cachedNotes()
+{
+    QFile file(QDir(notesCacheDir()).filePath(QLatin1String(WhatsNew::kAssetName)));
+    if (!file.open(QIODevice::ReadOnly)) {
+        return {};
+    }
+    return WhatsNew::parse(file.read(WhatsNew::kMaxBytes + 1), kRepoSlug);
+}
+
+void UpdateService::fetchNotes(const QString &tag)
+{
+    if (m_notesReply) {
+        QNetworkReply *previous = m_notesReply;
+        m_notesReply = nullptr;
+        previous->disconnect(this);
+        previous->abort();
+        previous->deleteLater();
+    }
+    m_notesTag = tag;
+    m_notesBuffer.clear();
+    m_notesTooLarge = false;
+    m_notesStatus = NotesStatus::Loading;
+    QNetworkRequest request(QUrl(QStringLiteral("%1/%2/releases/download/%3/%4")
+                                     .arg(UpdateUrls::githubBase(), kRepoSlug, tag, QLatin1String(WhatsNew::kAssetName))));
+    request.setHeader(QNetworkRequest::UserAgentHeader, userAgent());
+    request.setTransferTimeout(kCheckTimeoutMs);
+    qDebug() << "[UpdateService] Bajando notas" << request.url().toString();
+    m_notesReply = m_network->get(request);
+    connect(m_notesReply, &QNetworkReply::readyRead, this, [this]() {
+        if (!m_notesReply || m_notesTooLarge) {
+            return;
+        }
+        m_notesBuffer += m_notesReply->readAll();
+        if (m_notesBuffer.size() > WhatsNew::kMaxBytes) {
+            m_notesTooLarge = true;
+            // Diferido: abort() emite finished() en el acto, y aca estamos adentro de readyRead.
+            QTimer::singleShot(0, this, [this]() {
+                if (m_notesReply) {
+                    m_notesReply->abort();
+                }
+            });
+        }
+    });
+    connect(m_notesReply, &QNetworkReply::finished, this, &UpdateService::onNotesFinished);
+}
+
+void UpdateService::onNotesFinished()
+{
+    QNetworkReply *reply = m_notesReply;
+    m_notesReply = nullptr;
+    if (!reply) {
+        return;
+    }
+    reply->deleteLater();
+    if (!m_notesTooLarge) {
+        m_notesBuffer += reply->readAll();
+    }
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    WhatsNew::Notes parsed;
+    if (m_notesTooLarge || reply->error() != QNetworkReply::NoError || status != 200) {
+        parsed.error = QStringLiteral("HTTP %1, %2").arg(status).arg(m_notesTooLarge ? QStringLiteral("demasiado grande")
+                                                                                     : reply->errorString());
+    } else {
+        parsed = WhatsNew::parse(m_notesBuffer, kRepoSlug);
+    }
+
+    if (parsed.valid) {
+        m_notes = parsed;
+        m_notesStatus = NotesStatus::Ready;
+        // Se guarda solo lo que paso el parse estricto: la cache es siempre un archivo bueno.
+        const QString dir = notesCacheDir();
+        QSaveFile cache(QDir(dir).filePath(QLatin1String(WhatsNew::kAssetName)));
+        if (!QDir().mkpath(dir) || !cache.open(QIODevice::WriteOnly) || cache.write(m_notesBuffer) != m_notesBuffer.size()
+            || !cache.commit()) {
+            qWarning() << "[UpdateService] No se pudo guardar la cache de notas en" << dir;
+        }
+        qInfo() << "[UpdateService] Notas de" << m_notesTag << ":" << m_notes.versions.size() << "versiones";
+    } else {
+        qWarning() << "[UpdateService] Sin notas de" << m_notesTag << ":" << parsed.error;
+        // La cache sirve si ya trae la version pedida (la bajo un chequeo anterior).
+        const WhatsNew::Notes cached = cachedNotes();
+        bool hasTag = false;
+        for (const WhatsNew::VersionNotes &entry : cached.versions) {
+            hasTag = hasTag || WhatsNew::compareVersions(entry.version, m_notesTag) == 0;
+        }
+        if (cached.valid && hasTag) {
+            m_notes = cached;
+            m_notesStatus = NotesStatus::Ready;
+        } else {
+            m_notes = WhatsNew::Notes();
+            m_notesStatus = status == 404 ? NotesStatus::Missing : NotesStatus::Failed;
+        }
+    }
+    m_notesBuffer.clear();
+    emit notesChanged();
 }
 
 void UpdateService::installAppUpdate()

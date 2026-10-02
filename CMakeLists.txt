@@ -86,10 +86,12 @@ set(SOURCES
     src/ui/queueview.cpp
     src/ui/logview.cpp
     src/ui/helpdialog.cpp
+    src/ui/whatsnewdialog.cpp
     src/ui/videopassworddialog.cpp
     src/qa/uishot.cpp
     src/core/downloadqueue.cpp
     src/core/updateservice.cpp
+    src/core/whatsnew.cpp
     src/core/nativehost.cpp
     src/core/appinstance.cpp
     src/utils/apppaths.cpp
@@ -114,6 +116,7 @@ set(HEADERS
     include/videodownloader/queueview.h
     include/videodownloader/logview.h
     include/videodownloader/helpdialog.h
+    include/videodownloader/whatsnewdialog.h
     include/videodownloader/uishot.h
     include/videodownloader/apppaths.h
     include/videodownloader/browserdetect.h
@@ -122,6 +125,7 @@ set(HEADERS
     include/videodownloader/toolsmanager.h
     include/videodownloader/toolsupdater.h
     include/videodownloader/updateservice.h
+    include/videodownloader/whatsnew.h
     include/videodownloader/updateurls.h
     include/videodownloader/versioncompare.h
     include/videodownloader/LgaRegistry.h

@@ -44,6 +44,14 @@ inline constexpr const char *kWarn = "#d4a437";
 inline constexpr const char *kError = "#e8836f";
 inline constexpr const char *kRun = "#b3a6ec";
 
+// Notas de version (What's new): cuerpo, numero de version y un color por rotulo, los mismos de
+// las otras apps LGA.
+inline constexpr const char *kHelpBody = "#a9a9ae";
+inline constexpr const char *kTextEmphasis = "#F2F2F4";
+inline constexpr const char *kWhatsNewNew = "#5CB85C";
+inline constexpr const char *kWhatsNewImproved = "#5FA8E8";
+inline constexpr const char *kWhatsNewFixed = "#D4A437";
+
 // Progreso
 inline constexpr const char *kProgressTrack = "#393959";
 inline constexpr const char *kProgressBorder = "#444444";
