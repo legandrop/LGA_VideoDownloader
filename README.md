@@ -42,7 +42,7 @@ instalador.bat --publish   # Windows, después de deploy.bat
 ./deploy.sh --publish      # macOS: compila, arma el .zip y el .dmg y publica
 ```
 
-Cada comando valida las notas para el usuario (`docs/WhatsNew.md`) antes de armar nada, exige un árbol commiteado y pusheado, y publica en el release `v<versión>` de este repo. La primera plataforma crea el release; la segunda suma sus archivos y fusiona `SHA256SUMS` (una línea por archivo, sin tocar las de la otra plataforma). Al final suben las notas del release y `whats_new.json`. Sin `--publish`, `instalador.bat` pregunta al final si hay consola; `--no-publish` no pregunta.
+Cada comando valida las notas para el usuario (`docs/WhatsNew.md`) antes de armar nada, exige un árbol commiteado y pusheado, y publica en el release `v<versión>` de este repo. La primera plataforma crea el release; la segunda suma sus archivos y fusiona `SHA256SUMS` (una línea por archivo, sin tocar las de la otra plataforma). Al final suben las notas del release y `whats_new.json`. Sin `--publish`, `instalador.bat` pregunta al final si hay consola; `--no-publish` no pregunta. Un release que ya tiene los archivos de la plataforma no se pisa sin `--replace`.
 
 ### Capturas de UI sin abrir ventanas
 

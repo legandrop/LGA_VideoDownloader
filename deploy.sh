@@ -10,19 +10,22 @@ CREATE_ZIP=false
 CREATE_DMG=false
 NO_RUN=false
 PUBLISH=false
+REPLACE=false
 for arg in "$@"; do
     case "$arg" in
         --zip) CREATE_ZIP=true ;;
         --dmg) CREATE_DMG=true ;;
         --no-run) NO_RUN=true ;;
         --publish) PUBLISH=true; CREATE_ZIP=true; CREATE_DMG=true ;;
+        --replace) REPLACE=true ;;
         -h|--help)
-            echo "Uso: $0 [--zip] [--dmg] [--no-run] [--publish]"
+            echo "Uso: $0 [--zip] [--dmg] [--no-run] [--publish [--replace]]"
             echo "  --zip      Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.zip firmado (actualizacion)"
             echo "  --dmg      Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.dmg (primera instalacion)"
             echo "  --no-run   No ejecutar la app al terminar"
             echo "  --publish  Crear el .zip y el .dmg y publicarlos en el release v<version> de"
             echo "             legandrop/LGA_VideoDownloader, con SHA256SUMS y las notas (What's new)"
+            echo "  --replace  Con --publish: reemplazar los archivos de macOS si el release ya los tiene"
             exit 0
             ;;
     esac
@@ -35,8 +38,9 @@ GH="${LGA_GH:-gh}"
 # ==== PUBLICAR: inicio. El banco de pruebas extrae lo que hay entre estas marcas: no moverlas.
 
 # SHA256SUMS del release: las lineas que NO son de esta plataforma, mas las propias al final. Una
-# sola linea por nombre de archivo; formato sha256sum ("hash  nombre"), LF. Sin intervalos {64}
-# en las regex: el awk de macOS no siempre los entiende.
+# sola linea por nombre de archivo; formato sha256sum ("hash  nombre"), LF. Una linea ilegible
+# corta: no se adivina que era. Sin intervalos {64} en las regex: el awk de macOS no siempre los
+# entiende.
 merge_sha256sums() {  # <SHA256SUMS del release, o /dev/null> <el propio> <salida>
     if ! grep -q . "$2"; then
         echo "ERROR: $2 esta vacio."
@@ -50,53 +54,94 @@ merge_sha256sums() {  # <SHA256SUMS del release, o /dev/null> <el propio> <salid
             else if (!(name in own) && !(name in seen)) { seen[name] = 1; keep[++k] = $0 }
             next
         }
-        NF { print "AVISO: linea ilegible descartada: " $0 > "/dev/stderr" }
-        END { for (i = 1; i <= k; i++) print keep[i]; for (i = 1; i <= m; i++) print mine[i] }
+        NF { print "ERROR: el SHA256SUMS del release tiene una linea ilegible: " $0 > "/dev/stderr"; bad = 1; exit 1 }
+        END { if (bad) exit 1; for (i = 1; i <= k; i++) print keep[i]; for (i = 1; i <= m; i++) print mine[i] }
     ' "$2" "$1" > "$3"
 }
 
+# Lo que hay en el release v<version> antes de tocarlo. Corre antes de compilar y otra vez al
+# publicar, porque Windows pudo publicar en el medio. Corta si el release es un borrador, si ya
+# tiene los archivos de macOS (salvo --replace) o si tiene el instalador de Windows sin
+# SHA256SUMS: fusionar contra nada borraria su linea y el auto-update de Windows dejaria de verlo.
+# Deja REL_EXISTS y REL_SUMS para publish_release.
+release_check() {
+    local tag="v${APP_VERSION}" names draft
+    REL_EXISTS=false
+    REL_SUMS=false
+    "$GH" release view "$tag" --repo "$RELEASE_REPO" >/dev/null 2>&1 || return 0
+    REL_EXISTS=true
+    draft="$("$GH" release view "$tag" --repo "$RELEASE_REPO" --json isDraft -q '.isDraft')" \
+        || { echo "ERROR: no se pudo leer el release $tag de $RELEASE_REPO."; return 1; }
+    names="$("$GH" release view "$tag" --repo "$RELEASE_REPO" --json assets -q '.assets[].name')" \
+        || { echo "ERROR: no se pudo leer el release $tag de $RELEASE_REPO."; return 1; }
+    names="$(printf '%s\n' "$names" | tr -d '\r')"
+    draft="$(printf '%s\n' "$draft" | tr -d '\r')"
+    if printf '%s\n' "$draft" | grep -qx 'true'; then
+        echo "ERROR: el release $tag existe como borrador. Publicarlo o borrarlo a mano antes de seguir."
+        return 1
+    fi
+    if printf '%s\n' "$names" | grep -qx 'SHA256SUMS'; then
+        REL_SUMS=true
+    fi
+    if printf '%s\n' "$names" | grep -q "^${ARTIFACT_NAME}_Mac_v" && [ "$REPLACE" != "true" ]; then
+        echo "ERROR: el release $tag ya tiene los archivos de macOS. Para reemplazarlos, correr con --replace."
+        return 1
+    fi
+    if printf '%s\n' "$names" | grep -q '^VideoDownloader_Setup_v' && [ "$REL_SUMS" != "true" ]; then
+        echo "ERROR: el release $tag tiene el instalador de Windows pero no SHA256SUMS: no se fusiona"
+        echo "       contra nada, porque se perderia su linea. Subir primero el SHA256SUMS de Windows."
+        return 1
+    fi
+    return 0
+}
+
 publish_failed() {  # <carpeta temporal>
-    echo "ERROR: fallo la publicacion del release v${APP_VERSION}. No se deshizo nada; ver el mensaje de gh."
+    echo "ERROR: fallo la publicacion del release v${APP_VERSION}. Ver el mensaje de arriba."
     rm -rf "$1"
 }
 
 # El release v<version> vive en este mismo repo. Lo crea la primera plataforma que publica; la
-# otra (instalador.bat --publish en Windows) lo encuentra y suma lo suyo. El .zip y el .dmg suben
-# ANTES que el SHA256SUMS: en el medio la app no ofrece nada que no pueda verificar.
+# otra (instalador.bat --publish en Windows) lo encuentra y suma lo suyo. Todo lo que puede cortar
+# (leer, fusionar) pasa antes de escribir nada. El .zip y el .dmg suben ANTES que el SHA256SUMS:
+# en el medio la app no ofrece nada que no pueda verificar.
 publish_release() {
-    local tag="v${APP_VERSION}" work old a
+    local tag="v${APP_VERSION}" work old a sums=deploy/release/SHA256SUMS
     local assets=()
     for a in "deploy/${ARTIFACT_NAME}_Mac_v${APP_VERSION}.zip" "deploy/${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"; do
         [ -f "$a" ] || { echo "ERROR: falta $a"; return 1; }
         assets+=("$a")
     done
-    work="$(mktemp -d)" || return 1
-    if ! "$GH" release view "$tag" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+    release_check || return 1
+    if [ "$REL_EXISTS" != "true" ]; then
         echo "Creando el release $tag en $RELEASE_REPO..."
         "$GH" release create "$tag" "${assets[@]}" deploy/SHA256SUMS --repo "$RELEASE_REPO" \
             --target "$HEAD_SHA" --title "$tag" --notes "LGA Video Downloader $tag" \
-            || { publish_failed "$work"; return 1; }
+            || { publish_failed ""; return 1; }
     else
         echo "El release $tag ya existe: se suman el .zip y el .dmg de macOS."
-        "$GH" release upload "$tag" "${assets[@]}" --repo "$RELEASE_REPO" --clobber \
-            || { publish_failed "$work"; return 1; }
-        "$GH" release view "$tag" --repo "$RELEASE_REPO" --json assets -q '.assets[].name' > "$work/assets.txt" \
-            || { publish_failed "$work"; return 1; }
+        work="$(mktemp -d)" || return 1
         old=/dev/null
-        # Si el release trae SHA256SUMS, bajarlo es obligatorio: fusionar contra nada borraria la
-        # linea de Windows.
-        if grep -qx 'SHA256SUMS' "$work/assets.txt"; then
+        if [ "$REL_SUMS" = "true" ]; then
             "$GH" release download "$tag" --repo "$RELEASE_REPO" --pattern SHA256SUMS --dir "$work" \
                 || { publish_failed "$work"; return 1; }
             old="$work/SHA256SUMS"
         fi
-        mkdir -p "$work/up"
-        merge_sha256sums "$old" deploy/SHA256SUMS "$work/up/SHA256SUMS" || { publish_failed "$work"; return 1; }
-        echo "SHA256SUMS fusionado: $(wc -l < "$work/up/SHA256SUMS" | tr -d ' ') lineas"
-        "$GH" release upload "$tag" "$work/up/SHA256SUMS" --repo "$RELEASE_REPO" --clobber \
+        # El fusionado queda en una ruta fija: si la subida falla (--clobber borra el viejo antes
+        # de subir), se resube a mano desde ahi.
+        mkdir -p deploy/release
+        merge_sha256sums "$old" deploy/SHA256SUMS "$sums" || { publish_failed "$work"; return 1; }
+        echo "SHA256SUMS fusionado: $(wc -l < "$sums" | tr -d ' ') lineas"
+        "$GH" release upload "$tag" "${assets[@]}" --repo "$RELEASE_REPO" --clobber \
             || { publish_failed "$work"; return 1; }
+        if ! "$GH" release upload "$tag" "$sums" --repo "$RELEASE_REPO" --clobber; then
+            echo "ERROR: el .zip y el .dmg subieron, pero SHA256SUMS no: el release puede haber quedado"
+            echo "       SIN SHA256SUMS y la app no ofrece el update. El fusionado esta en $(pwd)/$sums."
+            echo "       Subirlo con: gh release upload $tag \"$(pwd)/$sums\" --repo $RELEASE_REPO --clobber"
+            rm -rf "$work"
+            return 1
+        fi
+        rm -rf "$work"
     fi
-    rm -rf "$work"
     echo "Publicando las notas para el usuario (What's new)..."
     if ! sh "$WHATS_NEW_SH" publish "$WHATS_NEW_FILE" "$APP_VERSION" "$RELEASE_REPO" "$tag"; then
         echo "ERROR: el release $tag quedo publicado, pero sus notas no. Reintentar con el comando de arriba."
@@ -134,6 +179,11 @@ if [ "$PUBLISH" = "true" ]; then
         exit 1
     fi
     HEAD_SHA="$(git rev-parse HEAD)"
+    # VERSION (la que leen los scripts) tiene que coincidir con CMakeLists.txt.
+    if ! ./sync_version.sh --check-only; then
+        echo "ERROR: VERSION y CMakeLists.txt no coinciden. Correr ./sync_version.sh y commitear."
+        exit 1
+    fi
     # Notas para el usuario (What's new): la logica vive en LGA_RepoTools (WhatsNew_Shared);
     # LGA_REPOTOOLS apunta a otra copia. Si corta, no se compilo ni se publico nada.
     WHATS_NEW_FILE="$(pwd)/docs/WhatsNew.md"
@@ -148,6 +198,7 @@ if [ "$PUBLISH" = "true" ]; then
         echo "ERROR: faltan o fallan las notas de v${APP_VERSION}, o se contesto que no. No se compilo nada."
         exit 1
     fi
+    release_check || { echo "No se compilo ni se publico nada."; exit 1; }
 fi
 
 # BORRAR DEPLOY ANTERIOR
@@ -202,12 +253,18 @@ cmake .. -G "Unix Makefiles" \
     -DCMAKE_OSX_ARCHITECTURES="arm64" \
     -DCMAKE_OSX_SYSROOT="$SDK_PATH"
 
-cmake --build . --config Release
+if ! cmake --build . --config Release; then
+    echo "ERROR: fallo la compilacion. No se empaqueta ni se publica nada."
+    exit 1
+fi
 cd ..
 
 # Crear estructura del bundle
 mkdir -p "deploy/${APP_NAME}.app/Contents"/{MacOS,Resources,Frameworks}
-cp "build/${APP_NAME}.app/Contents/MacOS/${APP_NAME}" "deploy/${APP_NAME}.app/Contents/MacOS/"
+if ! cp "build/${APP_NAME}.app/Contents/MacOS/${APP_NAME}" "deploy/${APP_NAME}.app/Contents/MacOS/"; then
+    echo "ERROR: no se pudo copiar el ejecutable al bundle. No se empaqueta ni se publica nada."
+    exit 1
+fi
 
 # Copiar el ícono al bundle si existe
 if [ -f "resources/icons/LGA_VideoDownloader.icns" ]; then
@@ -318,7 +375,10 @@ chmod +x "deploy/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
 # es notarizacion ni confianza de Gatekeeper (sigue haciendo falta el `xattr -cr`): sirve
 # para poder verificar con `codesign --verify` que el bundle llego entero.
 echo "Firmando el bundle (ad-hoc)..."
-codesign --force --deep --sign - "deploy/${APP_NAME}.app"
+if ! codesign --force --deep --sign - "deploy/${APP_NAME}.app"; then
+    echo "ERROR: fallo la firma del bundle. No se empaqueta ni se publica nada."
+    exit 1
+fi
 
 if [ "$CREATE_ZIP" = "true" ]; then
     ZIP_NAME="${ARTIFACT_NAME}_Mac_v${APP_VERSION}.zip"
@@ -326,7 +386,10 @@ if [ "$CREATE_ZIP" = "true" ]; then
     # esta lleno (Versions/Current, el binario de cada framework). Con zip el bundle llega
     # al usuario mucho mas pesado, con cada framework duplicado, y la firma invalida.
     rm -f "deploy/${ZIP_NAME}"
-    (cd deploy && ditto -c -k --sequesterRsrc --keepParent "${APP_NAME}.app" "${ZIP_NAME}")
+    if ! (cd deploy && ditto -c -k --sequesterRsrc --keepParent "${APP_NAME}.app" "${ZIP_NAME}"); then
+        echo "ERROR: no se pudo crear el .zip. No se publica nada."
+        exit 1
+    fi
     echo "ZIP creado: deploy/${ZIP_NAME}"
 fi
 
@@ -334,7 +397,10 @@ fi
 # los dos no son intercambiables. Ver ../LGA_Base_QT_C_Py/docs/Doc_Deploy_macOS.md.
 if [ "$CREATE_DMG" = "true" ]; then
     rm -f "deploy/${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"
-    bash ./create_dmg.sh --no-open
+    if ! bash ./create_dmg.sh --no-open; then
+        echo "ERROR: no se pudo crear el .dmg. No se publica nada."
+        exit 1
+    fi
 fi
 
 # SHA256SUMS del release: el auto-update de la app no instala nada sin su hash. Formato

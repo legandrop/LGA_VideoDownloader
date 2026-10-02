@@ -5,15 +5,18 @@ REM   --no-run      arma el instalador y su SHA256SUMS, y no pregunta si ejecuta
 REM   --publish     publica sin preguntar el release v(version) en legandrop/LGA_VideoDownloader:
 REM                 el instalador, SHA256SUMS y las notas para el usuario (What's new).
 REM   --no-publish  no publica ni pregunta.
+REM   --replace     permite reemplazar el instalador de Windows de un release que ya lo tiene.
 REM Sin flags de publicacion: con consola pregunta al final; sin consola no publica.
 set "NO_RUN="
 set "PUBLISH=prompt"
+set "REPLACE="
 set "SCRIPT_DIR=%~dp0"
 :parse_args
 if "%~1"=="" goto :args_done
 if /I "%~1"=="--no-run" ( set "NO_RUN=1" & shift & goto :parse_args )
 if /I "%~1"=="--publish" ( set "PUBLISH=always" & shift & goto :parse_args )
 if /I "%~1"=="--no-publish" ( set "PUBLISH=never" & shift & goto :parse_args )
+if /I "%~1"=="--replace" ( set "REPLACE=1" & shift & goto :parse_args )
 echo Error: opcion desconocida: %~1
 exit /b 1
 :args_done
@@ -70,19 +73,26 @@ if not errorlevel 1 set "INTERACTIVE=1"
 if /I "%PUBLISH%"=="prompt" if not defined INTERACTIVE set "PUBLISH=never"
 if /I "%PUBLISH%"=="never" goto :publish_preflight_done
 call :gh_detect
-if not errorlevel 1 goto :publish_gh_ok
+if errorlevel 1 (
+    echo gh no esta disponible o no tiene login.
+    goto :publish_preflight_failed
+)
+call :git_preflight
+if errorlevel 1 goto :publish_preflight_failed
+call :notes_check
+if errorlevel 1 goto :publish_preflight_failed
+call :release_check
+if errorlevel 1 goto :publish_preflight_failed
+goto :publish_preflight_done
+:publish_preflight_failed
+REM Con --publish se corta antes de armar nada. Sin flags (se iba a preguntar) se arma el
+REM instalador igual, sin publicar.
 if /I "%PUBLISH%"=="always" (
-    echo ERROR: se pidio --publish pero gh no esta disponible o no tiene login.
+    echo ERROR: no se puede publicar; no se armo nada.
     exit /b 1
 )
-echo AVISO: gh no esta disponible o no tiene login: se arma el instalador sin publicar.
+echo AVISO: se arma el instalador sin publicar.
 set "PUBLISH=never"
-goto :publish_preflight_done
-:publish_gh_ok
-call :git_preflight
-if errorlevel 1 exit /b 1
-call :notes_check
-if errorlevel 1 exit /b 1
 :publish_preflight_done
 
 REM Verificar si Inno Setup está instalado
@@ -362,6 +372,12 @@ if errorlevel 1 (
     echo ERROR: HEAD no esta en origin/main. Pushear antes de publicar.
     exit /b 1
 )
+REM VERSION (de donde sale el numero del instalador) tiene que coincidir con CMakeLists.txt.
+call "%SCRIPT_DIR%sync_version.bat" --check-only
+if errorlevel 1 (
+    echo ERROR: VERSION y CMakeLists.txt no coinciden. Correr sync_version.bat y commitear.
+    exit /b 1
+)
 set "HEAD_SHA="
 for /f %%C in ('git rev-parse HEAD') do set "HEAD_SHA=%%C"
 exit /b 0
@@ -386,46 +402,91 @@ if errorlevel 1 (
 )
 exit /b 0
 
+:release_check
+REM Lo que hay en el release v(version) antes de tocarlo. Corre antes de armar nada y otra vez al
+REM publicar, porque la Mac pudo publicar en el medio. Corta si el release es un borrador, si ya
+REM tiene el instalador de Windows (salvo --replace) o si tiene assets de macOS sin SHA256SUMS:
+REM fusionar contra nada borraria sus lineas, y el auto-update de la Mac dejaria de verlo.
+set "TAG=v%APP_VERSION%"
+set "REL_EXISTS="
+set "REL_DRAFT=0"
+set "REL_SUMS=0"
+set "REL_OWN=0"
+set "REL_OTHER=0"
+call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" >nul 2>nul
+if errorlevel 1 exit /b 0
+set "REL_EXISTS=1"
+set "VD_RC=%TEMP%\vd_release_check_%RANDOM%%RANDOM%"
+mkdir "%VD_RC%" >nul 2>nul
+REM Las respuestas de gh van a archivos: un gh entre comillas adentro de un for /f no itera. Se
+REM leen con PowerShell porque gh escribe solo LF y findstr /X no las reconoce.
+call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" --json isDraft -q ".isDraft" > "%VD_RC%\draft.txt"
+if errorlevel 1 goto :release_check_gh_failed
+call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" --json assets -q ".assets[].name" > "%VD_RC%\assets.txt"
+if errorlevel 1 goto :release_check_gh_failed
+set "VD_OWN_ASSET=VideoDownloader_Setup_v%APP_VERSION%.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=$env:VD_RC; $a=@(Get-Content -LiteralPath (Join-Path $d 'assets.txt') | ForEach-Object { $_.Trim() }); $draft=@(Get-Content -LiteralPath (Join-Path $d 'draft.txt') | ForEach-Object { $_.Trim() }) -contains 'true'; $other=@($a | Where-Object { $_ -like 'LGA_Video_Downloader_Mac_v*' }).Count -gt 0; Set-Content -LiteralPath (Join-Path $d 'state.txt') -Encoding Ascii -Value ('REL_DRAFT=' + [int]$draft), ('REL_SUMS=' + [int]($a -contains 'SHA256SUMS')), ('REL_OWN=' + [int]($a -contains $env:VD_OWN_ASSET)), ('REL_OTHER=' + [int]$other)"
+if errorlevel 1 goto :release_check_gh_failed
+for /f "usebackq tokens=1,2 delims==" %%A in ("%VD_RC%\state.txt") do set "%%A=%%B"
+rmdir /S /Q "%VD_RC%" >nul 2>nul
+if "%REL_DRAFT%"=="1" (
+    echo ERROR: el release %TAG% existe como borrador. Publicarlo o borrarlo a mano antes de seguir.
+    exit /b 1
+)
+if "%REL_OWN%"=="1" if not defined REPLACE (
+    echo ERROR: el release %TAG% ya tiene %VD_OWN_ASSET%. Para reemplazarlo, correr con --replace.
+    exit /b 1
+)
+if "%REL_OTHER%"=="1" if "%REL_SUMS%"=="0" (
+    echo ERROR: el release %TAG% tiene los archivos de macOS pero no SHA256SUMS: no se fusiona contra
+    echo        nada, porque se perderian sus lineas. Subir primero el SHA256SUMS de la Mac.
+    exit /b 1
+)
+exit /b 0
+:release_check_gh_failed
+echo ERROR: no se pudo leer el release %TAG% de %RELEASE_REPO%.
+rmdir /S /Q "%VD_RC%" >nul 2>nul
+exit /b 1
+
 :publish_release
 REM El release v(version) vive en este mismo repo. Lo crea la primera plataforma que publica; la
 REM otra (deploy.sh --publish en la Mac) lo encuentra y suma lo suyo. SHA256SUMS es UNO para las
-REM dos y el auto-update exige la linea de su asset: al sumarse se baja el del release, se
-REM reemplaza solo la linea del instalador de Windows y se resube. El .exe sube ANTES que el
-REM SHA256SUMS: en el medio la app no ofrece nada que no pueda verificar.
-set "TAG=v%APP_VERSION%"
+REM dos y el auto-update exige la linea de su asset: se baja el del release, se reemplaza solo la
+REM linea del instalador de Windows y se resube. Todo lo que puede cortar (leer, fusionar) pasa
+REM antes de escribir nada. El .exe sube ANTES que el SHA256SUMS: en el medio la app no ofrece
+REM nada que no pueda verificar.
+call :release_check
+if errorlevel 1 exit /b 1
 set "ASSET=VideoDownloader_Setup_v%APP_VERSION%.exe"
-set "WORK=%TEMP%\vd_release_%RANDOM%%RANDOM%"
-mkdir "%WORK%\up" >nul 2>nul
-call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" >nul 2>nul
-if errorlevel 1 goto :publish_create
+set "WORK="
+if not defined REL_EXISTS goto :publish_create
 echo El release %TAG% ya existe: se suma el instalador de Windows.
-call "%GH_CMD%" release upload "%TAG%" "installer\%ASSET%" --repo "%RELEASE_REPO%" --clobber
-if errorlevel 1 goto :publish_failed
-REM La lista va a un archivo: un gh entre comillas adentro de un for /f no itera.
-call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" --json assets -q ".assets[].name" > "%WORK%\assets.txt"
-if errorlevel 1 goto :publish_failed
-findstr /X /C:"SHA256SUMS" "%WORK%\assets.txt" >nul
-if errorlevel 1 goto :publish_merge
-REM Si el release trae SHA256SUMS, bajarlo es obligatorio: fusionar contra nada borraria las
-REM lineas de la Mac.
+set "WORK=%TEMP%\vd_release_%RANDOM%%RANDOM%"
+mkdir "%WORK%" >nul 2>nul
+if "%REL_SUMS%"=="0" goto :publish_merge
 call "%GH_CMD%" release download "%TAG%" --repo "%RELEASE_REPO%" --pattern SHA256SUMS --dir "%WORK%"
 if errorlevel 1 goto :publish_failed
 :publish_merge
 REM Una sola linea por nombre: las del release que no son el instalador de Windows, y la propia.
+REM Una linea ilegible corta: no se adivina que era. El resultado queda en una ruta fija para
+REM poder resubirlo a mano si la subida falla (--clobber borra el viejo antes de subir).
+mkdir "installer\release" >nul 2>nul
 set "VD_OLD=%WORK%\SHA256SUMS"
 set "VD_OWN=installer\SHA256SUMS"
-set "VD_OUT=%WORK%\up\SHA256SUMS"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $re='^([0-9a-fA-F]{64}) [ *](.+)$'; $own=@(([IO.File]::ReadAllText($env:VD_OWN)) -split '\r?\n' | Where-Object { $_ -match $re }); if ($own.Count -ne 1) { Write-Host 'ERROR: installer\SHA256SUMS no tiene una sola linea valida'; exit 1 }; $null=$own[0] -match $re; $seen=@{}; $seen[$Matches[2]]=1; $keep=New-Object System.Collections.Generic.List[string]; if (Test-Path -LiteralPath $env:VD_OLD) { foreach ($l in (([IO.File]::ReadAllText($env:VD_OLD)) -split '\r?\n')) { if ($l -match $re) { if (-not $seen.ContainsKey($Matches[2])) { $seen[$Matches[2]]=1; $keep.Add($l) } } elseif ($l.Trim()) { Write-Host ('AVISO: linea ilegible descartada: ' + $l) } } }; $keep.Add($own[0]); [IO.File]::WriteAllText($env:VD_OUT, (($keep -join [char]10) + [char]10)); Write-Host ('SHA256SUMS fusionado: ' + $keep.Count + ' lineas')"
+set "VD_OUT=installer\release\SHA256SUMS"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference='Stop'; $re='^([0-9a-fA-F]{64}) [ *](.+)$'; $own=@(([IO.File]::ReadAllText($env:VD_OWN)) -split '\r?\n' | Where-Object { $_ -match $re }); if ($own.Count -ne 1) { Write-Host 'ERROR: installer\SHA256SUMS no tiene una sola linea valida'; exit 1 }; $null=$own[0] -match $re; $seen=@{}; $seen[$Matches[2]]=1; $keep=New-Object System.Collections.Generic.List[string]; if (Test-Path -LiteralPath $env:VD_OLD) { foreach ($l in (([IO.File]::ReadAllText($env:VD_OLD)) -split '\r?\n')) { if ($l -match $re) { if (-not $seen.ContainsKey($Matches[2])) { $seen[$Matches[2]]=1; $keep.Add($l) } } elseif ($l.Trim()) { Write-Host ('ERROR: el SHA256SUMS del release tiene una linea ilegible: ' + $l); exit 1 } } }; $keep.Add($own[0]); [IO.File]::WriteAllText($env:VD_OUT, (($keep -join [char]10) + [char]10)); Write-Host ('SHA256SUMS fusionado: ' + $keep.Count + ' lineas')"
+if errorlevel 1 goto :publish_failed
+call "%GH_CMD%" release upload "%TAG%" "installer\%ASSET%" --repo "%RELEASE_REPO%" --clobber
 if errorlevel 1 goto :publish_failed
 call "%GH_CMD%" release upload "%TAG%" "%VD_OUT%" --repo "%RELEASE_REPO%" --clobber
-if errorlevel 1 goto :publish_failed
+if errorlevel 1 goto :publish_sums_failed
+rmdir /S /Q "%WORK%" >nul 2>nul
 goto :publish_notes
 :publish_create
 echo Creando el release %TAG% en %RELEASE_REPO%...
 call "%GH_CMD%" release create "%TAG%" "installer\%ASSET%" "installer\SHA256SUMS" --repo "%RELEASE_REPO%" --target "%HEAD_SHA%" --title "%TAG%" --notes "LGA Video Downloader %TAG%"
 if errorlevel 1 goto :publish_failed
 :publish_notes
-rmdir /S /Q "%WORK%" >nul 2>nul
 echo Publicando las notas para el usuario [What's new]...
 call "%WN_BAT%" publish "%WN_FILE%" "%APP_VERSION%" "%RELEASE_REPO%" "%TAG%"
 if errorlevel 1 (
@@ -434,9 +495,15 @@ if errorlevel 1 (
 )
 echo Release publicado: https://github.com/%RELEASE_REPO%/releases/tag/%TAG%
 exit /b 0
+:publish_sums_failed
+echo ERROR: el instalador subio, pero SHA256SUMS no: el release puede haber quedado SIN SHA256SUMS
+echo        y la app no ofrece el update. El fusionado esta en %CD%\%VD_OUT%. Subirlo con:
+echo        gh release upload %TAG% "%CD%\%VD_OUT%" --repo %RELEASE_REPO% --clobber
+if defined WORK rmdir /S /Q "%WORK%" >nul 2>nul
+exit /b 1
 :publish_failed
-echo ERROR: fallo la publicacion del release %TAG%. No se deshizo nada; ver el mensaje de gh.
-rmdir /S /Q "%WORK%" >nul 2>nul
+echo ERROR: fallo la publicacion del release %TAG%. Ver el mensaje de arriba.
+if defined WORK rmdir /S /Q "%WORK%" >nul 2>nul
 exit /b 1
 
 REM ==== PUBLICAR: fin
