@@ -90,6 +90,9 @@ private:
     void checkAfterInstallNotes();
     bool showAfterInstallNotes(const WhatsNew::Notes &notes);
     void onNotesChanged();
+    // Chequeo periodico del update de la app: el tick mira el reloj y, si vencio, chequea.
+    void onPeriodicUpdateTick();
+    void schedulePeriodicUpdateCheck(qint64 delayMs, bool withJitter);
 
     Mode m_mode;
     QSettings *m_settings = nullptr;
@@ -107,6 +110,10 @@ private:
 
     QPointer<HelpDialog> m_helpDialog;
     QDateTime m_lastUpdateCheck;
+    // Proximo chequeo periodico (reloj de pared, UTC) y si el chequeo en curso lo lanzo el tick:
+    // un periodico que falla por red se reintenta antes que un intervalo entero.
+    QDateTime m_nextPeriodicUpdateCheckUtc;
+    bool m_periodicUpdateCheckActive = false;
     qint64 m_installReceived = -1;
     qint64 m_installTotal = -1;
     // Notas "despues de instalar" esperando la descarga; desde que version mostrarlas.

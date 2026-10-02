@@ -23,6 +23,7 @@
 #include <QFileInfo>
 #include <QMessageBox>
 #include <QProcess>
+#include <QRandomGenerator>
 #include <QScreen>
 #include <QSettings>
 #include <QStandardPaths>
@@ -35,6 +36,15 @@ namespace {
 // Retraso del auto-update (tools y app) despues de construir la ventana: deja que la UI
 // termine de aparecer antes de meter trafico de red y procesos.
 constexpr int AUTO_UPDATE_DELAY_MS = 2000;
+
+// Chequeo periodico del update de la APP mientras sigue abierta: cada 3 horas con un desfase al
+// azar de +/-15 min, para que las maquinas de un estudio no consulten en el mismo segundo. Se
+// mide contra el reloj con un tick de 5 min (que no sale a la red): al volver de una suspension
+// el chequeo vencido corre enseguida. Si falla por red se reintenta a los 10 min.
+constexpr qint64 PERIODIC_UPDATE_INTERVAL_MS = 3LL * 60 * 60 * 1000;
+constexpr int PERIODIC_UPDATE_JITTER_MS = 15 * 60 * 1000;
+constexpr qint64 PERIODIC_UPDATE_RETRY_MS = 10LL * 60 * 1000;
+constexpr int PERIODIC_UPDATE_TICK_MS = 5 * 60 * 1000;
 
 // Ancho del diseno aprobado. El alto es mayor que el del artboard (748 sin la barra del
 // sistema): con las tarjetas de cola, a 748 solo entran dos items y medio; a 860 entran cuatro.
@@ -215,6 +225,13 @@ void MainWindow::setupServices()
         if (state == UpdateService::State::UpToDate || state == UpdateService::State::UpdateAvailable) {
             m_lastUpdateCheck = QDateTime::currentDateTime();
         }
+        if (state != UpdateService::State::Checking) {
+            if (state == UpdateService::State::CheckFailed && m_periodicUpdateCheckActive) {
+                // Al despertar de una suspension la red suele tardar en levantar.
+                schedulePeriodicUpdateCheck(PERIODIC_UPDATE_RETRY_MS, /*withJitter=*/false);
+            }
+            m_periodicUpdateCheckActive = false;
+        }
         if (state == UpdateService::State::UpdateAvailable) {
             log(QStringLiteral("Update available: v%1").arg(m_updateService->availableVersion()));
         } else if (state == UpdateService::State::InstallFailed || state == UpdateService::State::CheckFailed) {
@@ -246,6 +263,15 @@ void MainWindow::setupServices()
         checkAfterInstallNotes();
         m_toolsManager->startAutomaticUpdate();
         m_updateService->checkForUpdates();
+
+        // Despues del chequeo del arranque, el periodico: una app que queda abierta dias enteros
+        // no se enteraba nunca de una version nueva.
+        schedulePeriodicUpdateCheck(PERIODIC_UPDATE_INTERVAL_MS, /*withJitter=*/true);
+        auto *periodicTimer = new QTimer(this);
+        periodicTimer->setTimerType(Qt::VeryCoarseTimer);
+        periodicTimer->setInterval(PERIODIC_UPDATE_TICK_MS);
+        connect(periodicTimer, &QTimer::timeout, this, &MainWindow::onPeriodicUpdateTick);
+        periodicTimer->start();
     });
     onToolsStatusChanged();
 }
@@ -669,6 +695,48 @@ void MainWindow::onNotesChanged()
     // esperar.
     if (status != UpdateService::NotesStatus::Failed) {
         m_settings->setValue(QStringLiteral("updates/whats_new_last_seen"), QStringLiteral(VIDEODOWNLOADER_VERSION));
+    }
+}
+
+void MainWindow::schedulePeriodicUpdateCheck(qint64 delayMs, bool withJitter)
+{
+    qint64 jitterMs = 0;
+    if (withJitter) {
+        jitterMs = QRandomGenerator::global()->bounded(2 * PERIODIC_UPDATE_JITTER_MS + 1)
+            - PERIODIC_UPDATE_JITTER_MS;
+    }
+    m_nextPeriodicUpdateCheckUtc = QDateTime::currentDateTimeUtc().addMSecs(qMax<qint64>(0, delayMs + jitterMs));
+}
+
+void MainWindow::onPeriodicUpdateTick()
+{
+    if (!m_updateService) {
+        return;
+    }
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    // Un reloj que se atraso (a mano o por zona) dejaria el proximo chequeo a dias de distancia.
+    if (now.msecsTo(m_nextPeriodicUpdateCheckUtc) > PERIODIC_UPDATE_INTERVAL_MS + PERIODIC_UPDATE_JITTER_MS) {
+        schedulePeriodicUpdateCheck(PERIODIC_UPDATE_INTERVAL_MS, /*withJitter=*/true);
+        return;
+    }
+    if (now < m_nextPeriodicUpdateCheckUtc) {
+        return;
+    }
+
+    // Solo si no hay nada que mostrar todavia: con un update ya ofrecido (o bajandose, o fallido)
+    // un chequeo nuevo pasaria por Checking y borraria el aviso del header mientras dura.
+    const UpdateService::State state = m_updateService->state();
+    if (state != UpdateService::State::Idle && state != UpdateService::State::UpToDate
+        && state != UpdateService::State::CheckFailed) {
+        schedulePeriodicUpdateCheck(PERIODIC_UPDATE_INTERVAL_MS, /*withJitter=*/true);
+        return;
+    }
+
+    schedulePeriodicUpdateCheck(PERIODIC_UPDATE_INTERVAL_MS, /*withJitter=*/true);
+    m_periodicUpdateCheckActive = true;
+    m_updateService->checkForUpdates();
+    if (m_updateService->state() != UpdateService::State::Checking) {
+        m_periodicUpdateCheckActive = false;
     }
 }
 
