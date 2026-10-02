@@ -35,6 +35,15 @@ Requisitos: Qt 6.8.2, CMake 3.16+, compilador C++17.
 ./deploy.sh --zip --dmg   # macOS: .zip de actualización y .dmg de instalación
 ```
 
+### Publicar un release
+
+```bash
+instalador.bat --publish   # Windows, después de deploy.bat
+./deploy.sh --publish      # macOS: compila, arma el .zip y el .dmg y publica
+```
+
+Cada comando valida las notas para el usuario (`docs/WhatsNew.md`) antes de armar nada, exige un árbol commiteado y pusheado, y publica en el release `v<versión>` de este repo. La primera plataforma crea el release; la segunda suma sus archivos y fusiona `SHA256SUMS` (una línea por archivo, sin tocar las de la otra plataforma). Al final suben las notas del release y `whats_new.json`. Sin `--publish`, `instalador.bat` pregunta al final si hay consola; `--no-publish` no pregunta.
+
 ### Capturas de UI sin abrir ventanas
 
 ```bash

@@ -9,20 +9,103 @@ ARTIFACT_NAME="LGA_Video_Downloader"
 CREATE_ZIP=false
 CREATE_DMG=false
 NO_RUN=false
+PUBLISH=false
 for arg in "$@"; do
     case "$arg" in
         --zip) CREATE_ZIP=true ;;
         --dmg) CREATE_DMG=true ;;
         --no-run) NO_RUN=true ;;
+        --publish) PUBLISH=true; CREATE_ZIP=true; CREATE_DMG=true ;;
         -h|--help)
-            echo "Uso: $0 [--zip] [--dmg] [--no-run]"
-            echo "  --zip     Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.zip firmado (actualizacion)"
-            echo "  --dmg     Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.dmg (primera instalacion)"
-            echo "  --no-run  No ejecutar la app al terminar"
+            echo "Uso: $0 [--zip] [--dmg] [--no-run] [--publish]"
+            echo "  --zip      Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.zip firmado (actualizacion)"
+            echo "  --dmg      Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.dmg (primera instalacion)"
+            echo "  --no-run   No ejecutar la app al terminar"
+            echo "  --publish  Crear el .zip y el .dmg y publicarlos en el release v<version> de"
+            echo "             legandrop/LGA_VideoDownloader, con SHA256SUMS y las notas (What's new)"
             exit 0
             ;;
     esac
 done
+
+RELEASE_REPO="legandrop/LGA_VideoDownloader"
+# LGA_GH apunta a otro gh, igual que en el helper de las notas.
+GH="${LGA_GH:-gh}"
+
+# ==== PUBLICAR: inicio. El banco de pruebas extrae lo que hay entre estas marcas: no moverlas.
+
+# SHA256SUMS del release: las lineas que NO son de esta plataforma, mas las propias al final. Una
+# sola linea por nombre de archivo; formato sha256sum ("hash  nombre"), LF. Sin intervalos {64}
+# en las regex: el awk de macOS no siempre los entiende.
+merge_sha256sums() {  # <SHA256SUMS del release, o /dev/null> <el propio> <salida>
+    if ! grep -q . "$2"; then
+        echo "ERROR: $2 esta vacio."
+        return 1
+    fi
+    awk '
+        { sub(/\r$/, "") }
+        length($0) > 66 && substr($0, 1, 64) ~ /^[0-9a-fA-F]+$/ && substr($0, 65, 1) == " " && substr($0, 66, 1) ~ /[ *]/ {
+            name = substr($0, 67)
+            if (FNR == NR) { if (!(name in own)) { own[name] = 1; mine[++m] = $0 } }
+            else if (!(name in own) && !(name in seen)) { seen[name] = 1; keep[++k] = $0 }
+            next
+        }
+        NF { print "AVISO: linea ilegible descartada: " $0 > "/dev/stderr" }
+        END { for (i = 1; i <= k; i++) print keep[i]; for (i = 1; i <= m; i++) print mine[i] }
+    ' "$2" "$1" > "$3"
+}
+
+publish_failed() {  # <carpeta temporal>
+    echo "ERROR: fallo la publicacion del release v${APP_VERSION}. No se deshizo nada; ver el mensaje de gh."
+    rm -rf "$1"
+}
+
+# El release v<version> vive en este mismo repo. Lo crea la primera plataforma que publica; la
+# otra (instalador.bat --publish en Windows) lo encuentra y suma lo suyo. El .zip y el .dmg suben
+# ANTES que el SHA256SUMS: en el medio la app no ofrece nada que no pueda verificar.
+publish_release() {
+    local tag="v${APP_VERSION}" work old a
+    local assets=()
+    for a in "deploy/${ARTIFACT_NAME}_Mac_v${APP_VERSION}.zip" "deploy/${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"; do
+        [ -f "$a" ] || { echo "ERROR: falta $a"; return 1; }
+        assets+=("$a")
+    done
+    work="$(mktemp -d)" || return 1
+    if ! "$GH" release view "$tag" --repo "$RELEASE_REPO" >/dev/null 2>&1; then
+        echo "Creando el release $tag en $RELEASE_REPO..."
+        "$GH" release create "$tag" "${assets[@]}" deploy/SHA256SUMS --repo "$RELEASE_REPO" \
+            --target "$HEAD_SHA" --title "$tag" --notes "LGA Video Downloader $tag" \
+            || { publish_failed "$work"; return 1; }
+    else
+        echo "El release $tag ya existe: se suman el .zip y el .dmg de macOS."
+        "$GH" release upload "$tag" "${assets[@]}" --repo "$RELEASE_REPO" --clobber \
+            || { publish_failed "$work"; return 1; }
+        "$GH" release view "$tag" --repo "$RELEASE_REPO" --json assets -q '.assets[].name' > "$work/assets.txt" \
+            || { publish_failed "$work"; return 1; }
+        old=/dev/null
+        # Si el release trae SHA256SUMS, bajarlo es obligatorio: fusionar contra nada borraria la
+        # linea de Windows.
+        if grep -qx 'SHA256SUMS' "$work/assets.txt"; then
+            "$GH" release download "$tag" --repo "$RELEASE_REPO" --pattern SHA256SUMS --dir "$work" \
+                || { publish_failed "$work"; return 1; }
+            old="$work/SHA256SUMS"
+        fi
+        mkdir -p "$work/up"
+        merge_sha256sums "$old" deploy/SHA256SUMS "$work/up/SHA256SUMS" || { publish_failed "$work"; return 1; }
+        echo "SHA256SUMS fusionado: $(wc -l < "$work/up/SHA256SUMS" | tr -d ' ') lineas"
+        "$GH" release upload "$tag" "$work/up/SHA256SUMS" --repo "$RELEASE_REPO" --clobber \
+            || { publish_failed "$work"; return 1; }
+    fi
+    rm -rf "$work"
+    echo "Publicando las notas para el usuario (What's new)..."
+    if ! sh "$WHATS_NEW_SH" publish "$WHATS_NEW_FILE" "$APP_VERSION" "$RELEASE_REPO" "$tag"; then
+        echo "ERROR: el release $tag quedo publicado, pero sus notas no. Reintentar con el comando de arriba."
+        return 1
+    fi
+    echo "Release publicado: https://github.com/${RELEASE_REPO}/releases/tag/${tag}"
+}
+
+# ==== PUBLICAR: fin
 
 # Version UNICA: sale del CMakeLists. Antes el Info.plist la traia hardcodeada y quedo
 # desfasada del proyecto.
@@ -32,6 +115,40 @@ if [ -z "$APP_VERSION" ]; then
     exit 1
 fi
 echo "Version: $APP_VERSION"
+
+# Publicacion: lo que puede cortarla se chequea ACA, antes de borrar el deploy y compilar.
+if [ "$PUBLISH" = "true" ]; then
+    if ! command -v "$GH" >/dev/null 2>&1 || ! "$GH" auth status >/dev/null 2>&1; then
+        echo "ERROR: --publish necesita gh (GitHub CLI) instalado y con login (gh auth login)."
+        exit 1
+    fi
+    # El tag se crea sobre HEAD (--target): tiene que ser el codigo commiteado y estar en origin.
+    if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+        echo "ERROR: hay cambios sin commitear; el release tiene que salir de un commit:"
+        git status --short --untracked-files=no
+        exit 1
+    fi
+    git fetch -q origin || { echo "ERROR: no se pudo leer origin."; exit 1; }
+    if ! git merge-base --is-ancestor HEAD origin/main; then
+        echo "ERROR: HEAD no esta en origin/main. Pushear antes de publicar."
+        exit 1
+    fi
+    HEAD_SHA="$(git rev-parse HEAD)"
+    # Notas para el usuario (What's new): la logica vive en LGA_RepoTools (WhatsNew_Shared);
+    # LGA_REPOTOOLS apunta a otra copia. Si corta, no se compilo ni se publico nada.
+    WHATS_NEW_FILE="$(pwd)/docs/WhatsNew.md"
+    WHATS_NEW_SH="${LGA_REPOTOOLS:-$(pwd)/../LGA_RepoTools}/WhatsNew_Mac/whats_new_release.sh"
+    if [ ! -f "$WHATS_NEW_SH" ]; then
+        echo "ERROR: no encontre $WHATS_NEW_SH."
+        echo "Clonar LGA_RepoTools al lado de este repo o definir LGA_REPOTOOLS. Sin notas no se publica."
+        exit 1
+    fi
+    echo "Verificando las notas para el usuario (What's new) de v${APP_VERSION}..."
+    if ! sh "$WHATS_NEW_SH" check "$WHATS_NEW_FILE" "$APP_VERSION"; then
+        echo "ERROR: faltan o fallan las notas de v${APP_VERSION}, o se contesto que no. No se compilo nada."
+        exit 1
+    fi
+fi
 
 # BORRAR DEPLOY ANTERIOR
 if [ -d "deploy" ]; then
@@ -222,7 +339,8 @@ fi
 
 # SHA256SUMS del release: el auto-update de la app no instala nada sin su hash. Formato
 # sha256sum ("hash  nombre"). Al publicar, el SHA256SUMS del release tiene que llevar TAMBIEN
-# las lineas del instalador de Windows (installer/SHA256SUMS de instalador.bat).
+# las lineas del instalador de Windows (installer/SHA256SUMS de instalador.bat): publish_release
+# las fusiona.
 if [ "$CREATE_ZIP" = "true" ] || [ "$CREATE_DMG" = "true" ]; then
     (
         cd deploy
@@ -234,6 +352,10 @@ if [ "$CREATE_ZIP" = "true" ] || [ "$CREATE_DMG" = "true" ]; then
         done
     )
     echo "SHA256SUMS creado: deploy/SHA256SUMS"
+fi
+
+if [ "$PUBLISH" = "true" ]; then
+    publish_release || exit 1
 fi
 
 echo
