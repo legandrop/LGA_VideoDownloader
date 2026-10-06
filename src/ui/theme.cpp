@@ -34,11 +34,33 @@ QFont uiFont(qreal pixelSize, int weight)
     return font;
 }
 
+// UNA sola familia monoespaciada, elegida una vez. Con una lista en setFamilies(), Qt carga
+// todas las fuentes instaladas en la maquina al resolverla (cientos de ms). El orden de
+// preferencia es el de siempre y gana la primera que este instalada, asi el log se ve igual
+// que antes; hasFamily() compara nombres y no carga ninguna fuente. Si no hay ninguna, la
+// monoespaciada que trae la plataforma.
+static QString monoFamily()
+{
+    static const QString family = []() {
+        for (const char *name : {"JetBrains Mono", "Cascadia Mono", "Consolas", "Menlo", "Monaco", "DejaVu Sans Mono"}) {
+            const QString candidate = QString::fromLatin1(name);
+            if (QFontDatabase::hasFamily(candidate)) {
+                return candidate;
+            }
+        }
+#ifdef Q_OS_MAC
+        return QStringLiteral("Menlo");
+#else
+        return QStringLiteral("Consolas");
+#endif
+    }();
+    return family;
+}
+
 QFont monoFont(qreal pixelSize)
 {
     QFont font;
-    font.setFamilies({QStringLiteral("JetBrains Mono"), QStringLiteral("Cascadia Mono"), QStringLiteral("Consolas"),
-                      QStringLiteral("Menlo"), QStringLiteral("Monaco"), QStringLiteral("DejaVu Sans Mono")});
+    font.setFamilies({monoFamily()});
     font.setStyleHint(QFont::Monospace);
     font.setPointSizeF(pixelSize * pointsPerPixel());
     return font;
