@@ -132,28 +132,84 @@ bool ToolsManager::applyStagedTools()
     return true;
 }
 
-QString ToolsManager::ffmpegProblem(const QString &ffmpegExe)
+QString ToolsManager::ffmpegProblem(const QString &ffmpegExe, QStringList *unverified)
 {
 #ifdef Q_OS_WIN
     QString reason;
-    if (!ToolsUpdater::isRunnableBinary(ffmpegExe, &reason)) {
+    bool unread = false;
+    if (!ToolsUpdater::isRunnableBinary(ffmpegExe, &reason, &unread)) {
         return QStringLiteral("ffmpeg.exe: %1").arg(reason);
+    }
+    if (unread && unverified) {
+        unverified->append(QStringLiteral("ffmpeg.exe: %1").arg(reason));
     }
     const QDir dir = QFileInfo(ffmpegExe).absoluteDir();
     const QString ffprobe = dir.filePath(QStringLiteral("ffprobe.exe"));
-    if (QFileInfo(ffprobe).isFile() && !ToolsUpdater::isRunnableBinary(ffprobe, &reason)) {
-        return QStringLiteral("ffprobe.exe: %1").arg(reason);
+    if (QFileInfo(ffprobe).isFile()) {
+        if (!ToolsUpdater::isRunnableBinary(ffprobe, &reason, &unread)) {
+            return QStringLiteral("ffprobe.exe: %1").arg(reason);
+        }
+        if (unread && unverified) {
+            unverified->append(QStringLiteral("ffprobe.exe: %1").arg(reason));
+        }
     }
     const QStringList libraries = dir.entryList({QStringLiteral("*.dll")}, QDir::Files, QDir::Name);
     for (const QString &library : libraries) {
-        if (!PeCheck::isValidImage(dir.filePath(library), PeCheck::Kind::Library, &reason)) {
+        const PeCheck::Verdict verdict = PeCheck::inspect(dir.filePath(library), PeCheck::Kind::Library, &reason);
+        if (verdict == PeCheck::Verdict::Invalid) {
             return QStringLiteral("%1: %2").arg(library, reason);
+        }
+        // Una .dll que no se pudo leer no es una .dll rota: se deja pasar y se anota.
+        if (verdict == PeCheck::Verdict::Unreadable && unverified) {
+            unverified->append(QStringLiteral("%1: %2").arg(library, reason));
         }
     }
 #else
     Q_UNUSED(ffmpegExe);
+    Q_UNUSED(unverified);
 #endif
     return QString();
+}
+
+QString ToolsManager::ffmpegReinstallHint()
+{
+    return QStringLiteral("ffmpeg comes with the app and is not downloaded separately. Reinstall the app to restore it.");
+}
+
+bool ToolsManager::ffmpegNeedsReinstall() const
+{
+#ifdef Q_OS_WIN
+    return m_ffmpegChecked && !m_ffmpegInstalled;
+#else
+    return false;
+#endif
+}
+
+void ToolsManager::logUnverifiedTools()
+{
+#ifdef Q_OS_WIN
+    // Tools que se dan por buenas sin haber podido leer su cabecera. Una linea por archivo y
+    // por vez: mientras siga sin poder leerse no se repite en cada descarga.
+    QStringList current;
+    for (ToolsUpdater::Tool tool : {ToolsUpdater::Tool::YtDlp, ToolsUpdater::Tool::Deno}) {
+        const QString path = localToolPath(tool);
+        QString reason;
+        bool unread = false;
+        if (!path.isEmpty() && ToolsUpdater::isRunnableBinary(path, &reason, &unread) && unread) {
+            current.append(QStringLiteral("%1: %2").arg(ToolsUpdater::binaryName(tool), reason));
+        }
+    }
+    const QString ffmpeg = getFfmpegPath();
+    if (QFileInfo(ffmpeg).isFile()) {
+        ffmpegProblem(ffmpeg, &current);
+    }
+    for (const QString &entry : std::as_const(current)) {
+        if (!m_unverifiedLogged.contains(entry)) {
+            logMessage(QStringLiteral("WARNING: %1; it could not be checked and is used as it is").arg(entry));
+        }
+    }
+    m_unverifiedLogged = current;
+#endif
 }
 
 bool ToolsManager::verifyToolsBeforeLaunch()
@@ -182,6 +238,7 @@ bool ToolsManager::verifyToolsBeforeLaunch()
             logMessage(QStringLiteral("✗ ffmpeg is damaged (%1); reinstall the app to restore it").arg(damage));
         }
     }
+    logUnverifiedTools();
     if (changed) {
         // El mismo camino verificado del auto-update. Si todavia no corrio en esta sesion, va a
         // correr solo unos segundos despues de abrir, o esta apagado a proposito
@@ -453,9 +510,13 @@ void ToolsManager::checkFfmpegInstallation()
         logMessage("✓ ffmpeg.exe found in tools directory");
     } else {
         m_ffmpegInstalled = false;
-        logMessage("✗ ffmpeg.exe not found in tools directory");
+        logMessage("✗ ffmpeg.exe not found in tools directory; reinstall the app to restore it");
     }
-    
+    m_ffmpegChecked = true;
+    // Es el ultimo de los tres chequeos: aca ya se sabe que tools se dieron por buenas sin
+    // haber podido leerlas.
+    logUnverifiedTools();
+
     // Update button state after both checks are done
     if (m_pendingProcesses == 0) {
         QTimer::singleShot(100, this, &ToolsManager::updateButtonState);
@@ -736,7 +797,8 @@ void ToolsManager::checkDenoInstallation()
 void ToolsManager::updateButtonState()
 {
     m_checkingTools = false;
-    
+    const Status statusBefore = m_status;
+
     bool allInstalled = m_ytDlpInstalled && m_ffmpegInstalled;
 #if defined(Q_OS_MAC) || defined(Q_OS_WIN)
     allInstalled = allInstalled && m_denoInstalled;
@@ -757,6 +819,16 @@ void ToolsManager::updateButtonState()
         setStatus(Status::Ready);
     } else {
         setStatus(Status::Missing);
+    }
+
+    // El aviso del header depende tambien de si ffmpeg hay que reinstalarlo. Si eso cambio y
+    // el estado quedo igual, statusChanged no salio: se emite para que el aviso se actualice.
+    const bool reinstall = ffmpegNeedsReinstall();
+    if (reinstall != m_ffmpegReinstallNotified) {
+        m_ffmpegReinstallNotified = reinstall;
+        if (m_status == statusBefore) {
+            emit statusChanged(m_status);
+        }
     }
 
     emit toolsStatusChanged(allInstalled);
@@ -939,23 +1011,11 @@ void ToolsManager::updateFfmpegMac()
 void ToolsManager::downloadFfmpegWindows()
 {
 #ifdef Q_OS_WIN
-    // GitHub URL for latest ffmpeg.exe (using a reliable build)
-    QString url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip";
-    QNetworkRequest request(url);
-    
-    // Set user agent
-    request.setRawHeader("User-Agent", "VideoDownloader/1.0");
-    
-    logMessage(QString("Downloading ffmpeg from: %1").arg(url));
-    logMessage("Note: This will download a zip file that needs to be extracted manually");
-    logMessage("For now, please download and extract ffmpeg.exe manually to the application directory");
-    
-    // TODO: Implement zip extraction
-    // For now, just mark as not implemented
-    logMessage("ERROR: Automatic ffmpeg installation not fully implemented on Windows yet");
-    logMessage("Please download ffmpeg manually from: https://ffmpeg.org/download.html");
-    logMessage("Extract ffmpeg.exe to the same directory as this application");
-    
+    // En Windows ffmpeg (con ffprobe y sus .dll) viene con el instalador y la app no lo baja:
+    // el reintento no puede reponerlo. Antes esto mandaba a bajarlo a mano y copiarlo junto al
+    // exe, que no es donde la app lo busca (tools\) y dejaba afuera las .dll.
+    logMessage(QStringLiteral("✗ ffmpeg is missing or damaged. %1").arg(ffmpegReinstallHint()));
+
     updateButtonState();
 #endif
 }

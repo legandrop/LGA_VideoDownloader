@@ -27,8 +27,9 @@ int runMigrateCheck(const QStringList &args);
 int runUpdateDirsCheck(const QStringList &args);
 
 // `--qa-tools-check <carpeta>`: sin red y SIN ejecutar nada, dice que haria la app con las
-// tools de esa carpeta: por cada .exe y .dll, si su cabecera es valida, y si yt-dlp, deno y
-// ffmpeg (con ffprobe y sus .dll) se lanzarian o se tratarian como rotos. Usa las mismas
+// tools de esa carpeta: por cada .exe y .dll, si su cabecera es valida, invalida o no se pudo
+// leer (`valid` / `INVALID` / `UNVERIFIABLE`: lo que no se puede leer no cuenta como roto), y
+// si yt-dlp, deno y ffmpeg (con ffprobe y sus .dll) se lanzarian. Usa las mismas
 // funciones que consulta la app antes de lanzar. Para probar con archivos senuelo en una
 // carpeta de prueba, nunca en la carpeta de tools de una copia de la app.
 int runToolsCheck(const QStringList &args);

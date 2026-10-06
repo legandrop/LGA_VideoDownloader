@@ -324,27 +324,36 @@ int runToolsCheck(const QStringList &args)
     // cualquiera. Solo leen cabeceras: este modo no ejecuta ningun archivo de la carpeta.
     const QDir base(dir);
     const QStringList files = base.entryList({QStringLiteral("*.exe"), QStringLiteral("*.dll")}, QDir::Files, QDir::Name);
+    // Tres resultados por archivo: valid, INVALID (se leyo y no es un programa: no se lanza) y
+    // UNVERIFIABLE (no se pudo leer: no cuenta como roto, se deja pasar).
     for (const QString &name : files) {
         const bool library = name.endsWith(QLatin1String(".dll"), Qt::CaseInsensitive);
         QString reason;
-        const bool ok = library ? PeCheck::isValidImage(base.filePath(name), PeCheck::Kind::Library, &reason)
-                                : ToolsUpdater::isRunnableBinary(base.filePath(name), &reason);
-        fprintf(stdout, "file %s %s%s%s\n", qPrintable(name), ok ? "valid" : "INVALID", ok ? "" : ": ", qPrintable(reason));
+        const PeCheck::Verdict verdict = PeCheck::inspect(base.filePath(name),
+                                                          library ? PeCheck::Kind::Library : PeCheck::Kind::Program, &reason);
+        const char *label = verdict == PeCheck::Verdict::Valid ? "valid"
+                            : verdict == PeCheck::Verdict::Invalid ? "INVALID" : "UNVERIFIABLE";
+        fprintf(stdout, "file %s %s%s%s\n", qPrintable(name), label, reason.isEmpty() ? "" : ": ", qPrintable(reason));
     }
     for (ToolsUpdater::Tool tool : {ToolsUpdater::Tool::YtDlp, ToolsUpdater::Tool::Deno}) {
         QString reason;
-        const bool ok = ToolsUpdater::isRunnableBinary(base.filePath(ToolsUpdater::binaryName(tool)), &reason);
-        fprintf(stdout, "tool %s launch=%d%s%s\n", qPrintable(ToolsUpdater::toolKey(tool)), ok ? 1 : 0, ok ? "" : " ",
-                qPrintable(reason));
+        bool unverified = false;
+        const bool ok = ToolsUpdater::isRunnableBinary(base.filePath(ToolsUpdater::binaryName(tool)), &reason, &unverified);
+        fprintf(stdout, "tool %s launch=%d%s%s%s\n", qPrintable(ToolsUpdater::toolKey(tool)), ok ? 1 : 0,
+                unverified ? " unverified" : "", reason.isEmpty() ? "" : " ", qPrintable(reason));
     }
 #ifdef Q_OS_WIN
     const QString ffmpeg = base.filePath(QStringLiteral("ffmpeg.exe"));
 #else
     const QString ffmpeg = base.filePath(QStringLiteral("ffmpeg"));
 #endif
-    const QString problem = QFileInfo(ffmpeg).isFile() ? ToolsManager::ffmpegProblem(ffmpeg)
+    QStringList unverified;
+    const QString problem = QFileInfo(ffmpeg).isFile() ? ToolsManager::ffmpegProblem(ffmpeg, &unverified)
                                                        : QStringLiteral("the file does not exist");
     fprintf(stdout, "tool ffmpeg launch=%d%s%s\n", problem.isEmpty() ? 1 : 0, problem.isEmpty() ? "" : " ", qPrintable(problem));
+    for (const QString &entry : std::as_const(unverified)) {
+        fprintf(stdout, "tool ffmpeg unverified %s\n", qPrintable(entry));
+    }
     return 0;
 }
 

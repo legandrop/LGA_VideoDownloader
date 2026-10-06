@@ -7,6 +7,7 @@
 #include <QNetworkReply>
 #include <QTimer>
 #include <QMap>
+#include <QStringList>
 
 #include <functional>
 
@@ -64,8 +65,16 @@ public:
     // Windows: vacio si ffmpeg se puede usar; si no, el motivo en ingles para el log. Mira
     // ffmpeg.exe, ffprobe.exe si esta (yt-dlp lo lanza desde la misma carpeta) y las .dll de
     // esa carpeta, que ffmpeg carga al arrancar. Solo lee cabeceras; no ejecuta nada. Estatica
-    // y con la ruta explicita para poder probarla con una carpeta de prueba.
-    static QString ffmpegProblem(const QString &ffmpegExe);
+    // y con la ruta explicita para poder probarla con una carpeta de prueba. Un archivo que no
+    // se pudo LEER no es un problema (ver PeCheck::Verdict::Unreadable): se deja pasar y, si se
+    // pide, queda anotado en `unverified` como "archivo: motivo".
+    static QString ffmpegProblem(const QString &ffmpegExe, QStringList *unverified = nullptr);
+    // Windows: true si ffmpeg falta o esta roto (ya chequeado). A diferencia de yt-dlp y deno,
+    // la app NO lo baja: viene con el instalador. La UI no puede decir "instalando" en ese
+    // caso. Fuera de Windows, false.
+    bool ffmpegNeedsReinstall() const;
+    // El texto unico (en ingles) que explica como se repone ffmpeg en Windows.
+    static QString ffmpegReinstallHint();
     // Como saber si hay un yt-dlp corriendo (lo cablea MainWindow contra DownloadQueue).
     void setProcessActiveProbe(std::function<bool()> probe) { m_processActiveProbe = std::move(probe); }
 
@@ -101,7 +110,10 @@ private:
     // Helper methods
     void logMessage(const QString &message);
     QString getBrewPath() const;
-    
+    // Windows: deja en el log, una vez por archivo, las tools que se usan sin haber podido
+    // leer su cabecera (abiertas en exclusiva por otro proceso, sin permiso de lectura).
+    void logUnverifiedTools();
+
     Status m_status = Status::Checking;
 
     // Tool status
@@ -109,7 +121,10 @@ private:
     bool m_ffmpegInstalled;
     bool m_denoInstalled;
     bool m_checkingTools;
-    
+    bool m_ffmpegChecked = false;       // ya se miro ffmpeg en disco al menos una vez
+    bool m_ffmpegReinstallNotified = false; // ultimo ffmpegNeedsReinstall() avisado por statusChanged
+    QStringList m_unverifiedLogged;     // "archivo: motivo" ya avisados por logUnverifiedTools()
+
     // Network manager for downloads
     QNetworkAccessManager *m_networkManager;
     

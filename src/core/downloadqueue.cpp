@@ -274,7 +274,13 @@ void DownloadQueue::processNextDownload()
     if (m_toolsManager && !m_toolsManager->areToolsInstalled()) {
         if (!m_waitingForTools) {
             m_waitingForTools = true;
-            log(QStringLiteral("Waiting for the download tools to finish installing"), LogLevel::Warning);
+            if (m_toolsManager->ffmpegNeedsReinstall()) {
+                // ffmpeg no se instala solo: decir "installing" seria prometer algo que no pasa.
+                log(QStringLiteral("Downloads can't start: ffmpeg is missing or damaged. %1")
+                        .arg(ToolsManager::ffmpegReinstallHint()), LogLevel::Error);
+            } else {
+                log(QStringLiteral("Waiting for the download tools to finish installing"), LogLevel::Warning);
+            }
         }
         return;
     }
@@ -354,8 +360,14 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
             item.status = DownloadStatus::Failed;
             item.finishTime = QDateTime::currentDateTime();
             item.failure = FailureKind::ToolsMissing;
-            item.errorHeadline = QStringLiteral("The download tools are damaged");
-            item.errorDetail = QStringLiteral("yt-dlp or ffmpeg is not a valid program file. The app is restoring it; retry in a moment.");
+            if (m_toolsManager->ffmpegNeedsReinstall()) {
+                // ffmpeg no se vuelve a bajar: no se dice que se esta reponiendo.
+                item.errorHeadline = QStringLiteral("ffmpeg is missing or damaged");
+                item.errorDetail = ToolsManager::ffmpegReinstallHint();
+            } else {
+                item.errorHeadline = QStringLiteral("yt-dlp is missing or damaged");
+                item.errorDetail = QStringLiteral("The app downloads it again by itself. Retry in a moment.");
+            }
             log(QStringLiteral("%1 · %2").arg(item.errorHeadline, item.errorDetail), LogLevel::Error);
             emit itemUpdated(item);
             finishCurrent();

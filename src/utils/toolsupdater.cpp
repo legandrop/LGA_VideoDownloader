@@ -143,8 +143,11 @@ QString ToolsUpdater::toolKey(Tool tool)
     return tool == Tool::YtDlp ? QStringLiteral("yt-dlp") : QStringLiteral("deno");
 }
 
-bool ToolsUpdater::isRunnableBinary(const QString &path, QString *reason)
+bool ToolsUpdater::isRunnableBinary(const QString &path, QString *reason, bool *unverified)
 {
+    if (unverified) {
+        *unverified = false;
+    }
     if (!QFileInfo(path).isFile()) {
         if (reason) {
             *reason = QStringLiteral("the file does not exist");
@@ -152,7 +155,22 @@ bool ToolsUpdater::isRunnableBinary(const QString &path, QString *reason)
         return false;
     }
 #ifdef Q_OS_WIN
-    return PeCheck::isValidImage(path, PeCheck::Kind::Program, reason);
+    QString why;
+    const PeCheck::Verdict verdict = PeCheck::inspect(path, PeCheck::Kind::Program, &why);
+    if (reason) {
+        *reason = why;
+    }
+    if (verdict == PeCheck::Verdict::Unreadable) {
+        // No se pudo leer (otro proceso lo tiene abierto en exclusiva, o falta permiso): no es
+        // un archivo invalido. Se deja pasar: si no se puede leer, Windows tampoco lo carga, y
+        // un lanzamiento que falla asi no abre ningun cartel.
+        qWarning() << "[ToolsUpdater] No se pudo verificar" << path << "(" << why << "); se usa igual";
+        if (unverified) {
+            *unverified = true;
+        }
+        return true;
+    }
+    return verdict == PeCheck::Verdict::Valid;
 #else
     return true;
 #endif

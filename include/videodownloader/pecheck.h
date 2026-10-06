@@ -20,11 +20,19 @@ enum class Kind {
     Library  // una .dll que otro programa va a cargar
 };
 
-// true si `path` es una imagen PE entera de la arquitectura de esta maquina: firma MZ, firma
+enum class Verdict {
+    Valid,     // imagen PE entera de la arquitectura de esta maquina
+    Invalid,   // se leyo y NO es un programa valido: no se lanza
+    Unreadable // no se pudo leer (abierto en exclusiva por otro proceso, sin permiso): no se
+               // sabe. No cuenta como invalido: si la app no lo puede leer, Windows tampoco lo
+               // carga, asi que lanzarlo falla sin cartel; darlo por roto tiraria una tool sana.
+};
+
+// Valid si `path` es una imagen PE entera de la arquitectura de esta maquina: firma MZ, firma
 // PE, maquina y optional header coherentes (x64, o x86 de 32 bits; ARM64 solo en un Windows
-// ARM64), y cabeceras y secciones dentro del archivo. Con false, `reason` trae el motivo en
-// ingles, corto, para el log visible.
-bool isValidImage(const QString &path, Kind kind = Kind::Program, QString *reason = nullptr);
+// ARM64), y cabeceras y secciones dentro del archivo. Si no es Valid, `reason` trae el motivo
+// en ingles, corto, para el log visible.
+Verdict inspect(const QString &path, Kind kind = Kind::Program, QString *reason = nullptr);
 
 } // namespace PeCheck
 

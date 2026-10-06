@@ -49,7 +49,9 @@ public:
     // valida (PeCheck): un .exe cortado o que no es un programa hace que Windows abra un cartel
     // del sistema al ejecutarlo. Con false, `reason` trae el motivo en ingles para el log.
     // Todo lo que lanza yt-dlp, deno o ffmpeg pasa antes por aca.
-    static bool isRunnableBinary(const QString &path, QString *reason = nullptr);
+    // Un archivo que NO SE PUDO LEER (abierto en exclusiva por otro proceso, sin permiso) no es
+    // invalido: devuelve true, con `unverified` en true y el motivo en `reason`.
+    static bool isRunnableBinary(const QString &path, QString *reason = nullptr, bool *unverified = nullptr);
     // Ruta del binario en la carpeta de tools, o vacio si no existe o no se puede lanzar
     // (isRunnableBinary): un binario roto cuenta como no instalado, asi installedVersion() da
     // vacio y el updater lo vuelve a bajar.

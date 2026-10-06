@@ -427,6 +427,14 @@ void MainWindow::onToolsStatusChanged()
     if (!m_toolsManager) {
         return;
     }
+    if (m_toolsManager->ffmpegNeedsReinstall()) {
+        // ffmpeg no se baja solo: "Installing…" o "Retry" serian una promesa falsa. Tiene
+        // prioridad sobre el estado de yt-dlp y Deno porque es lo unico que pide una accion.
+        m_tabHeader->setToolsNotice(QStringLiteral("ffmpeg is missing or damaged"), QStringLiteral("err"),
+                                    ToolsManager::ffmpegReinstallHint());
+        m_queueView->setWaitingForTools(true);
+        return;
+    }
     switch (m_toolsManager->status()) {
     case ToolsManager::Status::Checking:
     case ToolsManager::Status::Ready:
