@@ -6,10 +6,12 @@ if /I "%~1"=="--no-run" set "NO_RUN=1"
 set "APP_ROOT=%~dp0"
 cd /d "%APP_ROOT%"
 
-REM Cerrar SOLO las copias del repo: la de build\ (se recompila) y la de deploy\ (se borra
-REM entera). Va antes del rmdir, que con el exe abierto dejaba la carpeta a medias. Antes era un
-REM taskkill por nombre que cerraba tambien la app instalada con sus descargas en curso.
-powershell -NoProfile -ExecutionPolicy Bypass -File "%APP_ROOT%tools\close_by_path.ps1" -ExeName VideoDownloader.exe -ExactPath "%APP_ROOT%build\VideoDownloader.exe" -Prefix "%APP_ROOT%deploy"
+REM Cerrar SOLO las copias que corren desde deploy\, que se borra entera. Va antes del rmdir,
+REM que con el exe abierto dejaba la carpeta a medias. La copia de build-release\ la cierra
+REM compilar.bat --no-run [solo esa, por ruta exacta] y la de build\ ya no se toca: el deploy
+REM compila en su propio arbol. Antes era un taskkill por nombre que cerraba tambien la app
+REM instalada con sus descargas en curso.
+powershell -NoProfile -ExecutionPolicy Bypass -File "%APP_ROOT%tools\close_by_path.ps1" -ExeName VideoDownloader.exe -Prefix "%APP_ROOT%deploy"
 if %ERRORLEVEL% equ 2 ( echo Error: close_by_path rechazo los parametros & exit /b 1 )
 
 REM Eliminar carpeta deploy si existe para asegurar un entorno limpio
@@ -24,24 +26,23 @@ set PATH=%PATH%;C:\Qt\6.8.2\mingw_64\bin;C:\Qt\Tools\mingw1310_64\bin
 REM Crear directorio de implementación si no existe
 if not exist deploy mkdir deploy
 
-REM Compilar el proyecto en modo Release
-cd build
-echo Configurando con CMake (modo Release)...
-cmake .. -G "MinGW Makefiles" -DCMAKE_PREFIX_PATH="C:/Qt/6.8.2/mingw_64" -DCMAKE_BUILD_TYPE=Release
-echo Compilando VideoDownloader (modo Release)...
-cmake --build . --config Release
-
-REM Verificar si la compilación fue exitosa
+REM Compilar en Release con el motor unico, en build-release\: el arbol de desarrollo [build\,
+REM Debug] no se toca y lo que se publica nunca sale de ahi. compilar.bat corta si el arbol no
+REM quedo configurado en Release.
+call "%APP_ROOT%compilar.bat" --release --no-run
 if %ERRORLEVEL% neq 0 (
     echo.
-    echo Error en la compilación. Verifique los mensajes de error.
-    cd ..
+    echo Error en la compilacion Release. No se arma el deploy.
     exit /b 1
 )
-cd ..
+cd /d "%APP_ROOT%"
 
 REM Copiar el ejecutable al directorio de implementación
-copy /Y build\VideoDownloader.exe deploy\
+copy /Y build-release\VideoDownloader.exe deploy\
+if %ERRORLEVEL% neq 0 (
+    echo Error: no se pudo copiar build-release\VideoDownloader.exe
+    exit /b 1
+)
 
 REM Usar windeployqt para copiar todas las DLLs de Qt necesarias
 C:\Qt\6.8.2\mingw_64\bin\windeployqt.exe --release deploy\VideoDownloader.exe
@@ -70,9 +71,9 @@ if %ERRORLEVEL% neq 0 (
     echo Error al copiar la extension de navegador.
     exit /b 1
 )
-copy /Y build\com.lga.videodownloader.json deploy\
+copy /Y build-release\com.lga.videodownloader.json deploy\
 if %ERRORLEVEL% neq 0 (
-    echo Error: falta build\com.lga.videodownloader.json
+    echo Error: falta build-release\com.lga.videodownloader.json
     exit /b 1
 )
 
@@ -86,5 +87,9 @@ if defined NO_RUN (
     echo Ejecucion omitida ^(--no-run^).
 ) else (
     echo Ejecutando VideoDownloader...
-    start deploy\VideoDownloader.exe
+    REM La abre el Explorador de Windows y no esta consola: lanzada con start quedaba dentro del
+    REM arbol de procesos de la terminal y se cerraba con ella. Ruta absoluta por APP_ROOT, que
+    REM se define fuera de este bloque. explorer.exe devuelve siempre 1: no se mira su codigo.
+    explorer.exe "%APP_ROOT%deploy\VideoDownloader.exe"
 )
+exit /b 0

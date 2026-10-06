@@ -1,4 +1,5 @@
 build/
+build-release/
 deploy/
 .DS_Store
 installer/

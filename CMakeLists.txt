@@ -25,8 +25,18 @@ if(APPLE)
     set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 endif()
 
-# Configuración de Debug
-set(CMAKE_BUILD_TYPE Debug)
+# Tipo de build. En Windows lo elige compilar.bat con -DCMAKE_BUILD_TYPE (Debug en build/,
+# Release en build-release/) y sin nada es Debug. Antes se forzaba Debug para todos: como una
+# variable normal tapa a la de la cache, el -DCMAKE_BUILD_TYPE=Release del deploy no tenia
+# efecto y el instalador salia compilado en Debug (-g -O0). En macOS sigue forzado, sin
+# cambios: ahi el arbol es uno solo y el cambio no se pudo verificar.
+if(WIN32)
+    if(NOT CMAKE_BUILD_TYPE)
+        set(CMAKE_BUILD_TYPE Debug)
+    endif()
+else()
+    set(CMAKE_BUILD_TYPE Debug)
+endif()
 if(WIN32)
     if(MSVC)
         set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /Zi")
@@ -168,6 +178,23 @@ add_executable(${PROJECT_NAME}
     ${HEADERS} 
     ${RESOURCES}
 )
+
+# Plugin de plataforma offscreen junto al exe, en CUALQUIER carpeta de build. Sin qoffscreen,
+# lanzar con QT_QPA_PLATFORM=offscreen (capturas --ui-shot, recorridos de QA) hace que Qt
+# muestre un MessageBox fatal en el escritorio en vez de fallar por consola.
+if(WIN32)
+    get_filename_component(LGA_QOFFSCREEN_DLL
+        "${Qt6_DIR}/../../../plugins/platforms/qoffscreen.dll" ABSOLUTE)
+    if(EXISTS "${LGA_QOFFSCREEN_DLL}")
+        add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:${PROJECT_NAME}>/platforms"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different "${LGA_QOFFSCREEN_DLL}"
+                    "$<TARGET_FILE_DIR:${PROJECT_NAME}>/platforms/qoffscreen.dll"
+            VERBATIM)
+    else()
+        message(WARNING "No se encontro qoffscreen.dll en ${LGA_QOFFSCREEN_DLL}")
+    endif()
+endif()
 
 # Vincular con las bibliotecas de Qt
 target_link_libraries(${PROJECT_NAME} PRIVATE

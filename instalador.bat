@@ -20,6 +20,9 @@ if /I "%~1"=="--replace" ( set "REPLACE=1" & shift & goto :parse_args )
 echo Error: opcion desconocida: %~1
 exit /b 1
 :args_done
+REM Todas las rutas de aca abajo son relativas a la carpeta del script, no a la carpeta desde la
+REM que se lo llama. El setlocal de arriba devuelve la carpeta original al terminar.
+cd /d "%SCRIPT_DIR%"
 
 echo Preparando instalador para VideoDownloader...
 
@@ -42,13 +45,15 @@ if not exist deploy\extension\manifest.json (
 )
 
 REM Abortar si el build es posterior a lo desplegado: `xcopy /L /D` lista el
-REM origen solo cuando es mas nuevo que el destino, y no copia nada.
+REM origen solo cuando es mas nuevo que el destino, y no copia nada. Se compara contra
+REM build-release\, el arbol del que deploy.bat saca el exe; build\ es el de desarrollo y es
+REM normal que sea mas nuevo.
 set "DEPLOY_STALE="
-if exist build\VideoDownloader.exe (
-    for /f "delims=" %%A in ('xcopy build\VideoDownloader.exe deploy\ /L /D /Y 2^>nul ^| find /i "VideoDownloader.exe"') do set "DEPLOY_STALE=1"
+if exist build-release\VideoDownloader.exe (
+    for /f "delims=" %%A in ('xcopy build-release\VideoDownloader.exe deploy\ /L /D /Y 2^>nul ^| find /i "VideoDownloader.exe"') do set "DEPLOY_STALE=1"
 )
 if defined DEPLOY_STALE (
-    echo Error: deploy\VideoDownloader.exe es mas viejo que build\VideoDownloader.exe
+    echo Error: deploy\VideoDownloader.exe es mas viejo que build-release\VideoDownloader.exe
     echo Ejecute deploy.bat para regenerar el deploy antes de armar el instalador.
     exit /b 1
 )
@@ -322,7 +327,10 @@ if not defined INTERACTIVE (
 choice /C YN /M "¿Desea ejecutar el instalador ahora mismo?"
 if "%ERRORLEVEL%"=="1" (
     echo Ejecutando el instalador...
-    start "" "installer\VideoDownloader_Setup_v%APP_VERSION%.exe"
+    REM Lo abre el Explorador de Windows y no esta consola: lanzado con start quedaba dentro del
+    REM arbol de procesos de la terminal y se cerraba con ella. Ruta absoluta por SCRIPT_DIR y
+    REM APP_VERSION, definidas fuera de este bloque. explorer.exe devuelve siempre 1.
+    explorer.exe "%SCRIPT_DIR%installer\VideoDownloader_Setup_v%APP_VERSION%.exe"
 ) else (
     echo Instalador no ejecutado.
 )
