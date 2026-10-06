@@ -245,7 +245,7 @@ void DownloadQueue::kick()
 
 void DownloadQueue::processNextDownload()
 {
-    if (m_currentId >= 0 || m_stopped) {
+    if (m_currentId >= 0 || m_stopped || m_verifyingTools) {
         return;
     }
 
@@ -258,6 +258,15 @@ void DownloadQueue::processNextDownload()
     }
     if (!next) {
         return;
+    }
+
+    // Antes de lanzar: las tools se vuelven a mirar en disco. Una que dejo de ser un programa
+    // valido pasa a "no instalada" (y se vuelve a bajar) en vez de ejecutarse: lanzarla haria
+    // que Windows abra un cartel del sistema. El link queda en cola, igual que cuando faltan.
+    if (m_toolsManager) {
+        m_verifyingTools = true;
+        m_toolsManager->verifyToolsBeforeLaunch();
+        m_verifyingTools = false;
     }
 
     // Sin tools no se lanza nada: los links quedan en cola y arrancan con kick() cuando
@@ -339,6 +348,19 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
     // que si el auto-update dejo algo verificado en staging se activa antes de usarlo.
     if (m_toolsManager) {
         m_toolsManager->applyStagedTools();
+        // Ultima barrera, para el camino que no pasa por processNextDownload() (el reintento
+        // con contrasena): si yt-dlp o ffmpeg dejaron de ser programas validos, no se lanzan.
+        if (!m_toolsManager->verifyToolsBeforeLaunch()) {
+            item.status = DownloadStatus::Failed;
+            item.finishTime = QDateTime::currentDateTime();
+            item.failure = FailureKind::ToolsMissing;
+            item.errorHeadline = QStringLiteral("The download tools are damaged");
+            item.errorDetail = QStringLiteral("yt-dlp or ffmpeg is not a valid program file. The app is restoring it; retry in a moment.");
+            log(QStringLiteral("%1 · %2").arg(item.errorHeadline, item.errorDetail), LogLevel::Error);
+            emit itemUpdated(item);
+            finishCurrent();
+            return;
+        }
     }
 
     m_currentProcess = new QProcess(this);

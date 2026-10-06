@@ -10,8 +10,10 @@
 #include "videodownloader/downloadqueue.h"
 #include "videodownloader/linkparser.h"
 #include "videodownloader/nativehost.h"
+#include "videodownloader/pecheck.h"
 #include "videodownloader/sessioncookies.h"
 #include "videodownloader/toolsmanager.h"
+#include "videodownloader/toolsupdater.h"
 #include "videodownloader/updateservice.h"
 #include "videodownloader/updateurls.h"
 #include "videodownloader/whatsnew.h"
@@ -308,6 +310,41 @@ int runMigrateCheck(const QStringList &args)
     dump("legacy-staging", legacyDir + QStringLiteral("/.staging"));
     dump("target", targetDir);
     dump("target-staging", targetDir + QStringLiteral("/.staging"));
+    return 0;
+}
+
+int runToolsCheck(const QStringList &args)
+{
+    const QString dir = args.value(args.indexOf(QStringLiteral("--qa-tools-check")) + 1);
+    if (dir.isEmpty() || !QDir(dir).exists()) {
+        fprintf(stderr, "qa-tools-check: needs an existing folder\n");
+        return 2;
+    }
+    // Las mismas funciones que la app consulta antes de lanzar una tool, sobre una carpeta
+    // cualquiera. Solo leen cabeceras: este modo no ejecuta ningun archivo de la carpeta.
+    const QDir base(dir);
+    const QStringList files = base.entryList({QStringLiteral("*.exe"), QStringLiteral("*.dll")}, QDir::Files, QDir::Name);
+    for (const QString &name : files) {
+        const bool library = name.endsWith(QLatin1String(".dll"), Qt::CaseInsensitive);
+        QString reason;
+        const bool ok = library ? PeCheck::isValidImage(base.filePath(name), PeCheck::Kind::Library, &reason)
+                                : ToolsUpdater::isRunnableBinary(base.filePath(name), &reason);
+        fprintf(stdout, "file %s %s%s%s\n", qPrintable(name), ok ? "valid" : "INVALID", ok ? "" : ": ", qPrintable(reason));
+    }
+    for (ToolsUpdater::Tool tool : {ToolsUpdater::Tool::YtDlp, ToolsUpdater::Tool::Deno}) {
+        QString reason;
+        const bool ok = ToolsUpdater::isRunnableBinary(base.filePath(ToolsUpdater::binaryName(tool)), &reason);
+        fprintf(stdout, "tool %s launch=%d%s%s\n", qPrintable(ToolsUpdater::toolKey(tool)), ok ? 1 : 0, ok ? "" : " ",
+                qPrintable(reason));
+    }
+#ifdef Q_OS_WIN
+    const QString ffmpeg = base.filePath(QStringLiteral("ffmpeg.exe"));
+#else
+    const QString ffmpeg = base.filePath(QStringLiteral("ffmpeg"));
+#endif
+    const QString problem = QFileInfo(ffmpeg).isFile() ? ToolsManager::ffmpegProblem(ffmpeg)
+                                                       : QStringLiteral("the file does not exist");
+    fprintf(stdout, "tool ffmpeg launch=%d%s%s\n", problem.isEmpty() ? 1 : 0, problem.isEmpty() ? "" : " ", qPrintable(problem));
     return 0;
 }
 

@@ -90,6 +90,13 @@ bool writeEntry(const QString &toolsDir, const QString &section, const QString &
 // imprime nada reconocible. tools.json puede estar roto o mentir; el binario no.
 QString probeVersion(const QString &binary)
 {
+    // Un archivo que no es un programa valido no se ejecuta (Windows abriria un cartel del
+    // sistema): cuenta como un binario que no contesta.
+    QString problem;
+    if (!ToolsUpdater::isRunnableBinary(binary, &problem)) {
+        qWarning() << "[AppPaths] No se le pregunta la version a" << binary << "porque no se puede lanzar:" << problem;
+        return QString();
+    }
     QProcess process;
     process.start(binary, {QStringLiteral("--version")});
     if (!process.waitForFinished(30000)) {

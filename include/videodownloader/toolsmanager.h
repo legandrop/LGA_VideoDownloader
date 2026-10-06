@@ -55,6 +55,17 @@ public:
     // lo llaman el arranque, DownloadQueue antes de lanzar cada proceso y el fin del
     // auto-update si la cola esta quieta. Devuelve true si reemplazo algo.
     bool applyStagedTools();
+    // Ultimo control ANTES de lanzar yt-dlp: vuelve a mirar en disco yt-dlp, deno y ffmpeg. Una
+    // tool que dejo de ser un programa valido (archivo cortado o pisado) pasa a "no instalada",
+    // queda una linea en el log y, si es yt-dlp o deno, arranca la misma descarga verificada
+    // del auto-update. Devuelve true si se puede lanzar (yt-dlp y ffmpeg sanos). Fuera de
+    // Windows no mira nada y devuelve true.
+    bool verifyToolsBeforeLaunch();
+    // Windows: vacio si ffmpeg se puede usar; si no, el motivo en ingles para el log. Mira
+    // ffmpeg.exe, ffprobe.exe si esta (yt-dlp lo lanza desde la misma carpeta) y las .dll de
+    // esa carpeta, que ffmpeg carga al arrancar. Solo lee cabeceras; no ejecuta nada. Estatica
+    // y con la ruta explicita para poder probarla con una carpeta de prueba.
+    static QString ffmpegProblem(const QString &ffmpegExe);
     // Como saber si hay un yt-dlp corriendo (lo cablea MainWindow contra DownloadQueue).
     void setProcessActiveProbe(std::function<bool()> probe) { m_processActiveProbe = std::move(probe); }
 

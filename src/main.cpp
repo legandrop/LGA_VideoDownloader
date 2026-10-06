@@ -178,6 +178,9 @@ int main(int argc, char *argv[])
     if (app.arguments().contains(QStringLiteral("--qa-update-dirs"))) {
         return runUpdateDirsCheck(app.arguments());
     }
+    if (app.arguments().contains(QStringLiteral("--qa-tools-check"))) {
+        return runToolsCheck(app.arguments());
+    }
     if (app.arguments().contains(QStringLiteral("--qa-whats-new"))) {
         return runWhatsNewCheck(app.arguments());
     }

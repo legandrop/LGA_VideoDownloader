@@ -109,6 +109,7 @@ set(SOURCES
     src/utils/hostregistration.cpp
     src/utils/sessioncookies.cpp
     src/utils/linkparser.cpp
+    src/utils/pecheck.cpp
     src/utils/toolsmanager.cpp
     src/utils/toolsupdater.cpp
     src/utils/versioncompare.cpp
@@ -131,6 +132,7 @@ set(HEADERS
     include/videodownloader/apppaths.h
     include/videodownloader/browserdetect.h
     include/videodownloader/linkparser.h
+    include/videodownloader/pecheck.h
     include/videodownloader/loglevel.h
     include/videodownloader/toolsmanager.h
     include/videodownloader/toolsupdater.h

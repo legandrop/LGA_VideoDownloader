@@ -1,4 +1,5 @@
 #include "videodownloader/toolsmanager.h"
+#include "videodownloader/pecheck.h"
 #include "videodownloader/toolsupdater.h"
 
 #include <QCoreApplication>
@@ -25,7 +26,8 @@ QString seedToolPath(ToolsUpdater::Tool tool)
 #else
     const QString path = QCoreApplication::applicationDirPath() + QStringLiteral("/toolsmac/") + ToolsUpdater::binaryName(tool);
 #endif
-    return QFileInfo(path).isFile() ? path : QString();
+    // Como installedBinary(): un binario que no se puede lanzar cuenta como que no esta.
+    return ToolsUpdater::isRunnableBinary(path) ? path : QString();
 }
 
 // Orden de resolucion de yt-dlp/deno: carpeta del updater -> seed. Vacio si no hay ninguno
@@ -35,6 +37,24 @@ QString localToolPath(ToolsUpdater::Tool tool)
     const QString user = ToolsUpdater::installedBinary(tool);
     return user.isEmpty() ? seedToolPath(tool) : user;
 }
+
+#ifdef Q_OS_WIN
+// Linea de log para una tool que ESTA en disco pero no se puede lanzar (ni en la carpeta del
+// updater ni en la de la instalacion). Vacio si directamente no hay archivo.
+QString damagedToolLine(ToolsUpdater::Tool tool)
+{
+    const QString name = ToolsUpdater::binaryName(tool);
+    const QStringList candidates = {ToolsUpdater::toolsDir() + QLatin1Char('/') + name,
+                                    QCoreApplication::applicationDirPath() + QStringLiteral("/tools/") + name};
+    for (const QString &path : candidates) {
+        QString reason;
+        if (QFileInfo(path).isFile() && !ToolsUpdater::isRunnableBinary(path, &reason)) {
+            return QStringLiteral("✗ %1 is damaged (%2); it will be downloaded again").arg(name, reason);
+        }
+    }
+    return QString();
+}
+#endif
 
 } // namespace
 
@@ -112,6 +132,73 @@ bool ToolsManager::applyStagedTools()
     return true;
 }
 
+QString ToolsManager::ffmpegProblem(const QString &ffmpegExe)
+{
+#ifdef Q_OS_WIN
+    QString reason;
+    if (!ToolsUpdater::isRunnableBinary(ffmpegExe, &reason)) {
+        return QStringLiteral("ffmpeg.exe: %1").arg(reason);
+    }
+    const QDir dir = QFileInfo(ffmpegExe).absoluteDir();
+    const QString ffprobe = dir.filePath(QStringLiteral("ffprobe.exe"));
+    if (QFileInfo(ffprobe).isFile() && !ToolsUpdater::isRunnableBinary(ffprobe, &reason)) {
+        return QStringLiteral("ffprobe.exe: %1").arg(reason);
+    }
+    const QStringList libraries = dir.entryList({QStringLiteral("*.dll")}, QDir::Files, QDir::Name);
+    for (const QString &library : libraries) {
+        if (!PeCheck::isValidImage(dir.filePath(library), PeCheck::Kind::Library, &reason)) {
+            return QStringLiteral("%1: %2").arg(library, reason);
+        }
+    }
+#else
+    Q_UNUSED(ffmpegExe);
+#endif
+    return QString();
+}
+
+bool ToolsManager::verifyToolsBeforeLaunch()
+{
+#ifdef Q_OS_WIN
+    bool changed = false;
+    bool reinstall = false;
+    for (ToolsUpdater::Tool tool : {ToolsUpdater::Tool::YtDlp, ToolsUpdater::Tool::Deno}) {
+        bool &installed = tool == ToolsUpdater::Tool::YtDlp ? m_ytDlpInstalled : m_denoInstalled;
+        if (!installed || !localToolPath(tool).isEmpty()) {
+            continue;
+        }
+        installed = false;
+        changed = true;
+        reinstall = true;
+        const QString damaged = damagedToolLine(tool);
+        logMessage(damaged.isEmpty() ? QStringLiteral("✗ %1 is missing; it will be downloaded again")
+                                           .arg(ToolsUpdater::binaryName(tool))
+                                     : damaged);
+    }
+    if (m_ffmpegInstalled) {
+        const QString damage = ffmpegProblem(getFfmpegPath());
+        if (!damage.isEmpty()) {
+            m_ffmpegInstalled = false;
+            changed = true;
+            logMessage(QStringLiteral("✗ ffmpeg is damaged (%1); reinstall the app to restore it").arg(damage));
+        }
+    }
+    if (changed) {
+        // El mismo camino verificado del auto-update. Si todavia no corrio en esta sesion, va a
+        // correr solo unos segundos despues de abrir, o esta apagado a proposito
+        // (MainWindow::setAutomaticUpdatesEnabled) y entonces no se fuerza.
+        if (reinstall && m_autoUpdateAttempted && !isUpdatingTools()) {
+            startAutomaticUpdate();
+        }
+        if (!m_checkingTools) {
+            updateButtonState();
+        }
+    }
+    return m_ytDlpInstalled && m_ffmpegInstalled;
+#else
+    return true;
+#endif
+}
+
 void ToolsManager::refreshToolVersions()
 {
     struct Probe { QString key; QString program; QString arg; };
@@ -121,8 +208,19 @@ void ToolsManager::refreshToolVersions()
         {QStringLiteral("ffmpeg"), getFfmpegPath(), QStringLiteral("-version")},
     };
     for (const Probe &probe : probes) {
-        QProcess *process = new QProcess(this);
         const QString key = probe.key;
+#ifdef Q_OS_WIN
+        // No se le pregunta la version a un archivo que no es un programa valido: ejecutarlo
+        // abriria un cartel de Windows. En Windows las tres rutas son absolutas.
+        const bool runnable = key == QLatin1String("ffmpeg") ? ffmpegProblem(probe.program).isEmpty()
+                                                             : ToolsUpdater::isRunnableBinary(probe.program);
+        if (!runnable) {
+            m_toolVersions.insert(key, QString());
+            emit toolVersionsChanged();
+            continue;
+        }
+#endif
+        QProcess *process = new QProcess(this);
         connect(process, &QProcess::finished, this, [this, process, key](int exitCode, QProcess::ExitStatus status) {
             process->deleteLater();
             QString version;
@@ -184,7 +282,8 @@ void ToolsManager::checkYtDlpInstallation()
         logMessage(QString("✓ yt-dlp.exe found: %1").arg(QDir::toNativeSeparators(ytDlpPath)));
     } else {
         m_ytDlpInstalled = false;
-        logMessage("✗ yt-dlp.exe not found");
+        const QString damaged = damagedToolLine(ToolsUpdater::Tool::YtDlp);
+        logMessage(damaged.isEmpty() ? QStringLiteral("✗ yt-dlp.exe not found") : damaged);
     }
     
     // Check ffmpeg after yt-dlp check is done
@@ -344,7 +443,12 @@ void ToolsManager::checkFfmpegInstallation()
     QString appDir = QCoreApplication::applicationDirPath();
     QString ffmpegPath = appDir + "/tools/ffmpeg.exe";
     
-    if (QFile::exists(ffmpegPath)) {
+    const QString ffmpegDamage = QFile::exists(ffmpegPath) ? ffmpegProblem(ffmpegPath) : QString();
+    if (!ffmpegDamage.isEmpty()) {
+        // No se auto-actualiza: lo repone el instalador de la app.
+        m_ffmpegInstalled = false;
+        logMessage(QStringLiteral("✗ ffmpeg is damaged (%1); reinstall the app to restore it").arg(ffmpegDamage));
+    } else if (QFile::exists(ffmpegPath)) {
         m_ffmpegInstalled = true;
         logMessage("✓ ffmpeg.exe found in tools directory");
     } else {
@@ -514,7 +618,8 @@ void ToolsManager::checkDenoInstallation()
         logMessage(QString("✓ deno.exe found: %1").arg(QDir::toNativeSeparators(denoPath)));
     } else {
         m_denoInstalled = false;
-        logMessage("✗ deno.exe not found (needed for YouTube)");
+        const QString damaged = damagedToolLine(ToolsUpdater::Tool::Deno);
+        logMessage(damaged.isEmpty() ? QStringLiteral("✗ deno.exe not found (needed for YouTube)") : damaged);
     }
     return;
 #endif

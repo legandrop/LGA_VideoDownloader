@@ -1,5 +1,6 @@
 #include "videodownloader/toolsupdater.h"
 #include "videodownloader/apppaths.h"
+#include "videodownloader/pecheck.h"
 #include "videodownloader/updateurls.h"
 
 #include <QCoreApplication>
@@ -142,10 +143,25 @@ QString ToolsUpdater::toolKey(Tool tool)
     return tool == Tool::YtDlp ? QStringLiteral("yt-dlp") : QStringLiteral("deno");
 }
 
+bool ToolsUpdater::isRunnableBinary(const QString &path, QString *reason)
+{
+    if (!QFileInfo(path).isFile()) {
+        if (reason) {
+            *reason = QStringLiteral("the file does not exist");
+        }
+        return false;
+    }
+#ifdef Q_OS_WIN
+    return PeCheck::isValidImage(path, PeCheck::Kind::Program, reason);
+#else
+    return true;
+#endif
+}
+
 QString ToolsUpdater::installedBinary(Tool tool)
 {
     const QString path = toolsDir() + QLatin1Char('/') + binaryName(tool);
-    return QFileInfo(path).isFile() ? path : QString();
+    return isRunnableBinary(path) ? path : QString();
 }
 
 QString ToolsUpdater::installedVersion(Tool tool)
@@ -208,6 +224,19 @@ QStringList ToolsUpdater::applyStaged(QStringList *logLines)
         if (!QFileInfo(stagedPath).isFile()) {
             qWarning() << "[ToolsUpdater] Entrada staged sin archivo, se descarta:" << key;
             staged.remove(key);
+            continue;
+        }
+        // Se verifico al bajarlo, pero pudo romperse en disco desde entonces: un binario que no
+        // se puede lanzar no reemplaza al que esta andando. Se descarta y se vuelve a bajar.
+        QString stagedProblem;
+        if (!isRunnableBinary(stagedPath, &stagedProblem)) {
+            qWarning() << "[ToolsUpdater] El binario en staging no se puede lanzar, se descarta:" << key << stagedProblem;
+            QFile::remove(stagedPath);
+            staged.remove(key);
+            if (logLines) {
+                logLines->append(QStringLiteral("%1: the downloaded file is damaged (%2); it will be downloaded again")
+                                     .arg(key, stagedProblem));
+            }
             continue;
         }
 
@@ -434,7 +463,7 @@ void ToolsUpdater::onResolveFinished()
 
     const QJsonObject stagedEntry = readState().value(QStringLiteral("staged")).toObject().value(key).toObject();
     if (stagedEntry.value(QStringLiteral("version")).toString() == m_version
-        && QFileInfo(stagingDir() + QLatin1Char('/') + binaryName(m_tool)).isFile()) {
+        && isRunnableBinary(stagingDir() + QLatin1Char('/') + binaryName(m_tool))) {
         emit logMessage(QStringLiteral("%1 %2 is already downloaded and verified").arg(key, m_version));
         emit toolStaged(key, m_version);
         QTimer::singleShot(0, this, &ToolsUpdater::nextTool);
@@ -680,6 +709,16 @@ void ToolsUpdater::startSmokeTest()
     m_phase = Phase::Smoke;
     const QString key = toolKey(m_tool);
     const QString stagedPath = stagingDir() + QLatin1Char('/') + binaryName(m_tool);
+
+    // Antes de ejecutarlo por primera vez: si lo bajado no es un programa valido no se lanza.
+    QString problem;
+    if (!isRunnableBinary(stagedPath, &problem)) {
+        qWarning() << "[ToolsUpdater] Lo descargado no se puede lanzar" << key << problem;
+        QFile::remove(stagedPath);
+        failTool(QStringLiteral("%1: the downloaded file is not a valid program (%2); keeping the current version")
+                     .arg(key, problem));
+        return;
+    }
 
     QProcess *process = new QProcess(this);
     m_process = process;

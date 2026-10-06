@@ -45,7 +45,14 @@ public:
     static QString binaryName(Tool tool);
     // Clave en tools.json y en los logs: "yt-dlp" / "deno".
     static QString toolKey(Tool tool);
-    // Ruta del binario en la carpeta de tools, o vacio si no existe.
+    // true si `path` es un archivo que se puede LANZAR. En Windows exige ademas una cabecera PE
+    // valida (PeCheck): un .exe cortado o que no es un programa hace que Windows abra un cartel
+    // del sistema al ejecutarlo. Con false, `reason` trae el motivo en ingles para el log.
+    // Todo lo que lanza yt-dlp, deno o ffmpeg pasa antes por aca.
+    static bool isRunnableBinary(const QString &path, QString *reason = nullptr);
+    // Ruta del binario en la carpeta de tools, o vacio si no existe o no se puede lanzar
+    // (isRunnableBinary): un binario roto cuenta como no instalado, asi installedVersion() da
+    // vacio y el updater lo vuelve a bajar.
     static QString installedBinary(Tool tool);
     // Version registrada en tools.json para el binario instalado; vacio si no hay.
     static QString installedVersion(Tool tool);

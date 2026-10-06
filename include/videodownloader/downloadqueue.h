@@ -98,6 +98,9 @@ private:
     int m_currentId = -1;
     bool m_waitingForTools = false;
     bool m_stopped = false;
+    // true mientras se revisan las tools antes de lanzar: ese control puede cambiar el estado
+    // de las tools, MainWindow responde con kick() y sin esto se reentraria en la cola.
+    bool m_verifyingTools = false;
 
     QProcess *m_currentProcess = nullptr;
     QString m_sessionCookiesFile;  // cookies.txt temporal del item actual (sesion de la extension)
