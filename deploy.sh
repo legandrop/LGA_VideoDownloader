@@ -8,21 +8,25 @@ ARTIFACT_NAME="LGA_Video_Downloader"
 
 CREATE_ZIP=false
 CREATE_DMG=false
-NO_RUN=false
+INSTALL_APP=true
+OPEN_APP=true
 PUBLISH=false
 REPLACE=false
 for arg in "$@"; do
     case "$arg" in
         --zip) CREATE_ZIP=true ;;
         --dmg) CREATE_DMG=true ;;
-        --no-run) NO_RUN=true ;;
+        --no-install|--no-run) INSTALL_APP=false ;;
+        --no-open) OPEN_APP=false ;;
         --publish) PUBLISH=true; CREATE_ZIP=true; CREATE_DMG=true ;;
         --replace) REPLACE=true ;;
         -h|--help)
-            echo "Uso: $0 [--zip] [--dmg] [--no-run] [--publish [--replace]]"
+            echo "Uso: $0 [--zip] [--dmg] [--no-install] [--no-open] [--publish [--replace]]"
             echo "  --zip      Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.zip firmado (actualizacion)"
             echo "  --dmg      Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.dmg (primera instalacion)"
-            echo "  --no-run   No ejecutar la app al terminar"
+            echo "  --no-install  No instalar en /Applications ni abrir la app (deja solo deploy/)."
+            echo "                --no-run es un sinonimo, por compatibilidad"
+            echo "  --no-open  Instalar en /Applications pero no abrir la app"
             echo "  --publish  Crear el .zip y el .dmg y publicarlos en el release v<version> de"
             echo "             legandrop/LGA_VideoDownloader, con SHA256SUMS y las notas (What's new)"
             echo "  --replace  Con --publish: reemplazar los archivos de macOS si el release ya los tiene"
@@ -379,6 +383,7 @@ if ! codesign --force --deep --sign - "deploy/${APP_NAME}.app"; then
     echo "ERROR: fallo la firma del bundle. No se empaqueta ni se publica nada."
     exit 1
 fi
+bash "./tools/macos/verify_bundle_signature.sh" "deploy/${APP_NAME}.app" || exit 1
 
 if [ "$CREATE_ZIP" = "true" ]; then
     ZIP_NAME="${ARTIFACT_NAME}_Mac_v${APP_VERSION}.zip"
@@ -386,8 +391,16 @@ if [ "$CREATE_ZIP" = "true" ]; then
     # esta lleno (Versions/Current, el binario de cada framework). Con zip el bundle llega
     # al usuario mucho mas pesado, con cada framework duplicado, y la firma invalida.
     rm -f "deploy/${ZIP_NAME}"
+    # Antes y despues: el .app falla si alguien lo ejecuto despues de firmarlo; el zip, si el
+    # empaquetado no conserva el bundle tal cual. El zip es lo que baja el auto-update.
+    bash "./tools/macos/verify_bundle_signature.sh" "deploy/${APP_NAME}.app" || exit 1
     if ! (cd deploy && ditto -c -k --sequesterRsrc --keepParent "${APP_NAME}.app" "${ZIP_NAME}"); then
         echo "ERROR: no se pudo crear el .zip. No se publica nada."
+        exit 1
+    fi
+    if ! bash "./tools/macos/verify_bundle_signature.sh" "deploy/${ZIP_NAME}"; then
+        rm -f "deploy/${ZIP_NAME}"
+        echo "ERROR: el .zip no pasa la verificacion de firma. No se publica nada."
         exit 1
     fi
     echo "ZIP creado: deploy/${ZIP_NAME}"
@@ -428,11 +441,13 @@ echo
 echo "Implementación completada. La aplicación portable está en la carpeta '"deploy/${APP_NAME}.app"'."
 echo
 
-if [ "$NO_RUN" = "true" ]; then
-    echo "Omitiendo ejecución (--no-run)."
+# El final de todo deploy: instalar en /Applications y abrir la copia INSTALADA. El .app de
+# deploy/ no se ejecuta nunca: es el que se empaqueta, y ejecutarlo le rompe la firma. Se abre
+# con `open`, asi que tampoco retiene la terminal.
+if [ "$INSTALL_APP" = "true" ]; then
+    INSTALL_ARGS=()
+    [ "$OPEN_APP" = "false" ] && INSTALL_ARGS+=(--no-open)
+    bash "./tools/macos/install_to_applications.sh" "deploy/${APP_NAME}.app" ${INSTALL_ARGS[@]+"${INSTALL_ARGS[@]}"} || exit 1
 else
-    # Sin QT_QPA_PLATFORM_PLUGIN_PATH: el bundle trae sus propios plugins. Si hiciera falta
-    # apuntar a los de Homebrew, es que el bundle NO quedo autocontenido.
-    echo "Ejecutando VideoDownloader..."
-    "./deploy/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
+    echo "Sin instalar (--no-install)."
 fi

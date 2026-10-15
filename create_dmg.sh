@@ -134,6 +134,10 @@ if [[ ! -d "$SRC_APP" ]]; then
     exit 1
 fi
 
+# Un .app que ya se ejecuto desde deploy/ tiene la firma rota: el DMG saldria con un bundle que
+# no verifica. Ver tools/macos/verify_bundle_signature.sh.
+bash "./tools/macos/verify_bundle_signature.sh" "$SRC_APP"
+
 # El fondo va VERSIONADO y no se genera en cada deploy: no cambia salvo que uno toque el
 # diseno o el nombre de la app. Lo genera tools/macos/make_dmg_background.js, que dibuja con
 # AppKit via JXA y NO necesita nada instalado. Ahi estan documentadas las restricciones de
