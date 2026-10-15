@@ -116,9 +116,25 @@ bool readStringList(const QJsonObject &object, const QString &key, QStringList *
     return true;
 }
 
-bool itemMatches(const Item &item, const QString &platform)
+bool itemMatches(const Item &item, const QString &platform, const QString &edition,
+                 const std::optional<QStringList> &audiences)
 {
-    return item.platforms.isEmpty() || item.platforms.contains(platform, Qt::CaseInsensitive);
+    if (!item.platforms.isEmpty() && !item.platforms.contains(platform, Qt::CaseInsensitive)) {
+        return false;
+    }
+    if (!edition.isEmpty() && !item.editions.isEmpty()
+        && !item.editions.contains(edition, Qt::CaseInsensitive)) {
+        return false;
+    }
+    if (audiences && !item.roles.isEmpty()) {
+        for (const QString &role : item.roles) {
+            if (audiences->contains(role, Qt::CaseInsensitive)) {
+                return true;
+            }
+        }
+        return false;
+    }
+    return true;
 }
 
 Notes invalid(const QString &reason)
@@ -194,11 +210,8 @@ Notes parse(const QByteArray &json)
             if (!textValue.isString() || item.text.isEmpty()) {
                 return invalid(QStringLiteral("versions[%1].items[%2].text vacio").arg(i).arg(j));
             }
-            // `for` y `edition` no filtran nada en estas apps, pero se validan igual: el
-            // formato es uno solo y un archivo que FileManager rechazaria no se acepta aca.
-            QStringList ignored;
-            if (!readStringList(itemObject, QStringLiteral("for"), &ignored)
-                || !readStringList(itemObject, QStringLiteral("edition"), &ignored)
+            if (!readStringList(itemObject, QStringLiteral("for"), &item.roles)
+                || !readStringList(itemObject, QStringLiteral("edition"), &item.editions)
                 || !readStringList(itemObject, QStringLiteral("platform"), &item.platforms)) {
                 return invalid(QStringLiteral("versions[%1].items[%2]: for/edition/platform "
                                               "no es una lista de textos").arg(i).arg(j));
@@ -249,7 +262,9 @@ QString currentPlatform()
 QList<VersionNotes> range(const Notes &notes,
                           const QString &installedExclusive,
                           const QString &offeredInclusive,
-                          const QString &platform)
+                          const QString &platform,
+                          const QString &edition,
+                          const std::optional<QStringList> &audiences)
 {
     QList<VersionNotes> out;
     if (!notes.valid) {
@@ -274,7 +289,7 @@ QList<VersionNotes> range(const Notes &notes,
         VersionNotes kept = entry;
         kept.items.clear();
         for (const Item &item : entry.items) {
-            if (itemMatches(item, platform)) {
+            if (itemMatches(item, platform, edition, audiences)) {
                 kept.items.append(item);
             }
         }
@@ -285,9 +300,22 @@ QList<VersionNotes> range(const Notes &notes,
     return out;
 }
 
-QList<VersionNotes> filtered(const Notes &notes, const QString &platform)
+QList<VersionNotes> filtered(const Notes &notes,
+                             const QString &platform,
+                             const QString &edition,
+                             const std::optional<QStringList> &audiences)
 {
-    return range(notes, QString(), QString(), platform);
+    return range(notes, QString(), QString(), platform, edition, audiences);
+}
+
+QString headline(const QList<VersionNotes> &versions)
+{
+    for (const VersionNotes &entry : versions) {
+        if (!entry.items.isEmpty()) {
+            return entry.items.first().text;
+        }
+    }
+    return {};
 }
 
 int itemCount(const QList<VersionNotes> &versions)

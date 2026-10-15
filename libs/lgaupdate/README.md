@@ -1,6 +1,6 @@
 # lgaupdate — auto-update de las apps LGA
 
-**Pieza canónica de `LGA_Base_QT_C_Py`, rev 1 (2026-10-15).** Cada app la copia **idéntica** a su
+**Pieza canónica de `LGA_Base_QT_C_Py`, rev 2 (2026-10-15).** Cada app la copia **idéntica** a su
 `libs/lgaupdate`, este README incluido, y no la edita: un cambio se hace acá, se sube la revisión
 y se vuelve a copiar a todas. Así comparar una copia con la canónica es un `diff -r` sin
 excepciones.
@@ -10,8 +10,10 @@ rsync -a --delete ../LGA_Base_QT_C_Py/libs/lgaupdate/ libs/lgaupdate/
 diff -r ../LGA_Base_QT_C_Py/libs/lgaupdate libs/lgaupdate && echo identica
 ```
 
-La usan FrameRev, Media Tools (con el Shot Player), Theta Explorer y Video Downloader. FileManager
-S3 y PipeSync siguen con su `FM_UpdateService`, del que esta biblioteca es un port.
+La usan FrameRev, Media Tools (con el Shot Player), Theta Explorer y Video Downloader. La rev 2
+existe para que FileManager S3 y PipeSync, que tenían su propio `FM_UpdateService` (del que esta
+biblioteca es un port), se muden a ella sin perder nada. `LGAUPDATE_REVISION` (en `LgaUpdateService.h`) dice qué revisión trae una
+copia: una app que necesita algo nuevo la exige con `#if LGAUPDATE_REVISION < N` / `#error`.
 
 ## Qué hace
 
@@ -21,12 +23,13 @@ Cancel), descarga por streaming con SHA-256 del manifiesto (fail-closed: sin has
 y un helper que espera a que la app se cierre:
 
 - **Windows**: baja `<productId>_Setup_v<x>.exe` y lo abre con su wizard. Si sigue abierta otra
-  ventana de la app, **posterga** el update con un aviso (en macOS, una notificación); nunca la
-  cierra a la fuerza.
+  ventana de la app, **posterga** el update con un aviso (en macOS, una notificación); con
+  `closePolicy = Force` la cierra a la fuerza, junto con sus procesos de fondo.
 - **macOS**: baja `<productId>_Mac_v<x>.zip`, lo extrae con `ditto`, corre `codesign --verify
   --deep --strict`, reemplaza el bundle instalado (con rollback) y reabre la app. El bundle se
   busca por glob dentro del ZIP: el nombre del `.app` no tiene que coincidir con `productId`,
-  pero el bundle instalado no se renombra (el helper reemplaza el que está corriendo).
+  pero el bundle instalado no se renombra (el helper reemplaza el que está corriendo). El helper
+  deja en el log cada paso y, si falla, qué comando falló; el `.zip` se borra siempre al terminar.
 
 Además: chequeo periódico por reloj de pared (3 h ± 15 min), "What's new" una vez después de
 instalar, historial completo a pedido, y barrido de la carpeta de descargas
@@ -46,6 +49,42 @@ instalar, historial completo a pedido, y barrido de la carpeta de descargas
 | `relaunchWhenUpdatePostponed` | Si el helper posterga porque otra instancia sigue abierta, reabrir la que se cerró (una residente como FrameRev). Default false |
 | `automaticChecksEnabled`, `networkFactory`, `busyCursorOnManualCheck` | Preferencia del usuario, red de prueba, cursor de espera para apps sin botón "Checking..." |
 
+### Rev 2: lo que trajo de `FM_UpdateService` (todo opt-in)
+
+Con los defaults, una app de la rev 1 se comporta igual: solo re-copia.
+
+| Campo | Para qué | Default |
+|---|---|---|
+| `edition`, `whatsNewAudiences` | Filtrar las notas por edición (`[studio]`/`[client]`) y por audiencia (`[for:]`). Las audiencias se leen al presentar | Sin filtro |
+| `settingsKeys`, `legacySettingsKeys` | Claves del estado en el `.ini`. Las anteriores se leen si la actual no existe (y "Update now" borra las dos): una app que viene de otro updater no pierde el skip, el snooze ni, sobre todo, el "What's new" del update que la migra | `Updates/*`, sin anteriores |
+| `updateLogPath` | Log de la app (chequeo, descarga, helper, con rotación a 1 MB); el mismo archivo donde escribe el helper. Los carteles de error llevan su ruta en Details | Sin log de la app; el helper de macOS escribe en `~/Library/Logs/LGA/<productId>/Update.log` |
+| `closePolicy` | `Postpone` o `Force`: qué hace el helper si la app sigue abierta pasado el plazo (15 s en Windows, 30 s en macOS) | `Postpone` |
+| `windowsPythonProcessNames`, `windowsRedisCommandLineMatches`, `windowsPythonCommandLineMatches`, `macBackendProcessPatterns` | Procesos de fondo que el helper espera (Windows: 8 s, y después los cierra o posterga según `closePolicy`; macOS: 20 s, y solo lo anota) | Ninguno |
+| `updateDirWriteFallback` | Si la carpeta de `updateCacheDir` no acepta una escritura real, bajar al `CacheLocation` o `TempLocation` del usuario | Falla como antes |
+
+Además, sin config: un manifiesto de schema más nuevo pide reinstalar ("This version is too old to
+read the update list") en vez de un fallo genérico; la descarga también se rechaza sin SHA-256
+(segunda llave del fail-closed); y los barridos de las carpetas del usuario tocan solo
+`<productId>_Mac_v*`, `<productId>_Setup_v*` y `<productId>_Update_Helper_*`.
+
+Cambios de los helpers que valen para todas las apps, también sin config:
+
+- **Windows**: si `Start-Process` del instalador falla, el helper ahora reintenta de verdad (20
+  veces cada 0,5 s) y sale con 2 si no pudo. En la rev 1 el error se tragaba y salía con 0 sin
+  lanzar nada.
+- **macOS**: el helper escribe siempre su log (los pasos, el entorno, qué comando falló y en qué
+  paso), en `updateLogPath` o, sin él, en `~/Library/Logs/LGA/<productId>/Update.log`, unas 15
+  líneas por update. Ese archivo solo rota cuando la app fija `updateLogPath`. El `.zip` se borra
+  siempre al terminar, también si el update falla o se posterga.
+- Los procesos de fondo de macOS se buscan sin contar al propio helper, cuya línea de comandos
+  lleva el path del `.app` y del `.zip`.
+
+`LgaUpdateDialogSpec` suma `version` (la ofrecida en el cartel de update, la instalada en el
+"What's new" de después de instalar), para el presentador que arma su propio texto.
+
+`LgaWhatsNew` suma `headline()` (el primer ítem visible, para avisos de una línea) y los
+parámetros opcionales `edition` y `audiences` de `range()` y `filtered()`.
+
 Señales: `checkStarted` / `checkFinished` (para un botón "Check now"), y `updateAvailable(version)`
 para un aviso que no interrumpe (sale aunque el usuario haya pospuesto el cartel).
 
@@ -62,3 +101,10 @@ en el helper). La rev 1 parte de la de Theta Explorer (`e1547cb`), saca el carte
 `updateAvailable` (Video Downloader). Cada app conserva sus carteles: Theta Explorer y Video
 Downloader traducen la spec a su `ConfirmDialog`, FrameRev a `Dialogs` (`UpdateDialogPresenter`) y
 Media Tools a `libs/lgaupdateui`, que antes vivía adentro de la biblioteca.
+
+La rev 2 absorbe lo que `FM_UpdateService` tenía y esta no —log de updates, diagnóstico del helper
+de macOS, cierre forzado con procesos de fondo, fallback de carpeta, notas por edición y audiencia,
+mensaje de schema nuevo— como opciones, para que FileManager S3 y PipeSync se muden sin perder nada
+y las demás apps sigan igual. Los tests viven en FrameRev (`tests/TestLgaUpdateService.cpp`, con
+red simulada, y `tests/TestLgaWhatsNew.cpp`, con los casos de ediciones y audiencias que venían de
+`FM_WhatsNewTest`).

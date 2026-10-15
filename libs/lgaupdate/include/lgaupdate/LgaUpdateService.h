@@ -6,9 +6,23 @@
 #include <QObject>
 #include <QPointer>
 #include <QString>
+#include <QStringList>
 #include <QUrl>
 
 #include <functional>
+#include <optional>
+
+/**
+ * Revision de la pieza canonica. Una app que necesita algo de una revision la exige con un
+ * `#if LGAUPDATE_REVISION < N` / `#error`, asi un checkout viejo corta el build con un mensaje
+ * claro en vez de compilar sin la funcion. Historia en el README.
+ *
+ *   1 — pieza canonica: carteles por `presentDialog`, fail-closed, `installBlockedReason`...
+ *   2 — absorbe lo de `FM_UpdateService` (FileManagerS3 y PipeSync), todo opt-in: log de
+ *       updates, `closePolicy`, procesos de fondo, fallback de carpeta escribible, claves del
+ *       .ini configurables con fallback a las viejas, y notas por edicion y audiencia.
+ */
+#define LGAUPDATE_REVISION 2
 
 class QNetworkAccessManager;
 class QNetworkReply;
@@ -21,6 +35,19 @@ class LgaWhatsNewFetcher;
 namespace LgaWhatsNew {
 struct AssetRef;
 }
+
+/**
+ * Claves del .ini donde el updater guarda su estado. Los defaults son los de las apps de
+ * `lgaupdate`; FileManagerS3 y PipeSync usaban otras (`updates/snooze_until`...), que se leen
+ * como `legacySettingsKeys` para no perder nada al migrar.
+ */
+struct LgaUpdateSettingsKeys {
+    QString snoozeUntil = QStringLiteral("Updates/SnoozeUntil");
+    QString skippedVersion = QStringLiteral("Updates/SkippedVersion");
+    /// Hasta que version vio el usuario las notas. Perderla es grave: sin ella se trata como
+    /// instalacion nueva y el "What's new" del update que la perdio no se muestra nunca.
+    QString whatsNewLastSeen = QStringLiteral("Updates/WhatsNewLastSeen");
+};
 
 /**
  * Que cambia de una app a otra en el flujo de updates. TODO lo demas —el orden de los pasos,
@@ -181,12 +208,88 @@ struct LgaUpdateConfig {
 
     // ------------------------------------------------------------ notas ("What's new")
     /**
+     * Edicion de ESTA instalacion: "studio", "client" o "" (producto sin ediciones, el default).
+     * Filtra los items de las notas marcados `[studio]`/`[client]`: un cliente externo no ve lo
+     * del estudio.
+     */
+    QString edition;
+    /**
+     * Audiencias del usuario para los items `[for:]` de las notas. Ausente (default) = no se
+     * filtran; lista vacia = solo las notas generales. Se consulta al PRESENTAR las notas, no al
+     * configurar, porque los permisos pueden cambiar con la app abierta. No concede permisos ni
+     * cambia el update.
+     */
+    std::function<QStringList()> whatsNewAudiences;
+    /**
      * Cuanto espera el cartel de update a que lleguen las notas antes de mostrarse SIN ellas.
      * Las notas nunca bloquean ni demoran el update mas que esto. 0 = no buscar notas.
      */
     int whatsNewWaitMs = 4000;
     /// Demora, desde `scheduleAutomaticCheck()`, del "What's new" de despues de instalar.
     int whatsNewAfterUpdateDelayMs = 1500;
+
+    // ---------------------------------------------------------------- estado en el .ini
+    /// Claves del estado del updater en `settingsPath`. Default: las de siempre de lgaupdate.
+    LgaUpdateSettingsKeys settingsKeys;
+    /**
+     * Claves ANTERIORES, para una app que viene de otro updater. Cada valor se lee de aca solo
+     * si la clave actual no existe, y "Update now" borra las dos (si no, un skip viejo
+     * resucitaria). Lo que se escribe va siempre a la actual. Ausente = sin claves anteriores.
+     */
+    std::optional<LgaUpdateSettingsKeys> legacySettingsKeys;
+
+    // ----------------------------------------------------------------- log de updates
+    /**
+     * Archivo donde la app anota cada chequeo, descarga y lanzamiento del helper (con rotacion a
+     * `.1` pasado 1 MB), y donde escribe el helper de macOS: un solo archivo cuenta el update
+     * entero. Tambien se agrega al "Details" de los carteles de error, para que el usuario sepa
+     * que mandar. Vacio (default) = la app no escribe log, y el helper de macOS usa
+     * `defaultMacUpdateLogPath()`.
+     */
+    QString updateLogPath;
+
+    // ---------------------------------------------------------- carpeta de la descarga
+    /**
+     * Si la carpeta de `updateCacheDir` no acepta escrituras (instalacion en `Program Files`,
+     * carpeta de red de solo lectura), bajar el update al `CacheLocation` o al `TempLocation`
+     * del usuario en vez de fallar. Se decide con una escritura REAL, no con `isWritable()`, que
+     * en Windows miente con carpetas virtualizadas por UAC. Default false: falla como siempre.
+     */
+    bool updateDirWriteFallback = false;
+
+    // -------------------------------------------------------------- cierre de la app
+    enum class ClosePolicy {
+        /// Si la app (o un proceso de fondo en Windows) sigue abierta pasado el plazo, el helper
+        /// posterga el update con un aviso y no cierra nada. El default: nunca se pierde trabajo.
+        Postpone,
+        /**
+         * Pasado el plazo, el helper cierra a la fuerza la app y sus procesos de fondo
+         * (`Stop-Process -Force` en Windows; TERM y despues KILL en macOS). Para apps con
+         * backends (Redis, Python) que dejarian archivos en uso para el instalador, y donde
+         * postergar dejaria el update sin terminar nunca.
+         */
+        Force,
+    };
+    ClosePolicy closePolicy = ClosePolicy::Postpone;
+
+    // ------------------------------------------------------------ procesos de fondo
+    /**
+     * Procesos de fondo de la app en Windows que el helper espera (hasta 8 s) antes de lanzar el
+     * instalador: un `redis-server.exe` cuya linea de comandos matchee alguno de
+     * `windowsRedisCommandLineMatches`, o un proceso de `windowsPythonProcessNames` que matchee
+     * `windowsPythonCommandLineMatches` (patrones `-like` de PowerShell). Solo cuentan los que
+     * corren desde la carpeta de la app. Si siguen vivos, se cierran a la fuerza o se posterga,
+     * segun `closePolicy`. Vacios (default) = no se espera a ninguno.
+     */
+    QStringList windowsPythonProcessNames;
+    QStringList windowsRedisCommandLineMatches;
+    QStringList windowsPythonCommandLineMatches;
+    /**
+     * Patrones para `pgrep -f` de los procesos de fondo que el helper de macOS espera (hasta
+     * 20 s) antes de tocar el bundle. No corta el update si siguen vivos (mover el bundle no
+     * molesta a un proceso que lo tenga abierto), pero lo anota en el log. Vacio = ninguno.
+     */
+    QStringList macBackendProcessPatterns;
 };
 
 /**
@@ -256,6 +359,10 @@ public:
      */
     static QString resolveUpdateDir(const QString &updateCacheDir);
 
+    /// Log del helper de macOS cuando la app no fija `updateLogPath`:
+    /// `~/Library/Logs/LGA/<productId>/Update.log`. Vacio fuera de macOS.
+    static QString defaultMacUpdateLogPath(const QString &productId);
+
     /**
      * Borra los restos de updates anteriores: el instalador —que en el camino exitoso nadie
      * borra, porque la app ya se cerro cuando el instalador arranca— y los scripts helper que
@@ -263,9 +370,12 @@ public:
      * `CacheLocation` del sistema), asi una instalacion que ya bajo updates no se queda con un
      * instalador por version publicada afuera de la carpeta de la app.
      *
-     * Pensado para llamarse una vez por arranque y FUERA del hilo de UI. En la ubicacion vieja
-     * borra SOLO lo que empieza con `productId`: es una carpeta compartida con el sistema y no
-     * es nuestra para vaciarla entera.
+     * Pensado para llamarse una vez por arranque y FUERA del hilo de UI. En las ubicaciones del
+     * usuario (`CacheLocation` y `TempLocation`, que es donde baja `updateDirWriteFallback`)
+     * borra SOLO lo que escribe este servicio para `productId` —`<productId>_Mac_v*`,
+     * `<productId>_Setup_v*` y `<productId>_Update_Helper_*`—: son carpetas compartidas, y un
+     * prefijo `<productId>` a secas se llevaba los archivos de otra edicion ("PipeSync" y
+     * "PipeSync_Client").
      */
     static void sweepUpdateCache(const QString &productId, const QString &updateCacheDir);
 
@@ -363,7 +473,8 @@ private:
     void showWhatsNewDialog(QWidget *parent,
                             const QString &title,
                             const QString &message,
-                            const QString &notesHtml);
+                            const QString &notesHtml,
+                            const QString &version = QString());
     void runWhatsNewAfterUpdate();
     void finishWhatsNewAfterUpdate();
     /// Corre el chequeo automatico que se pospuso mientras habia un "What's new" en curso.
@@ -385,6 +496,20 @@ private:
     int presentDialog(QWidget *parent, const LgaUpdateDialogSpec &spec) const;
     /// `emphasizeHtml` de la config, o `<b>` si no hay.
     QString emphasis(const QString &escapedText) const;
+    /// Anota una linea en `updateLogPath`. No hace nada si la app no fijo log.
+    void logUpdate(const QString &message) const;
+    /// `detail` con la ruta del log al final, si hay log.
+    QString withUpdateLogPath(const QString &detail) const;
+    /// Audiencias de las notas en este momento (ausente si la app no las configuro).
+    std::optional<QStringList> currentWhatsNewAudiences() const;
+    /// Lee una clave del estado, con fallback a la anterior si la actual no existe.
+    QVariant readState(const QString LgaUpdateSettingsKeys::*key) const;
+    /// Escribe la clave actual.
+    void writeState(const QString LgaUpdateSettingsKeys::*key, const QVariant &value) const;
+    /// Borra la clave actual y la anterior.
+    void removeState(const QString LgaUpdateSettingsKeys::*key) const;
+    /// Carpeta donde bajar ahora, con el fallback de `updateDirWriteFallback`. Vacio si no hay.
+    QString resolveDownloadDir() const;
 
     LgaUpdateConfig m_config;
     QPointer<QWidget> m_parentWindow;

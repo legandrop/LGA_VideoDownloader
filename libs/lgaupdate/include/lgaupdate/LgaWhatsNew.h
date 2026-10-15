@@ -8,6 +8,8 @@
 #include <QStringList>
 #include <QUrl>
 
+#include <optional>
+
 class QJsonObject;
 class QNetworkAccessManager;
 class QNetworkReply;
@@ -19,20 +21,21 @@ class QTimer;
  * `LgaUpdateService`.
  *
  * Adapta `FM_WhatsNew` de FileManagerS3: mismo formato, misma regla de versiones
- * (`LgaVersionCompare`, identica a `FM_VersionCompare`) y mismos colores. Lo unico que falta
- * respecto de FileManager es la edicion: estas apps no tienen Studio/Client, asi que se filtra
- * solo por plataforma. Es parte de la pieza canonica `libs/lgaupdate` de LGA_Base_QT_C_Py
- * (ver su README): un arreglo se hace alla y se re-copia a cada app.
+ * (`LgaVersionCompare`, identica a `FM_VersionCompare`), mismos colores y, desde la rev 2, los
+ * mismos filtros opcionales por edicion (Studio/Client) y por audiencia (`[for:]`). Es parte de
+ * la pieza canonica `libs/lgaupdate` de LGA_Base_QT_C_Py (ver su README): un arreglo se hace
+ * alla y se re-copia a cada app.
  *
  * El formato lo genera `build_whats_new.py` de LGA_RepoTools (diseno completo en
  * `Docs/WhatsNew_Sistema.md` de ese repo):
  *
- *     {"schemaVersion":1,"product":"legandrop/LGA_FrameRev_Release","name":"LGA FrameRev",
- *      "versions":[{"version":"0.274","date":"2026-10-04",
- *                   "items":[{"kind":"new","text":"...","platform":["mac"]}]}]}
+ *     {"schemaVersion":1,"product":"legandrop/LGA_PipeSync_Release","name":"LGA PipeSync",
+ *      "versions":[{"version":"1.015","date":"2026-10-02",
+ *                   "items":[{"kind":"new","text":"...","for":[...],
+ *                             "edition":["studio"],"platform":["mac"]}]}]}
  *
- * `platform` ausente = todas. `for` y `edition` se validan (el formato es uno solo) pero no
- * filtran nada: el texto ya trae el rotulo de rol y estas apps no tienen ediciones.
+ * `text` ya trae el rotulo de rol ("Coordinators and reviewers: ..."). `edition` y `platform`
+ * ausentes = todas. `for` y `edition` filtran solo si la app los pide (ver `range()`).
  */
 namespace LgaWhatsNew {
 
@@ -52,6 +55,10 @@ struct Item {
     QString text;
     /// "win" / "mac". Vacio = todas las plataformas.
     QStringList platforms;
+    /// Audiencias del `[for:]`. Se filtran solo si el consumidor opta por audiencias.
+    QStringList roles;
+    /// "studio" / "client". Vacio = todas las ediciones.
+    QStringList editions;
 };
 
 struct VersionNotes {
@@ -101,10 +108,15 @@ QString currentPlatform();
 
 /**
  * Versiones en el rango (`installedExclusive`, `offeredInclusive`], con sus items filtrados
- * por plataforma, de la mas nueva a la mas vieja. Las que quedan sin items se omiten.
+ * por plataforma, edicion y audiencia, de la mas nueva a la mas vieja. Las que quedan sin items
+ * se omiten.
  *
  * - `installedExclusive` vacio = sin piso; `offeredInclusive` vacio = sin techo.
- * - Un item con `platform` que no incluye `platform` se oculta.
+ * - `platform`: "win" | "mac". Un item con `platform` que no la incluye se oculta.
+ * - `edition`: "studio" | "client" | "". Con "" no se filtra por edicion.
+ * - `audiences`: ausente conserva todos los roles; lista vacia muestra solo generales. Con
+ *   lista, un `[for:]` entra si alguna etiqueta coincide (sin distinguir mayusculas). La app
+ *   resuelve sus capacidades; este modulo no conoce permisos.
  *
  * Una version publicada solo para la OTRA plataforma igual entra si cae en el rango: el JSON
  * es el historial completo y sus items generales valen para todos.
@@ -112,10 +124,18 @@ QString currentPlatform();
 QList<VersionNotes> range(const Notes &notes,
                           const QString &installedExclusive,
                           const QString &offeredInclusive,
-                          const QString &platform);
+                          const QString &platform,
+                          const QString &edition = QString(),
+                          const std::optional<QStringList> &audiences = std::nullopt);
 
-/// El historial completo filtrado por plataforma (lo que muestra Help).
-QList<VersionNotes> filtered(const Notes &notes, const QString &platform);
+/// El historial completo filtrado por plataforma, edicion y audiencia (lo que muestra Help).
+QList<VersionNotes> filtered(const Notes &notes,
+                             const QString &platform,
+                             const QString &edition = QString(),
+                             const std::optional<QStringList> &audiences = std::nullopt);
+
+/// Texto del primer item de la version mas nueva del rango, o vacio. Para avisos de una linea.
+QString headline(const QList<VersionNotes> &versions);
 
 /// Cantidad total de items del rango.
 int itemCount(const QList<VersionNotes> &versions);

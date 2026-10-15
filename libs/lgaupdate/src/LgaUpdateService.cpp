@@ -27,6 +27,7 @@
 #include <QStorageInfo>
 #include <QRandomGenerator>
 #include <QTimer>
+#include <QVariant>
 #include <QVersionNumber>
 
 #include <memory>
@@ -45,13 +46,126 @@ constexpr int kSnoozeDays = 1;
 // chequeo vencido al despertar de una suspension. Mirar el reloj no consulta la red.
 constexpr int kPeriodicTickMs = 5 * 60 * 1000;
 
-// Hasta que version vio el usuario las notas ("What's new"). Va en el .ini de la app, junto al
-// snooze y el skip.
-constexpr const char *kWhatsNewLastSeenKey = "Updates/WhatsNewLastSeen";
+// Tope del log de updates antes de rotarlo a `Update.log.1`. Un update completo son unas 40
+// lineas.
+constexpr qint64 kUpdateLogMaxBytes = 1024 * 1024;
 
 // Version del formato del manifiesto que este componente sabe leer. Si LGA_Updates publica una
 // mayor, el chequeo falla con un mensaje claro en vez de leer campos que cambiaron de sentido.
 constexpr int kManifestSchemaVersion = 1;
+
+/// `schemaVersion` del manifiesto, o 0 si no se puede leer (no parsea, o no trae el campo).
+int manifestSchemaVersion(const QByteArray &payload)
+{
+    const QJsonDocument doc = QJsonDocument::fromJson(payload);
+    if (!doc.isObject()) {
+        return 0;
+    }
+    return doc.object().value(QStringLiteral("schemaVersion")).toInt(0);
+}
+
+/// Prefijos de los archivos que este servicio escribe para `productId` en la carpeta de updates:
+/// el asset y los scripts helper. Un prefijo `<productId>` a secas tambien agarraba los de OTRA
+/// edicion ("PipeSync" es prefijo de "PipeSync_Client_Setup_v...").
+QStringList ownedFilePrefixes(const QString &productId)
+{
+    return {
+        productId + QStringLiteral("_Mac_v"),
+        productId + QStringLiteral("_Setup_v"),
+        productId + QStringLiteral("_Update_Helper_"),
+    };
+}
+
+bool isOwnedFile(const QString &fileName, const QStringList &prefixes)
+{
+    for (const QString &prefix : prefixes) {
+        if (fileName.startsWith(prefix, Qt::CaseInsensitive)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+/**
+ * Prueba de escritura REAL sobre `dirPath` (creandolo si hace falta). `QFileInfo::isWritable()`
+ * no alcanza: en Windows contesta que si sobre carpetas virtualizadas por UAC y sobre ACLs
+ * heredadas que despues rechazan el `CreateFile`.
+ */
+bool directoryAcceptsWrites(const QString &dirPath)
+{
+    if (dirPath.isEmpty() || !QDir().mkpath(dirPath)) {
+        return false;
+    }
+    QFile probe(QDir(dirPath).filePath(
+        QStringLiteral(".lga_write_probe_%1").arg(QCoreApplication::applicationPid())));
+    if (!probe.open(QIODevice::WriteOnly)) {
+        return false;
+    }
+    const bool wrote = probe.write("lga", 3) == 3 && probe.flush();
+    probe.close();
+    probe.remove();
+    return wrote;
+}
+
+#ifdef Q_OS_MAC
+/// Texto que va adentro de comillas dobles en el helper de macOS: sin `"`, `$`, `` ` ``, `\` ni
+/// saltos de linea, que lo sacarian de las comillas o cortarian el script entero.
+QString shellSafeText(QString text)
+{
+    for (const QChar c : {QLatin1Char('"'), QLatin1Char('$'), QLatin1Char('`'), QLatin1Char('\\'),
+                          QLatin1Char('\n'), QLatin1Char('\r')}) {
+        text.remove(c);
+    }
+    return text;
+}
+#endif
+
+/// Carpetas `updates/` del usuario (`CacheLocation` y `TempLocation`): el fallback de una
+/// instalacion no escribible y donde quedaron instaladores de versiones anteriores.
+QStringList userUpdateDirectories()
+{
+    QStringList dirs;
+    for (const QStandardPaths::StandardLocation location :
+         {QStandardPaths::CacheLocation, QStandardPaths::TempLocation}) {
+        const QString root = QStandardPaths::writableLocation(location);
+        if (root.isEmpty()) {
+            continue;
+        }
+        const QString candidate = QDir::cleanPath(QDir(root).filePath(QStringLiteral("updates")));
+        if (!dirs.contains(candidate)) {
+            dirs.append(candidate);
+        }
+    }
+    return dirs;
+}
+
+#ifdef Q_OS_WIN
+// Lista de PowerShell: 'a','b','c'
+QString powerShellQuotedList(const QStringList &values)
+{
+    QStringList quoted;
+    quoted.reserve(values.size());
+    for (const QString &value : values) {
+        quoted << QStringLiteral("'%1'").arg(QString(value).replace('\'', QStringLiteral("''")));
+    }
+    return quoted.isEmpty() ? QStringLiteral("''") : quoted.join(QStringLiteral(","));
+}
+
+// Condicion -like encadenada con -or sobre la command line: ($_.CommandLine -like 'a' -or ...)
+QString powerShellCommandLineMatch(const QStringList &patterns)
+{
+    if (patterns.isEmpty()) {
+        return QStringLiteral("$false");
+    }
+    QStringList conditions;
+    conditions.reserve(patterns.size());
+    for (const QString &pattern : patterns) {
+        conditions << QStringLiteral("$_.CommandLine -like '%1'")
+                          .arg(QString(pattern).replace('\'', QStringLiteral("''")));
+    }
+    return conditions.join(QStringLiteral(" -or "));
+}
+#endif
 
 // Datos del asset del release que se va a instalar.
 struct ReleaseInfo {
@@ -393,6 +507,121 @@ QString LgaUpdateService::emphasis(const QString &escapedText) const
     return QStringLiteral("<b>%1</b>").arg(escapedText);
 }
 
+void LgaUpdateService::logUpdate(const QString &message) const
+{
+    const QString path = m_config.updateLogPath;
+    if (path.isEmpty()) {
+        return;
+    }
+    QDir().mkpath(QFileInfo(path).absolutePath());
+
+    const QFileInfo info(path);
+    if (info.exists() && info.size() > kUpdateLogMaxBytes) {
+        const QString previous = path + QStringLiteral(".1");
+        QFile::remove(previous);
+        QFile::rename(path, previous);
+    }
+
+    QFile file(path);
+    if (!file.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        // No corta nada: el log es diagnostico, el update sigue igual.
+        qWarning().noquote() << QStringLiteral("Updater: no se pudo abrir el log de updates %1: %2")
+                                    .arg(path, file.errorString());
+        return;
+    }
+
+    // Mismo formato de fecha que el helper de macOS, para que las lineas de los dos se lean como
+    // una sola secuencia. Las lineas de continuacion van indentadas.
+    const QStringList lines = message.split(QLatin1Char('\n'));
+    QString text = QStringLiteral("[%1] [app %2 pid %3] %4\n")
+                       .arg(QDateTime::currentDateTime().toString(QStringLiteral("yyyy-MM-dd HH:mm:ss")),
+                            QApplication::applicationVersion(),
+                            QString::number(QCoreApplication::applicationPid()), lines.value(0));
+    for (qsizetype i = 1; i < lines.size(); ++i) {
+        text += QStringLiteral("    %1\n").arg(lines.at(i));
+    }
+    file.write(text.toUtf8());
+}
+
+QString LgaUpdateService::withUpdateLogPath(const QString &detail) const
+{
+    if (m_config.updateLogPath.isEmpty()) {
+        return detail;
+    }
+    const QString path = QDir::toNativeSeparators(m_config.updateLogPath);
+    return detail.isEmpty() ? QStringLiteral("log=%1").arg(path)
+                            : QStringLiteral("%1\nlog=%2").arg(detail, path);
+}
+
+std::optional<QStringList> LgaUpdateService::currentWhatsNewAudiences() const
+{
+    if (!m_config.whatsNewAudiences) {
+        return std::nullopt;
+    }
+    return m_config.whatsNewAudiences();
+}
+
+QVariant LgaUpdateService::readState(const QString LgaUpdateSettingsKeys::*key) const
+{
+    const std::unique_ptr<QSettings> settings = openUpdateSettings(m_config.settingsPath);
+    const QString current = m_config.settingsKeys.*key;
+    if (settings->contains(current) || !m_config.legacySettingsKeys) {
+        return settings->value(current);
+    }
+    // Vacia o igual a la actual = sin clave anterior (`LgaUpdateSettingsKeys` trae defaults, asi
+    // que un `legacySettingsKeys` armado a medias deja los demas campos en las claves actuales).
+    const QString legacy = (*m_config.legacySettingsKeys).*key;
+    return (legacy.isEmpty() || legacy == current) ? QVariant() : settings->value(legacy);
+}
+
+void LgaUpdateService::writeState(const QString LgaUpdateSettingsKeys::*key,
+                                  const QVariant &value) const
+{
+    const std::unique_ptr<QSettings> settings = openUpdateSettings(m_config.settingsPath);
+    settings->setValue(m_config.settingsKeys.*key, value);
+}
+
+void LgaUpdateService::removeState(const QString LgaUpdateSettingsKeys::*key) const
+{
+    const std::unique_ptr<QSettings> settings = openUpdateSettings(m_config.settingsPath);
+    settings->remove(m_config.settingsKeys.*key);
+    // La anterior tambien: si quedara, el fallback de `readState` la resucitaria.
+    if (m_config.legacySettingsKeys && !((*m_config.legacySettingsKeys).*key).isEmpty()) {
+        settings->remove((*m_config.legacySettingsKeys).*key);
+    }
+}
+
+QString LgaUpdateService::defaultMacUpdateLogPath(const QString &productId)
+{
+#ifdef Q_OS_MAC
+    return QDir::home().filePath(QStringLiteral("Library/Logs/LGA/%1/Update.log").arg(productId));
+#else
+    Q_UNUSED(productId);
+    return {};
+#endif
+}
+
+QString LgaUpdateService::resolveDownloadDir() const
+{
+    const QString preferred = resolveUpdateDir(m_config.updateCacheDir);
+    if (!m_config.updateDirWriteFallback) {
+        return (preferred.isEmpty() || !QDir().mkpath(preferred)) ? QString() : preferred;
+    }
+    if (directoryAcceptsWrites(preferred)) {
+        return preferred;
+    }
+    if (!preferred.isEmpty()) {
+        logUpdate(QStringLiteral("La carpeta de updates no acepta escrituras (%1); se usa la del "
+                                 "usuario.").arg(preferred));
+    }
+    for (const QString &fallback : userUpdateDirectories()) {
+        if (fallback != preferred && directoryAcceptsWrites(fallback)) {
+            return fallback;
+        }
+    }
+    return {};
+}
+
 bool LgaUpdateService::isBusy() const
 {
     return m_checkReply || m_downloadReply || m_promptVisible || m_resultDialogVisible
@@ -544,6 +773,9 @@ void LgaUpdateService::startCheckRequest()
     // Sin timeout una conexion colgada deja el flujo esperando para siempre.
     request.setTransferTimeout(m_config.checkTimeoutMs);
 
+    logUpdate(QStringLiteral("Chequeo %1: version instalada %2, manifiesto %3")
+                  .arg(m_manualCheckActive ? QStringLiteral("manual") : QStringLiteral("automatico"),
+                       QApplication::applicationVersion(), m_config.manifestUrl));
     m_checkReply = m_network->get(request);
     m_checkPhaseOpen = true;
     emit checkStarted();
@@ -603,6 +835,10 @@ void LgaUpdateService::onCheckFinished()
         if (periodic && m_config.periodicCheckRetryMs > 0) {
             schedulePeriodicCheckIn(m_config.periodicCheckRetryMs, /*withJitter=*/false);
         }
+        logUpdate(QStringLiteral("Chequeo fallido: httpStatus=%1 networkError=%2 (%3)")
+                      .arg(httpStatus)
+                      .arg(static_cast<int>(error))
+                      .arg(reply->errorString()));
         if (manual) {
             // Sin el detalle crudo, un fallo de parseo y un proxy que devuelve HTML se
             // reportan igual que una caida de red, y no hay nada que copiar y mandar.
@@ -617,10 +853,36 @@ void LgaUpdateService::onCheckFinished()
         return;
     }
 
+    // Un manifiesto de un formato MAS NUEVO no es "no hay update": es "esta version ya no sabe
+    // leer la lista", y lo unico que lo arregla es reinstalar. "No installable update was found"
+    // mandaria a esperar una version que en realidad ya esta publicada.
+    const int schemaVersion = manifestSchemaVersion(payload);
+    if (schemaVersion > kManifestSchemaVersion) {
+        logUpdate(QStringLiteral("Manifiesto con schemaVersion=%1; esta version lee hasta %2")
+                      .arg(schemaVersion)
+                      .arg(kManifestSchemaVersion));
+        if (manual) {
+            showResultDialog(tr("Updates"),
+                             tr("This version is too old to read the update list.\n"
+                                "Reinstall %1 from a newer installer.")
+                                 .arg(m_config.displayName),
+                             QStringLiteral("url=%1\nschemaVersion=%2 (soportado %3)")
+                                 .arg(m_config.manifestUrl)
+                                 .arg(schemaVersion)
+                                 .arg(kManifestSchemaVersion),
+                             /*warning=*/true);
+        }
+        return;
+    }
+
     QString manifestFailure;
     const ReleaseInfo info =
         parseManifest(payload, m_config.productId, m_config.releaseRepoSlug, &manifestFailure);
     if (info.version.isEmpty()) {
+        logUpdate(manifestFailure.isEmpty()
+                      ? QStringLiteral("El manifiesto no trae un release de %1 (repo=%2)")
+                            .arg(m_config.productId, m_config.releaseRepoSlug)
+                      : QStringLiteral("Manifiesto ilegible: %1").arg(manifestFailure));
         if (manual) {
             if (!manifestFailure.isEmpty()) {
                 showResultDialog(tr("Update Check Failed"),
@@ -641,6 +903,7 @@ void LgaUpdateService::onCheckFinished()
     }
 
     if (!info.downloadUrl.isValid()) {
+        logUpdate(QStringLiteral("La %1 no trae asset para %2").arg(info.version, currentPlatformLabel()));
         if (manual) {
             showResultDialog(tr("Updates"),
                              tr("Release %1 does not contain an installable asset for %2.")
@@ -650,6 +913,7 @@ void LgaUpdateService::onCheckFinished()
     }
 
     if (!isVersionNewer(info.version, QApplication::applicationVersion())) {
+        logUpdate(QStringLiteral("Al dia: la ultima es %1").arg(info.version));
         if (manual) {
             showResultDialog(tr("Updates"), tr("You are running the latest version."));
         }
@@ -662,6 +926,8 @@ void LgaUpdateService::onCheckFinished()
         qWarning().noquote()
             << QStringLiteral("Updater: el release %1 no tiene un SHA-256 valido para %2")
                    .arg(info.version, info.assetName);
+        logUpdate(QStringLiteral("La %1 no tiene SHA-256 valido para %2; no se ofrece")
+                      .arg(info.version, info.assetName));
         if (manual) {
             showResultDialog(tr("Update Check Failed"),
                              tr("The published update is missing valid integrity information."),
@@ -672,6 +938,7 @@ void LgaUpdateService::onCheckFinished()
         return;
     }
 
+    logUpdate(QStringLiteral("Version nueva: %1 (%2)").arg(info.version, info.assetName));
     // Antes del skip y el snooze: el aviso que no interrumpe sigue valiendo para una version
     // pospuesta. Sin cartel, asi que no abre ningun event loop anidado aca adentro.
     emit updateAvailable(normalizedVersion(info.version));
@@ -679,9 +946,8 @@ void LgaUpdateService::onCheckFinished()
     // El skip y el snooze valen solo para el chequeo automatico: si el usuario aprieta "Check
     // Now", quiere ver la respuesta aunque haya pospuesto esta version.
     if (!manual) {
-        const std::unique_ptr<QSettings> settings = openUpdateSettings(m_config.settingsPath);
-        const QString skippedVersion = settings->value("Updates/SkippedVersion").toString();
-        const QString snoozeUntilText = settings->value("Updates/SnoozeUntil").toString();
+        const QString skippedVersion = readState(&LgaUpdateSettingsKeys::skippedVersion).toString();
+        const QString snoozeUntilText = readState(&LgaUpdateSettingsKeys::snoozeUntil).toString();
 
         if (normalizedVersion(skippedVersion) == normalizedVersion(info.version)) {
             return;
@@ -738,11 +1004,12 @@ void LgaUpdateService::promptWithNotes(const QString &version,
 
     LgaWhatsNewFetcher *fetcher = startNotesFetch(notesAsset, /*allowStaleCache=*/false);
     connect(fetcher, &LgaWhatsNewFetcher::finished, this,
-            [deliver, installed, version](const LgaWhatsNewFetchResult &result) {
+            [this, deliver, installed, version](const LgaWhatsNewFetchResult &result) {
                 QString notesHtml;
                 if (result.status == LgaWhatsNewFetchResult::Status::Ok) {
                     const QList<LgaWhatsNew::VersionNotes> notes = LgaWhatsNew::range(
-                        result.notes, installed, version, LgaWhatsNew::currentPlatform());
+                        result.notes, installed, version, LgaWhatsNew::currentPlatform(),
+                        m_config.edition, currentWhatsNewAudiences());
                     notesHtml = notes.isEmpty() ? QString() : LgaWhatsNew::toHtml(notes);
                 } else {
                     qWarning().noquote()
@@ -781,6 +1048,7 @@ void LgaUpdateService::promptForUpdate(const QString &version,
     LgaUpdateDialogSpec spec;
     spec.kind = LgaUpdateDialogSpec::Kind::UpdatePrompt;
     spec.iconName = QStringLiteral("download");
+    spec.version = normalizedVersion(version);
     spec.title = tr("Update Available");
     spec.messageHtml =
         tr("A new version of %1 is available: %2.<br><br>"
@@ -849,9 +1117,8 @@ void LgaUpdateService::promptForUpdate(const QString &version,
         }
         // Actualizar ahora limpia el snooze y el skip: la decision anterior quedo sin efecto y
         // no tiene que reaparecer si el update falla y se reintenta.
-        const std::unique_ptr<QSettings> settings = openUpdateSettings(m_config.settingsPath);
-        settings->remove("Updates/SnoozeUntil");
-        settings->remove("Updates/SkippedVersion");
+        removeState(&LgaUpdateSettingsKeys::snoozeUntil);
+        removeState(&LgaUpdateSettingsKeys::skippedVersion);
 
         m_pendingVersion = normalizedVersion(version);
         downloadAndRunUpdate(downloadUrl, assetName, sha256Digest);
@@ -859,15 +1126,13 @@ void LgaUpdateService::promptForUpdate(const QString &version,
     }
 
     if (action == UpdateDialogAction::Snooze) {
-        const std::unique_ptr<QSettings> settings = openUpdateSettings(m_config.settingsPath);
-        settings->setValue("Updates/SnoozeUntil",
-                           QDateTime::currentDateTime().addDays(kSnoozeDays).toString(Qt::ISODate));
+        writeState(&LgaUpdateSettingsKeys::snoozeUntil,
+                   QDateTime::currentDateTime().addDays(kSnoozeDays).toString(Qt::ISODate));
         return;
     }
 
     if (action == UpdateDialogAction::Skip) {
-        const std::unique_ptr<QSettings> settings = openUpdateSettings(m_config.settingsPath);
-        settings->setValue("Updates/SkippedVersion", normalizedVersion(version));
+        writeState(&LgaUpdateSettingsKeys::skippedVersion, normalizedVersion(version));
     }
 }
 
@@ -888,14 +1153,13 @@ void LgaUpdateService::storeWhatsNewLastSeen(const QString &version)
     if (!LgaWhatsNew::isValidVersion(version)) {
         return;
     }
-    const std::unique_ptr<QSettings> settings = openUpdateSettings(m_config.settingsPath);
-    const QString stored = settings->value(kWhatsNewLastSeenKey).toString().trimmed();
+    const QString stored = readState(&LgaUpdateSettingsKeys::whatsNewLastSeen).toString().trimmed();
     bool comparable = false;
     const int order = LgaWhatsNew::compareVersions(stored, version, &comparable);
     if (comparable && order >= 0) {
         return;  // se guarda el MAXIMO: nunca se baja
     }
-    settings->setValue(kWhatsNewLastSeenKey, normalizedVersion(version));
+    writeState(&LgaUpdateSettingsKeys::whatsNewLastSeen, normalizedVersion(version));
 }
 
 void LgaUpdateService::runDeferredAutomaticCheck()
@@ -972,10 +1236,12 @@ LgaWhatsNewFetcher *LgaUpdateService::startNotesFetch(const LgaWhatsNew::AssetRe
 void LgaUpdateService::showWhatsNewDialog(QWidget *parent,
                                           const QString &title,
                                           const QString &message,
-                                          const QString &notesHtml)
+                                          const QString &notesHtml,
+                                          const QString &version)
 {
     LgaUpdateDialogSpec spec;
     spec.kind = LgaUpdateDialogSpec::Kind::WhatsNew;
+    spec.version = version;
     spec.iconName = QStringLiteral("refresh");
     spec.title = title;
     spec.messageHtml = message;
@@ -1013,12 +1279,13 @@ void LgaUpdateService::runWhatsNewAfterUpdate()
         return;
     }
 
-    const std::unique_ptr<QSettings> settings = openUpdateSettings(m_config.settingsPath);
-    const QString lastSeen = settings->value(kWhatsNewLastSeenKey).toString().trimmed();
+    // Con fallback a la clave anterior: una app que viene de otro updater no pierde el "What's
+    // new" del update que la trajo hasta aca.
+    const QString lastSeen = readState(&LgaUpdateSettingsKeys::whatsNewLastSeen).toString().trimmed();
     if (!LgaWhatsNew::isValidVersion(lastSeen)) {
         // Instalacion nueva, o primera version con esta funcion: no hay forma de saber que vio
         // el usuario, asi que no se le muestra nada y se arranca a contar desde aca.
-        settings->setValue(kWhatsNewLastSeenKey, current);
+        writeState(&LgaUpdateSettingsKeys::whatsNewLastSeen, current);
         finishWhatsNewAfterUpdate();
         return;
     }
@@ -1040,7 +1307,8 @@ void LgaUpdateService::runWhatsNewAfterUpdate()
                     QList<LgaWhatsNew::VersionNotes> notes;
                     if (result.status == LgaWhatsNewFetchResult::Status::Ok) {
                         notes = LgaWhatsNew::range(result.notes, lastSeen, current,
-                                                   LgaWhatsNew::currentPlatform());
+                                                   LgaWhatsNew::currentPlatform(),
+                                                   m_config.edition, currentWhatsNewAudiences());
                     }
                     if (notes.isEmpty()) {
                         // Solo una respuesta DEFINITIVA cierra el aviso: notas leidas sin nada
@@ -1081,7 +1349,7 @@ void LgaUpdateService::runWhatsNewAfterUpdate()
                         tr("%1 was updated to version %2.")
                             .arg(m_config.displayName.toHtmlEscaped(),
                                  emphasis(current.toHtmlEscaped())),
-                        LgaWhatsNew::toHtml(notes));
+                        LgaWhatsNew::toHtml(notes), current);
                     finishWhatsNewAfterUpdate();
                 });
     });
@@ -1116,7 +1384,8 @@ void LgaUpdateService::showWhatsNewHistory(QWidget *dialogParent)
 
                     if (result.status == LgaWhatsNewFetchResult::Status::Ok) {
                         const QList<LgaWhatsNew::VersionNotes> notes = LgaWhatsNew::filtered(
-                            result.notes, LgaWhatsNew::currentPlatform());
+                            result.notes, LgaWhatsNew::currentPlatform(), m_config.edition,
+                            currentWhatsNewAudiences());
                         if (!notes.isEmpty()) {
                             showWhatsNewDialog(
                                 parent, tr("What's New"),
@@ -1176,23 +1445,31 @@ void LgaUpdateService::sweepUpdateCache(const QString &productId, const QString 
         }
     }
 
-    const QString legacyDir = resolveUpdateDir(QString());
-    if (legacyDir.isEmpty() || legacyDir == ownDir || productId.trimmed().isEmpty()) {
+    if (productId.trimmed().isEmpty()) {
         return;
     }
-    // Ubicacion vieja: es del sistema y la comparten otras cosas, asi que se borra SOLO lo
-    // que lleva el nombre de este producto (el instalador y sus scripts helper).
-    QDir legacy(legacyDir);
-    const QFileInfoList staleEntries =
-        legacy.entryInfoList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden);
-    for (const QFileInfo &entry : staleEntries) {
-        if (!entry.fileName().startsWith(productId, Qt::CaseInsensitive)) {
+    // Carpetas del usuario (`CacheLocation`, `TempLocation`): la ubicacion vieja y el fallback de
+    // `updateDirWriteFallback`. Las comparten otras cosas, asi que se borra SOLO lo que escribe
+    // este servicio para este producto (el instalador y sus scripts helper).
+    const QStringList prefixes = ownedFilePrefixes(productId);
+    for (const QString &userDir : userUpdateDirectories()) {
+        if (userDir == QDir::cleanPath(ownDir)) {
             continue;
         }
-        QFile::remove(entry.absoluteFilePath());
+        const QFileInfoList staleEntries =
+            QDir(userDir).entryInfoList(QDir::Files | QDir::NoDotAndDotDot | QDir::Hidden);
+        bool removedOwn = false;
+        for (const QFileInfo &entry : staleEntries) {
+            if (isOwnedFile(entry.fileName(), prefixes)) {
+                removedOwn = QFile::remove(entry.absoluteFilePath()) || removedOwn;
+            }
+        }
+        // Si quedo vacia despues de sacar lo nuestro, se saca tambien la carpeta. Solo en ese
+        // caso: un `updates` vacio de `%TEMP%` puede ser de otro programa.
+        if (removedOwn) {
+            QDir().rmdir(userDir);
+        }
     }
-    // Si quedo vacia, se saca tambien la carpeta: era nuestra y ya no se usa.
-    QDir().rmdir(legacyDir);
 }
 
 void LgaUpdateService::downloadAndRunUpdate(const QUrl &downloadUrl,
@@ -1207,16 +1484,30 @@ void LgaUpdateService::downloadAndRunUpdate(const QUrl &downloadUrl,
         m_pendingVersion.isEmpty() ? QApplication::applicationVersion() : m_pendingVersion;
     m_pendingAssetName = safeInstallerAssetName(assetName, m_config.productId, fallbackVersion);
     m_pendingAssetSha256 = normalizedSha256Digest(sha256Digest);
+    if (m_pendingAssetSha256.isEmpty()) {
+        // El chequeo ya no ofrece un release sin digest; esto es la segunda llave.
+        logUpdate(QStringLiteral("Descarga rechazada: %1 no tiene SHA-256 valido")
+                      .arg(m_pendingAssetName));
+        showResultDialog(tr("Update Failed"),
+                         tr("The published update is missing valid integrity information."),
+                         QStringLiteral("asset=%1").arg(m_pendingAssetName), /*warning=*/true);
+        return;
+    }
 
     // El destino se resuelve ANTES de bajar nada: el asset se escribe al disco a medida que
     // llega, asi que el archivo tiene que existir antes del primer byte.
-    const QString updateDir = resolveUpdateDir(m_config.updateCacheDir);
-    if (updateDir.isEmpty() || !QDir().mkpath(updateDir)) {
+    const QString updateDir = resolveDownloadDir();
+    if (updateDir.isEmpty()) {
+        logUpdate(QStringLiteral("No se pudo crear la carpeta de updates (%1)")
+                      .arg(resolveUpdateDir(m_config.updateCacheDir)));
         showResultDialog(tr("Update Failed"),
                          tr("The update cache directory could not be created."), QString(),
                          /*warning=*/true);
         return;
     }
+    // La carpeta propia se vacia entera; una del usuario (el fallback) es compartida.
+    const bool ownUpdateDir =
+        QDir::cleanPath(updateDir) == QDir::cleanPath(resolveUpdateDir(m_config.updateCacheDir));
     // El discard va ANTES de fijar el destino: limpia todo el estado de una descarga previa,
     // incluido `m_downloadTargetPath`, asi que hacerlo despues dejaria el path en vacio y el
     // QSaveFile se construiria sin nombre.
@@ -1231,10 +1522,14 @@ void LgaUpdateService::downloadAndRunUpdate(const QUrl &downloadUrl,
     // Se conserva el asset en curso: puede ser una descarga parcial que se va a reanudar por
     // `Range`, y borrarla obligaria a bajar todo de nuevo.
     const QString currentAssetName = QFileInfo(m_downloadTargetPath).fileName();
+    const QStringList prefixes = ownedFilePrefixes(m_config.productId);
     const QFileInfoList staleEntries =
         QDir(updateDir).entryInfoList(QDir::Files | QDir::NoDotAndDotDot);
     for (const QFileInfo &stale : staleEntries) {
         if (stale.fileName() == currentAssetName) {
+            continue;
+        }
+        if (!ownUpdateDir && !isOwnedFile(stale.fileName(), prefixes)) {
             continue;
         }
         QFile::remove(stale.absoluteFilePath());
@@ -1256,6 +1551,7 @@ void LgaUpdateService::downloadAndRunUpdate(const QUrl &downloadUrl,
     m_downloadSpaceChecked = false;
     m_downloadUserCancelled = false;
 
+    logUpdate(QStringLiteral("Descarga: %1\ndestino=%2").arg(downloadUrl.toString(), m_downloadTargetPath));
     m_progressDialog = new QProgressDialog(
         tr("Downloading %1 %2...").arg(m_config.displayName, fallbackVersion), tr("Cancel"), 0, 0,
         parentWindow());
@@ -1508,7 +1804,9 @@ void LgaUpdateService::showResultDialog(const QString &title,
     spec.title = title;
     spec.messageHtml =
         message.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
-    spec.details = rawDetail;
+    // En un fallo, el "Details" lleva la ruta del log: es el archivo que el usuario tiene que
+    // mandar.
+    spec.details = warning ? withUpdateLogPath(rawDetail) : rawDetail;
     spec.warning = warning;
     spec.hintHtml = tr("<b>Enter</b> / <b>Esc</b> / <b>O</b> OK");
     spec.buttons = {{LgaUpdateDialogSpec::Role::Ok, tr("&OK"), /*primary=*/true, Qt::Key_O}};
@@ -1597,6 +1895,7 @@ void LgaUpdateService::onDownloadFinished()
     // Cancelar es una decision del usuario, no un fallo: no lleva cartel, pero el parcial se
     // tira igual.
     if (m_downloadUserCancelled) {
+        logUpdate(QStringLiteral("Descarga cancelada por el usuario"));
         closeProgressDialog();
         discardPartialDownload();
         return;
@@ -1631,6 +1930,10 @@ void LgaUpdateService::onDownloadFinished()
         && !alreadyComplete && m_downloadRetries < kMaxDownloadRetries;
     if (retriable) {
         ++m_downloadRetries;
+        logUpdate(QStringLiteral("Descarga cortada en %1 bytes; reintento %2 desde ahi\n%3")
+                      .arg(m_downloadWritten)
+                      .arg(m_downloadRetries)
+                      .arg(m_downloadFailureDetail));
         m_downloadFailure = DownloadFailure::None;
         m_downloadFailureDetail.clear();
         // El dialogo de progreso NO se cierra: la descarga sigue, y sin el el usuario se
@@ -1654,8 +1957,13 @@ void LgaUpdateService::onDownloadFinished()
         m_downloadFailureDetail = QStringLiteral("no se recibio ningun byte");
     }
 
-    if (m_downloadFailure == DownloadFailure::None && !m_pendingAssetSha256.isEmpty()
-        && m_downloadHash) {
+    // Sin digest esperado no hay contra que verificar: no se instala (fail-closed).
+    if (m_downloadFailure == DownloadFailure::None
+        && (m_pendingAssetSha256.isEmpty() || !m_downloadHash)) {
+        m_downloadFailure = DownloadFailure::Integrity;
+        m_downloadFailureDetail = QStringLiteral("sin SHA-256 esperado para verificar");
+    }
+    if (m_downloadFailure == DownloadFailure::None) {
         const QString downloadedDigest = QString::fromLatin1(m_downloadHash->result().toHex());
         if (downloadedDigest.compare(m_pendingAssetSha256, Qt::CaseInsensitive) != 0) {
             m_downloadFailure = DownloadFailure::Integrity;
@@ -1698,11 +2006,13 @@ void LgaUpdateService::onDownloadFinished()
             break;
         }
         const QString detail = m_downloadFailureDetail;
+        logUpdate(QStringLiteral("Descarga fallida: %1\n%2").arg(message, detail));
         discardPartialDownload();
         showResultDialog(tr("Update Failed"), message, detail, /*warning=*/true);
         return;
     }
 
+    logUpdate(QStringLiteral("Descarga completa: %1 bytes, SHA-256 verificado").arg(m_downloadWritten));
     const QString installerPath = m_downloadTargetPath;
     delete m_downloadFile;
     m_downloadFile = nullptr;
@@ -1718,6 +2028,7 @@ void LgaUpdateService::onDownloadFinished()
     if (m_config.installBlockedReason) {
         const QString reason = m_config.installBlockedReason();
         if (!reason.isEmpty()) {
+            logUpdate(QStringLiteral("Instalacion postergada al terminar la descarga: %1").arg(reason));
             QFile::remove(installerPath);
             m_downloadTargetPath.clear();
             showResultDialog(tr("Update Postponed"), reason, QString(),
@@ -1731,6 +2042,7 @@ void LgaUpdateService::onDownloadFinished()
         if (launchError.isEmpty()) {
             launchError = tr("The update installer could not be launched.");
         }
+        logUpdate(QStringLiteral("No se pudo lanzar el helper: %1").arg(launchError));
         showResultDialog(tr("Update Failed"), launchError, QString(), /*warning=*/true);
         return;
     }
@@ -1766,7 +2078,7 @@ bool LgaUpdateService::launchInstallerWithHelper(const QString &installerPath,
     // El script se parametriza por replace y NO por arg(): trae llaves y comodines que conviene
     // no pasar por el formateo de QString.
     const QString helperTemplate = QStringLiteral(
-R"(param([string]$InstallerPath, [string]$AppDir)
+R"(param([string]$InstallerPath, [string]$AppDir, [string]$LogPath)
 
 $ErrorActionPreference = 'SilentlyContinue'
 
@@ -1781,13 +2093,25 @@ function Remove-Self {
     }
 }
 
+# Mismo archivo y mismo formato que el log de la app (`updateLogPath`). Sin ruta no escribe.
+function Write-Log([string]$Message) {
+    if ($LogPath) {
+        $line = '[{0}] [helper {1}] {2}' -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $PID, $Message
+        Add-Content -LiteralPath $LogPath -Value $line -Encoding UTF8
+    }
+}
+
 if (-not $InstallerPath -or -not (Test-Path -LiteralPath $InstallerPath)) {
+    Write-Log "No existe el instalador: $InstallerPath"
     Remove-Self
     exit 1
 }
+Write-Log "Inicio del helper. instalador=$InstallerPath carpeta=$AppDir"
 
 $sleepMs = 500
 $appWaitLimitMs = 15000
+$backendWaitLimitMs = 8000
+$forceClose = $__FORCE_CLOSE__
 
 function Normalize-Path([string]$Path) {
     if ([string]::IsNullOrWhiteSpace($Path)) {
@@ -1810,13 +2134,38 @@ function Test-InAppDir([string]$Path) {
     return ($norm -eq $appDirNorm) -or $norm.StartsWith($appDirNorm + '\')
 }
 
-# Filtrar por directorio de instalacion evita cerrar OTRA copia de la app que el usuario
-# tenga abierto desde otra carpeta.
+function Test-CommandLineInAppDir($Process) {
+    if (-not $appDirNorm -or -not $Process.CommandLine) {
+        return $false
+    }
+    # El separador de cierre NO es decorativo: sin el, la carpeta de una edicion es PREFIJO de la
+    # de la otra (`...\PipeSync` esta contenida en `...\PipeSync_Client`), y actualizar una
+    # cerraba los procesos de fondo de la otra.
+    $cmd = $Process.CommandLine.ToLowerInvariant()
+    $dirBack = $appDirNorm + '\'
+    $dirFwd = $appDirNorm.Replace('\', '/') + '/'
+    return $cmd.Contains($dirBack) -or $cmd.Contains($dirFwd)
+}
+
+# Filtrar por directorio de instalacion evita tocar OTRA copia de la app que el usuario tenga
+# abierta desde otra carpeta.
 function Get-AppProcesses {
     Get-CimInstance Win32_Process |
         Where-Object {
             ($_.Name -ieq '__EXECUTABLE_NAME__') -and
             (Test-InAppDir $_.ExecutablePath)
+        }
+}
+
+# Procesos de fondo de la app (`windowsRedisCommandLineMatches`, `windowsPythonProcessNames`).
+function Get-BackendProcesses {
+    Get-CimInstance Win32_Process |
+        Where-Object {
+            (
+                ($_.Name -ieq 'redis-server.exe' -and (__REDIS_MATCH__)) -or
+                (($_.Name -in @(__PYTHON_PROCESS_NAMES__)) -and (__PYTHON_MATCH__))
+            ) -and
+            ((Test-InAppDir $_.ExecutablePath) -or (Test-CommandLineInAppDir $_))
         }
 }
 
@@ -1828,12 +2177,13 @@ function Wait-UntilGone([scriptblock]$Query, [int]$TimeoutMs) {
     return -not (& $Query | Select-Object -First 1)
 }
 
-if (-not (Wait-UntilGone { Get-AppProcesses } $appWaitLimitMs)) {
-    # Nunca forzar el cierre: puede ser una instancia secundaria con una captura sin guardar.
-    # El usuario conserva su trabajo y puede reintentar despues de cerrar todas las ventanas.
+function Stop-Postponed([string]$What, [string]$PopupText) {
+    # Nunca forzar el cierre en este modo: puede ser una instancia secundaria con trabajo sin
+    # guardar. El usuario conserva su trabajo y puede reintentar despues de cerrar todo.
+    Write-Log "Update postergado: $What sigue abierto"
     try {
         $shell = New-Object -ComObject WScript.Shell
-        $shell.Popup('The update was postponed because another __DISPLAY_NAME__ window is still open. Save your work, close every __DISPLAY_NAME__ window, and try again.', 0, '__DISPLAY_NAME__ Update', 48) | Out-Null
+        $shell.Popup($PopupText, 0, '__DISPLAY_NAME__ Update', 48) | Out-Null
     } catch {}
     # La app que pidio el update ya se cerro: una residente la necesita de vuelta (ver
     # `LgaUpdateConfig::relaunchWhenUpdatePostponed`).
@@ -1844,11 +2194,29 @@ if (-not (Wait-UntilGone { Get-AppProcesses } $appWaitLimitMs)) {
     exit 3
 }
 
+if (-not (Wait-UntilGone { Get-AppProcesses } $appWaitLimitMs)) {
+    if (-not $forceClose) {
+        Stop-Postponed 'la app' 'The update was postponed because another __DISPLAY_NAME__ window is still open. Save your work, close every __DISPLAY_NAME__ window, and try again.'
+    }
+    # `closePolicy = Force`: una app con procesos de fondo no puede quedar a medio actualizar.
+    Write-Log 'La app sigue abierta despues de 15 s; se cierra a la fuerza'
+    Get-AppProcesses | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+}
+
+if (-not (Wait-UntilGone { Get-BackendProcesses } $backendWaitLimitMs)) {
+    if (-not $forceClose) {
+        Stop-Postponed 'un proceso de fondo' 'The update was postponed because __DISPLAY_NAME__ is still finishing work in the background. Try again in a moment.'
+    }
+    Write-Log 'Siguen procesos de fondo despues de 8 s; se cierran a la fuerza'
+    Get-BackendProcesses | ForEach-Object { Stop-Process -Id $_.ProcessId -Force }
+}
+
 for ($i = 0; $i -lt 20; $i++) {
     try {
         # Mantener exactamente la carpeta de la instalacion que solicito el update.
         $dirArgument = '/DIR="' + $AppDir + '"'
-        Start-Process -FilePath $InstallerPath -ArgumentList $dirArgument
+        Start-Process -FilePath $InstallerPath -ArgumentList $dirArgument -ErrorAction Stop
+        Write-Log 'Instalador lanzado'
         Remove-Self
         exit 0
     } catch {
@@ -1856,9 +2224,13 @@ for ($i = 0; $i -lt 20; $i++) {
     }
 }
 
+Write-Log 'No se pudo lanzar el instalador despues de 20 intentos'
 Remove-Self
 exit 2
 )");
+
+    QStringList pythonProcessNames = m_config.windowsPythonProcessNames;
+    pythonProcessNames.removeDuplicates();
 
     QString helperScript = helperTemplate;
     helperScript.replace(QStringLiteral("__EXECUTABLE_NAME__"), executableName);
@@ -1866,6 +2238,16 @@ exit 2
     helperScript.replace(QStringLiteral("__RELAUNCH_WHEN_POSTPONED__"),
                          m_config.relaunchWhenUpdatePostponed ? QStringLiteral("true")
                                                               : QStringLiteral("false"));
+    helperScript.replace(QStringLiteral("__FORCE_CLOSE__"),
+                         m_config.closePolicy == LgaUpdateConfig::ClosePolicy::Force
+                             ? QStringLiteral("true")
+                             : QStringLiteral("false"));
+    helperScript.replace(QStringLiteral("__PYTHON_PROCESS_NAMES__"),
+                         powerShellQuotedList(pythonProcessNames));
+    helperScript.replace(QStringLiteral("__REDIS_MATCH__"),
+                         powerShellCommandLineMatch(m_config.windowsRedisCommandLineMatches));
+    helperScript.replace(QStringLiteral("__PYTHON_MATCH__"),
+                         powerShellCommandLineMatch(m_config.windowsPythonCommandLineMatches));
 
     QSaveFile helperFile(helperPath);
     const QByteArray helperBytes = helperScript.toUtf8();
@@ -1881,7 +2263,10 @@ exit 2
               << "Bypass"
               << "-WindowStyle"
               << "Hidden"
-              << "-File" << helperPath << installerPath << appDir;
+              << "-File" << helperPath << installerPath << appDir
+              << QDir::toNativeSeparators(m_config.updateLogPath);
+    logUpdate(QStringLiteral("Lanzando helper: %1\ninstalador=%2\ncarpeta=%3")
+                  .arg(helperPath, installerPath, appDir));
     if (!QProcess::startDetached("powershell", arguments)) {
         setError(tr("Could not launch update helper process."));
         return false;
@@ -1906,6 +2291,17 @@ exit 2
     const QString bundleName = QFileInfo(targetAppPath).fileName();
 
     const QFileInfo targetParentInfo(QFileInfo(targetAppPath).absolutePath());
+    // App Translocation: una app en cuarentena abierta con click derecho > Abrir corre desde una
+    // copia de solo lectura en `.../AppTranslocation/`, que el update no puede reemplazar. Se
+    // anota aparte porque es la primera sospecha cuando "a mi me anda y a otro no".
+    logUpdate(QStringLiteral("Instalacion macOS: bundle=%1\ncarpeta=%2 existe=%3 escribible=%4\n"
+                             "translocada=%5")
+                  .arg(targetAppPath, targetParentInfo.absoluteFilePath(),
+                       targetParentInfo.exists() ? QStringLiteral("si") : QStringLiteral("no"),
+                       targetParentInfo.isWritable() ? QStringLiteral("si") : QStringLiteral("no"),
+                       targetAppPath.contains(QStringLiteral("/AppTranslocation/"))
+                           ? QStringLiteral("SI")
+                           : QStringLiteral("no")));
     if (!targetParentInfo.exists() || !targetParentInfo.isWritable()) {
         setError(
             tr("%1 could not update automatically because this location is not writable:\n%2\n\n"
@@ -1924,29 +2320,60 @@ exit 2
 
     const QString helperTemplate = QStringLiteral(
 R"MACHELPER(#!/bin/bash
-set -euo pipefail
+set -Eeuo pipefail
 
-ARCHIVE_PATH="$1"
-TARGET_APP_PATH="$2"
-EXECUTABLE_NAME="$3"
+ARCHIVE_PATH="${1:-}"
+TARGET_APP_PATH="${2:-}"
+EXECUTABLE_NAME="${3:-}"
 HELPER_PATH="$0"
 TARGET_EXEC="$TARGET_APP_PATH/Contents/MacOS/$EXECUTABLE_NAME"
 TARGET_PARENT_DIR="$(dirname "$TARGET_APP_PATH")"
-UPDATE_LOG="$HOME/Library/Logs/LGA/__PRODUCT_ID__/Update.log"
+UPDATE_LOG="__UPDATE_LOG__"
 WORK_DIR=""
 BACKUP_PATH=""
 TARGET_SWAPPED=false
 INSTALL_COMPLETE=false
 RELAUNCH_ALLOWED=true
 POSTPONED=false
+FORCE_CLOSE=__FORCE_CLOSE__
+STEP="inicio"
 
-if [ ! -f "$ARCHIVE_PATH" ] || [ -z "$TARGET_APP_PATH" ] || [ -z "$EXECUTABLE_NAME" ]; then
-    exit 1
+# El log se abre ANTES de cualquier salida: un helper que abortaba en la validacion de argumentos
+# se iba sin dejar una sola linea. Es el mismo archivo en el que escribe la app.
+mkdir -p "$(dirname "$UPDATE_LOG")" >/dev/null 2>&1 || true
+touch "$UPDATE_LOG" >/dev/null 2>&1 || true
+if [ -w "$UPDATE_LOG" ]; then
+    exec >> "$UPDATE_LOG" 2>&1
 fi
+
+# A stderr y no a stdout: la trampa de ERR (`-E`) tambien corre adentro de cada `$(...)`, y una
+# linea de log por stdout terminaria DENTRO de la variable capturada (un `mktemp` que falla dejaba
+# el texto del error en WORK_DIR). stderr va al mismo log.
+log() {
+    printf '[%s] [helper %s] %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$$" "$*" >&2
+}
+
+step() {
+    STEP="$*"
+    log "Paso: $STEP"
+}
+
+# Con `set -e` el script se iba en silencio en el primer comando que fallaba, y el log solo decia
+# "fallo (estado=1)". Esto deja escrito QUE comando fallo y en que paso. `-E` hace que la trampa
+# alcance tambien a las funciones.
+on_error() {
+    log "ERROR en el paso '$STEP': fallo el comando [$2] (estado=$1, linea $3)"
+}
+trap 'on_error "$?" "$BASH_COMMAND" "$LINENO"' ERR
+
+fail() {
+    log "ERROR en el paso '$STEP': $*"
+    exit 1
+}
 
 cleanup() {
     EXIT_STATUS=$?
-    trap - EXIT
+    trap - EXIT ERR
     set +e
     if [ "$INSTALL_COMPLETE" != true ] && [ "$EXIT_STATUS" -eq 0 ]; then
         EXIT_STATUS=1
@@ -1955,50 +2382,70 @@ cleanup() {
         rm -rf "$WORK_DIR"
     fi
     if [ "$INSTALL_COMPLETE" != true ] && [ "$TARGET_SWAPPED" = true ]; then
+        log "Restaurando el bundle anterior desde $BACKUP_PATH"
         rm -rf "$TARGET_APP_PATH"
         if [ -n "$BACKUP_PATH" ] && [ -d "$BACKUP_PATH" ]; then
-            mv "$BACKUP_PATH" "$TARGET_APP_PATH" || true
+            mv "$BACKUP_PATH" "$TARGET_APP_PATH" || log "ERROR: no se pudo restaurar el backup"
         fi
     fi
     if [ "$INSTALL_COMPLETE" = true ]; then
         [ -n "$BACKUP_PATH" ] && rm -rf "$BACKUP_PATH"
-        printf '[%s] Actualizacion completada correctamente.\n' "$(date '+%Y-%m-%d %H:%M:%S')"
-    else
-        printf '[%s] La actualizacion fallo (estado=%s). Se conserva o restaura la app valida.\n' \
-            "$(date '+%Y-%m-%d %H:%M:%S')" "$EXIT_STATUS"
+        log "Update completo."
+    elif [ "$POSTPONED" = true ]; then
+        log "Update postergado: otra ventana de la app sigue abierta (estado=$EXIT_STATUS)."
         if [ "$RELAUNCH_ALLOWED" = true ] && [ -x "$TARGET_EXEC" ]; then
             "$TARGET_EXEC" >/dev/null 2>&1 &
         fi
-        if [ "$POSTPONED" = true ]; then
-            /usr/bin/osascript -e 'display notification "The update was postponed because another __DISPLAY_NAME__ window is still open. Save your work, close every __DISPLAY_NAME__ window, and try again." with title "__DISPLAY_NAME__ Update"' >/dev/null 2>&1 || true
-        else
-            /usr/bin/osascript -e 'display notification "The update could not finish. __DISPLAY_NAME__ was restored; details were saved in the update log." with title "__DISPLAY_NAME__ Update"' >/dev/null 2>&1 || true
+        /usr/bin/osascript -e 'display notification "The update was postponed because another __DISPLAY_NAME__ window is still open. Save your work, close every __DISPLAY_NAME__ window, and try again." with title "__DISPLAY_NAME__ Update"' >/dev/null 2>&1 || true
+    else
+        log "Update fallido en el paso '$STEP' (estado=$EXIT_STATUS). Se reabre la app que funcionaba."
+        if [ -x "$TARGET_EXEC" ]; then
+            "$TARGET_EXEC" >/dev/null 2>&1 &
         fi
+        /usr/bin/osascript -e 'display notification "The update could not finish. __DISPLAY_NAME__ was restored; details were saved in the update log." with title "__DISPLAY_NAME__ Update"' >/dev/null 2>&1 || true
     fi
+    # El asset se borra SIEMPRE, salga bien o mal: ya se extrajo, pesa cientos de MB y se puede
+    # volver a bajar. El barrido del arranque siguiente es la red para cuando esto no corre.
+    [ -n "$ARCHIVE_PATH" ] && rm -f "$ARCHIVE_PATH"
     rm -f "$HELPER_PATH"
     exit "$EXIT_STATUS"
 }
 trap cleanup EXIT
 
-mkdir -p "$(dirname "$UPDATE_LOG")" >/dev/null 2>&1 || true
-touch "$UPDATE_LOG" >/dev/null 2>&1 || true
-if [ -w "$UPDATE_LOG" ]; then
-    exec >> "$UPDATE_LOG" 2>&1
-fi
-printf '[%s] Iniciando actualizacion. archivo=%s destino=%s\n' \
-    "$(date '+%Y-%m-%d %H:%M:%S')" "$ARCHIVE_PATH" "$TARGET_APP_PATH"
+log "Inicio del update. archivo=$ARCHIVE_PATH destino=$TARGET_APP_PATH ejecutable=$EXECUTABLE_NAME"
+# Entorno: lo que cambia de una maquina a otra y suele explicar "a mi me anda y a otro no".
+log "Entorno: macOS $(/usr/bin/sw_vers -productVersion 2>/dev/null || echo '?') $(/usr/bin/uname -m 2>/dev/null || echo '?') usuario=$(/usr/bin/id -un 2>/dev/null || echo '?') grupos=$(/usr/bin/id -Gn 2>/dev/null || echo '?')"
+log "Permisos: $(/bin/ls -ld "$TARGET_PARENT_DIR" 2>&1 || true) | $(/bin/ls -ld "$TARGET_APP_PATH" 2>&1 || true)"
+log "Archivo descargado: $(/bin/ls -l "$ARCHIVE_PATH" 2>&1 || true)"
+log "Atributos del bundle instalado: $(/usr/bin/xattr "$TARGET_APP_PATH" 2>&1 | /usr/bin/tr '\n' ' ' || true)"
+log "Espacio libre: $(/bin/df -h "$TARGET_PARENT_DIR" 2>/dev/null | /usr/bin/tail -1 || true)"
 
+step "validar argumentos"
+if [ ! -f "$ARCHIVE_PATH" ]; then
+    fail "no existe el archivo descargado: $ARCHIVE_PATH"
+fi
+if [ -z "$TARGET_APP_PATH" ] || [ -z "$EXECUTABLE_NAME" ]; then
+    fail "faltan argumentos (destino='$TARGET_APP_PATH' ejecutable='$EXECUTABLE_NAME')"
+fi
+
+step "descomprimir el zip"
 WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/__PRODUCT_ID___Update_XXXXXX")"
 /usr/bin/ditto -x -k "$ARCHIVE_PATH" "$WORK_DIR"
 # El .app se busca por glob y no por nombre: el nombre del asset no tiene por que predecir el
 # del bundle.
 NEW_APP_PATH="$(/usr/bin/find "$WORK_DIR" -maxdepth 1 -name '*.app' -print -quit)"
-if [ -z "$NEW_APP_PATH" ] || [ ! -d "$NEW_APP_PATH" ] || [ ! -x "$NEW_APP_PATH/Contents/MacOS/$EXECUTABLE_NAME" ]; then
-    exit 1
+if [ -z "$NEW_APP_PATH" ] || [ ! -d "$NEW_APP_PATH" ]; then
+    fail "el zip no trae un .app en su raiz. Contenido: $(/bin/ls "$WORK_DIR" 2>&1 | /usr/bin/tr '\n' ' ' || true)"
 fi
+if [ ! -x "$NEW_APP_PATH/Contents/MacOS/$EXECUTABLE_NAME" ]; then
+    fail "el bundle nuevo no trae el ejecutable $EXECUTABLE_NAME. Trae: $(/bin/ls "$NEW_APP_PATH/Contents/MacOS" 2>&1 | /usr/bin/tr '\n' ' ' || true)"
+fi
+log "Bundle nuevo: $NEW_APP_PATH version=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$NEW_APP_PATH/Contents/Info.plist" 2>/dev/null || echo '?')"
+
+step "verificar la firma del bundle nuevo"
 /usr/bin/codesign --verify --deep --strict "$NEW_APP_PATH"
 if [ ! -d "$TARGET_PARENT_DIR" ] || [ ! -w "$TARGET_PARENT_DIR" ]; then
-    exit 1
+    fail "la carpeta destino no existe o no es escribible: $TARGET_PARENT_DIR"
 fi
 
 # Filtrar por path absoluto evita cerrar otros builds de la misma app.
@@ -2014,6 +2461,23 @@ find_target_pids() {
     return 0
 }
 
+# Un proceso de fondo de la app (`macBackendProcessPatterns`) sigue vivo. `pgrep -f` mira la
+# linea de comandos entera, y la del helper lleva el path del .app y del .zip: sin excluirlo, un
+# patron con el nombre de la app lo encontraba a el mismo y esperaba 20 s de mas. `--` deja pasar
+# un patron que empiece con '-'.
+backend_alive() {
+    for backend_pid in $(/usr/bin/pgrep -f -- "$1" 2>/dev/null || true); do
+        [ "$backend_pid" = "$$" ] && continue
+        backend_command="$(/bin/ps -p "$backend_pid" -o command= 2>/dev/null || true)"
+        case "$backend_command" in
+            ""|*"$HELPER_PATH"*) continue ;;
+        esac
+        return 0
+    done
+    return 1
+}
+
+step "esperar a que cierre la app"
 TARGET_PIDS="$(find_target_pids)"
 for ((i = 0; i < 60; i++)); do
     [ -z "$TARGET_PIDS" ] && break
@@ -2021,13 +2485,39 @@ for ((i = 0; i < 60; i++)); do
     TARGET_PIDS="$(find_target_pids)"
 done
 if [ -n "$TARGET_PIDS" ]; then
-    # Nunca mandar TERM/KILL. Reabrir la que se cerro solo si la app lo pide
-    # (`relaunchWhenUpdatePostponed`): en una app de varias ventanas seria una instancia de mas.
-    POSTPONED=true
-    RELAUNCH_ALLOWED=__RELAUNCH_WHEN_POSTPONED__
-    exit 3
+    if [ "$FORCE_CLOSE" != true ]; then
+        # Nunca mandar TERM/KILL en este modo. Reabrir la que se cerro solo si la app lo pide
+        # (`relaunchWhenUpdatePostponed`): en una app de varias ventanas seria una de mas.
+        log "La app sigue abierta despues de 30 s (pids: $(echo $TARGET_PIDS)); se posterga"
+        POSTPONED=true
+        RELAUNCH_ALLOWED=__RELAUNCH_WHEN_POSTPONED__
+        exit 3
+    fi
+    # `closePolicy = Force`: una app con procesos de fondo no puede quedar sin actualizar.
+    log "La app sigue abierta despues de 30 s (pids: $(echo $TARGET_PIDS)); se le manda TERM"
+    for target_pid in $TARGET_PIDS; do
+        kill -TERM "$target_pid" >/dev/null 2>&1 || true
+    done
+    for ((i = 0; i < 20; i++)); do
+        [ -z "$(find_target_pids)" ] && break
+        sleep 0.5
+    done
+    TARGET_PIDS="$(find_target_pids)"
+    if [ -n "$TARGET_PIDS" ]; then
+        log "La app no cerro con TERM (pids: $(echo $TARGET_PIDS)); se le manda KILL"
+        for target_pid in $TARGET_PIDS; do
+            kill -KILL "$target_pid" >/dev/null 2>&1 || true
+        done
+        sleep 1
+    fi
+    if [ -n "$(find_target_pids)" ]; then
+        fail "la app sigue abierta aun despues de KILL"
+    fi
 fi
 
+step "esperar a los procesos de fondo"
+__BACKEND_WAIT__
+step "reemplazar el bundle"
 BACKUP_PATH="${TARGET_APP_PATH}.backup.$(date +%s).$$"
 if [ -e "$TARGET_APP_PATH" ]; then
     mv "$TARGET_APP_PATH" "$BACKUP_PATH"
@@ -2035,21 +2525,53 @@ fi
 TARGET_SWAPPED=true
 /usr/bin/ditto "$NEW_APP_PATH" "$TARGET_APP_PATH"
 if [ ! -x "$TARGET_EXEC" ]; then
-    exit 1
+    fail "despues de copiar no quedo el ejecutable $TARGET_EXEC"
 fi
+
+step "verificar la firma del bundle instalado"
 /usr/bin/codesign --verify --deep --strict "$TARGET_APP_PATH"
 xattr -dr com.apple.quarantine "$TARGET_APP_PATH" >/dev/null 2>&1 || true
 
+step "abrir la version nueva"
 "$TARGET_EXEC" >/dev/null 2>&1 &
 INSTALL_COMPLETE=true
 )MACHELPER");
 
+    // Espera ACOTADA de los procesos de fondo, y solo si la app declaro alguno: un `while pgrep`
+    // sin techo dejaria el helper colgado para siempre con la app ya cerrada. No corta el update
+    // si el proceso sigue vivo (mover el bundle no lo molesta), pero queda en el log.
+    QString backendWait;
+    for (const QString &pattern : m_config.macBackendProcessPatterns) {
+        QString quoted = pattern;
+        quoted.replace(QLatin1Char('\''), QStringLiteral("'\\''"));
+        backendWait += QStringLiteral(
+                           "for ((i = 0; i < 40; i++)); do\n"
+                           "    backend_alive '%1' || break\n"
+                           "    sleep 0.5\n"
+                           "done\n"
+                           "if backend_alive '%1'; then\n"
+                           "    log \"Sigue vivo despues de 20 s un proceso de fondo: %2\"\n"
+                           "fi\n")
+                           .arg(quoted, shellSafeText(pattern));
+    }
+
+    const QString updateLog = m_config.updateLogPath.isEmpty()
+        ? defaultMacUpdateLogPath(m_config.productId)
+        : m_config.updateLogPath;
+
     QString helperScript = helperTemplate;
+    helperScript.replace(QStringLiteral("__BACKEND_WAIT__"), backendWait);
+    helperScript.replace(QStringLiteral("__UPDATE_LOG__"),
+                         shellSafeText(updateLog));
     helperScript.replace(QStringLiteral("__PRODUCT_ID__"), m_config.productId);
     helperScript.replace(QStringLiteral("__DISPLAY_NAME__"), m_config.displayName);
     helperScript.replace(QStringLiteral("__RELAUNCH_WHEN_POSTPONED__"),
                          m_config.relaunchWhenUpdatePostponed ? QStringLiteral("true")
                                                               : QStringLiteral("false"));
+    helperScript.replace(QStringLiteral("__FORCE_CLOSE__"),
+                         m_config.closePolicy == LgaUpdateConfig::ClosePolicy::Force
+                             ? QStringLiteral("true")
+                             : QStringLiteral("false"));
 
     QSaveFile helperFile(helperPath);
     const QByteArray helperBytes = helperScript.toUtf8();
@@ -2061,6 +2583,7 @@ INSTALL_COMPLETE=true
 
     QStringList arguments;
     arguments << helperPath << installerPath << targetAppPath << executableName;
+    logUpdate(QStringLiteral("Lanzando helper: %1").arg(helperPath));
     if (!QProcess::startDetached("/bin/bash", arguments)) {
         setError(tr("Could not launch macOS update helper process."));
         return false;

@@ -47,6 +47,13 @@ struct LgaUpdateDialogSpec {
     Kind kind = Kind::Result;
     /// Glyph sugerido ("download", "refresh"). La app puede ignorarlo.
     QString iconName;
+    /**
+     * La version de la que habla el cartel, sin `v`: la ofrecida en `UpdatePrompt`, la instalada
+     * en el "What's New" de despues de instalar; vacia en el resto. Ya esta dentro de
+     * `messageHtml`; existe para el presentador que arma su propio texto (FileManagerS3 y
+     * PipeSync conservan "<App> <version> is available.").
+     */
+    QString version;
     QString title;
     QString messageHtml;
     /// Notas de version, para una caja con scroll. Vacio = sin notas.
