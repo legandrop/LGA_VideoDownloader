@@ -7,7 +7,6 @@
 #include "videodownloader/sessioncookies.h"
 #include "videodownloader/theme.h"
 #include "videodownloader/uishot.h"
-#include "videodownloader/updateservice.h"
 
 #include <QApplication>
 #include <QFile>
@@ -158,11 +157,11 @@ int main(int argc, char *argv[])
 
     // Captura de QA (--ui-shot): sale antes de migrar settings, registrarse o tocar red, asi
     // dibujar un estado no tiene ningun efecto sobre la instalacion del usuario.
-    // Ningun modo de QA barre las carpetas reales de instaladores del auto-update (%TEMP% y el
-    // fallback de LOCALAPPDATA son compartidos con la copia instalada).
+    // Ningun modo de QA barre las carpetas reales de instaladores del auto-update (%TEMP%, el
+    // fallback de LOCALAPPDATA y la de macOS son compartidos con la copia instalada).
     for (const QString &arg : app.arguments()) {
         if (arg.startsWith(QStringLiteral("--qa-")) || arg == QStringLiteral("--ui-shot")) {
-            UpdateService::disableAutoSweep();
+            MainWindow::setUpdateCacheSweepEnabled(false);
             break;
         }
     }
@@ -180,12 +179,6 @@ int main(int argc, char *argv[])
     }
     if (app.arguments().contains(QStringLiteral("--qa-tools-check"))) {
         return runToolsCheck(app.arguments());
-    }
-    if (app.arguments().contains(QStringLiteral("--qa-whats-new"))) {
-        return runWhatsNewCheck(app.arguments());
-    }
-    if (app.arguments().contains(QStringLiteral("--qa-whats-new-fetch"))) {
-        return runWhatsNewFetch(app.arguments());
     }
     if (app.arguments().contains(QStringLiteral("--ui-shot"))) {
         Theme::apply(app);

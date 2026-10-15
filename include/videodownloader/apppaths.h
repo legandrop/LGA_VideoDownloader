@@ -50,6 +50,15 @@ QStringList migrateToolsFolder(const QString &legacyDir, const QString &targetDi
 // visible (vacio si no hubo nada que hacer).
 QStringList migrateLegacyWindowsData();
 
+// Carpeta donde las versiones <= 0.95 bajaban el instalador del update en Windows
+// (`%TEMP%/LGA_VideoDownloader_updates`). El update actual baja a `heavyDataDir("updates")`.
+QString legacyTempUpdateDir();
+
+// Windows: borra de esa carpeta vieja los instaladores que quedaron (el nombre exacto, escritos
+// hace mas de 2 minutos) y la carpeta si queda vacia. Una carpeta que es un enlace no se toca.
+// En macOS no hace nada. Devuelve cuantos borro. Para fuera del hilo de UI.
+int sweepLegacyTempInstallers();
+
 } // namespace AppPaths
 
 #endif // APPPATHS_H

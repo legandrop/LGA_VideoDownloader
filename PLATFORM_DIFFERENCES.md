@@ -28,10 +28,10 @@ How the download tools, browser sessions and app updates behave on each platform
 
 ## App updates
 
-- `UpdateService` reads the latest GitHub release of `legandrop/LGA_VideoDownloader` and requires the asset hash in its `SHA256SUMS`.
-- **Windows:** downloads `VideoDownloader_Setup_v<version>.exe`, verifies it, stops the queue (killing yt-dlp and its children) and runs the installer silently over the same folder; the installer reopens the app.
-- **macOS:** "Update" opens the release page.
-- Development builds can check for updates but refuse to install.
+- `libs/lgaupdate` (shared by the LGA apps) reads the LGA versions manifest (`legandrop.github.io/LGA_Updates/versions.json`) and requires the asset SHA-256 published there. Details: `docs/Doc_Auto_Update.md`.
+- **Windows:** downloads `VideoDownloader_Setup_v<version>.exe`, verifies it, closes the app and opens the installer over the same folder; the installer reopens the app. While downloads are in the queue the update waits.
+- **macOS:** downloads `LGA_Video_Downloader_Mac_v<version>.zip`, verifies it, closes the app, checks the bundle signature, replaces the bundle in place and reopens it (restoring the previous bundle if anything fails).
+- Development builds never update themselves.
 
 ## Process control
 

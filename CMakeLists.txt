@@ -73,6 +73,11 @@ if(WIN32)
     endif()
 endif()
 
+# Auto-update de la app: libs/lgaupdate, la biblioteca compartida de las apps LGA (copia de la
+# de LGA_ThetaExplorer; origen y diferencias en libs/lgaupdate/README.md). Incluye el
+# `videodownloader/ConfirmDialog.h` de esta app para sus carteles.
+add_subdirectory(libs/lgaupdate)
+
 # Recursos
 set(RESOURCES
     resources/resources.qrc
@@ -96,12 +101,10 @@ set(SOURCES
     src/ui/queueview.cpp
     src/ui/logview.cpp
     src/ui/helpdialog.cpp
-    src/ui/whatsnewdialog.cpp
+    src/ui/confirmdialog.cpp
     src/ui/videopassworddialog.cpp
     src/qa/uishot.cpp
     src/core/downloadqueue.cpp
-    src/core/updateservice.cpp
-    src/core/whatsnew.cpp
     src/core/nativehost.cpp
     src/core/appinstance.cpp
     src/utils/apppaths.cpp
@@ -112,7 +115,6 @@ set(SOURCES
     src/utils/pecheck.cpp
     src/utils/toolsmanager.cpp
     src/utils/toolsupdater.cpp
-    src/utils/versioncompare.cpp
     src/utils/LgaRegistry.cpp
 )
 
@@ -127,7 +129,7 @@ set(HEADERS
     include/videodownloader/queueview.h
     include/videodownloader/logview.h
     include/videodownloader/helpdialog.h
-    include/videodownloader/whatsnewdialog.h
+    include/videodownloader/ConfirmDialog.h
     include/videodownloader/uishot.h
     include/videodownloader/apppaths.h
     include/videodownloader/browserdetect.h
@@ -136,10 +138,7 @@ set(HEADERS
     include/videodownloader/loglevel.h
     include/videodownloader/toolsmanager.h
     include/videodownloader/toolsupdater.h
-    include/videodownloader/updateservice.h
-    include/videodownloader/whatsnew.h
     include/videodownloader/updateurls.h
-    include/videodownloader/versioncompare.h
     include/videodownloader/LgaRegistry.h
     include/videodownloader/downloadqueue.h
     include/videodownloader/downloaditem.h
@@ -204,6 +203,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Gui
     Qt6::Widgets
     Qt6::Network
+    LGAUpdate
 )
 
 # Vincular con bibliotecas específicas de Windows

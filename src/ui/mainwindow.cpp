@@ -8,12 +8,13 @@
 #include "videodownloader/queueview.h"
 #include "videodownloader/tabheader.h"
 #include "videodownloader/toolsmanager.h"
-#include "videodownloader/updateservice.h"
+#include "videodownloader/apppaths.h"
+#include "videodownloader/uishot.h"
+#include "videodownloader/updateurls.h"
 #include "videodownloader/videopassworddialog.h"
 #include "videodownloader/LgaRegistry.h"
-#include "videodownloader/theme.h"
-#include "videodownloader/whatsnew.h"
-#include "videodownloader/whatsnewdialog.h"
+
+#include "lgaupdate/LgaUpdateService.h"
 
 #include <QApplication>
 #include <QClipboard>
@@ -22,13 +23,15 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QMessageBox>
+#include <QNetworkAccessManager>
+#include <QNetworkRequest>
 #include <QProcess>
-#include <QRandomGenerator>
 #include <QScreen>
 #include <QSettings>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
+#include <QThreadPool>
 #include <QVBoxLayout>
 
 namespace {
@@ -36,15 +39,8 @@ namespace {
 // Retraso del auto-update (tools y app) despues de construir la ventana: deja que la UI
 // termine de aparecer antes de meter trafico de red y procesos.
 constexpr int AUTO_UPDATE_DELAY_MS = 2000;
-
-// Chequeo periodico del update de la APP mientras sigue abierta: cada 3 horas con un desfase al
-// azar de +/-15 min, para que las maquinas de un estudio no consulten en el mismo segundo. Se
-// mide contra el reloj con un tick de 5 min (que no sale a la red): al volver de una suspension
-// el chequeo vencido corre enseguida. Si falla por red se reintenta a los 10 min.
-constexpr qint64 PERIODIC_UPDATE_INTERVAL_MS = 3LL * 60 * 60 * 1000;
-constexpr int PERIODIC_UPDATE_JITTER_MS = 15 * 60 * 1000;
-constexpr qint64 PERIODIC_UPDATE_RETRY_MS = 10LL * 60 * 1000;
-constexpr int PERIODIC_UPDATE_TICK_MS = 5 * 60 * 1000;
+// Segundo barrido de los restos del update (ver setupUpdates).
+constexpr int UPDATE_SWEEP_RETRY_MS = 5 * 60 * 1000;
 
 // Ancho del diseno aprobado. El alto es mayor que el del artboard (748 sin la barra del
 // sistema): con las tarjetas de cola, a 748 solo entran dos items y medio; a 860 entran cuatro.
@@ -55,12 +51,51 @@ constexpr int MIN_WIDTH = 900;
 constexpr int TITLE_BAR_ALLOWANCE = 40;
 
 bool g_automaticUpdates = true;
+bool g_updateCacheSweep = true;
+
+// Red del updater cuando LGA_VD_GITHUB_BASE apunta a un servidor local (UpdateUrls solo lo acepta
+// en localhost/127.0.0.1): el manifiesto de GitHub Pages y los assets de github.com se piden a ese
+// servidor, con la misma ruta. Es la forma de probar el update de punta a punta sin publicar.
+class LocalReleaseNetwork : public QNetworkAccessManager
+{
+public:
+    LocalReleaseNetwork(const QUrl &base, QObject *parent)
+        : QNetworkAccessManager(parent)
+        , m_base(base)
+    {
+    }
+
+protected:
+    QNetworkReply *createRequest(Operation op, const QNetworkRequest &request, QIODevice *data) override
+    {
+        const QString host = request.url().host().toLower();
+        if (host != QLatin1String("github.com") && host != QLatin1String("legandrop.github.io")) {
+            return QNetworkAccessManager::createRequest(op, request, data);
+        }
+        QUrl url = request.url();
+        url.setScheme(m_base.scheme());
+        url.setHost(m_base.host());
+        url.setPort(m_base.port());
+        url.setPath(m_base.path() + url.path());
+        QNetworkRequest local(request);
+        local.setUrl(url);
+        return QNetworkAccessManager::createRequest(op, local, data);
+    }
+
+private:
+    QUrl m_base;
+};
 
 } // namespace
 
 void MainWindow::setAutomaticUpdatesEnabled(bool enabled)
 {
     g_automaticUpdates = enabled;
+}
+
+void MainWindow::setUpdateCacheSweepEnabled(bool enabled)
+{
+    g_updateCacheSweep = enabled;
 }
 
 MainWindow::MainWindow(Mode mode, QWidget *parent)
@@ -153,7 +188,7 @@ void MainWindow::setupUi()
     layout->addWidget(content, 1);
 
     connect(m_tabHeader, &TabHeader::helpClicked, this, &MainWindow::openHelp);
-    connect(m_tabHeader, &TabHeader::updateNoticeClicked, this, &MainWindow::openHelp);
+    connect(m_tabHeader, &TabHeader::updateNoticeClicked, this, &MainWindow::offerAppUpdate);
     connect(m_tabHeader, &TabHeader::toolsNoticeClicked, this, [this]() {
         if (m_toolsManager && m_toolsManager->status() == ToolsManager::Status::Missing) {
             m_toolsManager->retryInstall();
@@ -214,44 +249,14 @@ void MainWindow::setupServices()
     });
     m_toolsManager->checkToolsInstallation();
 
-    // Update de la app: el hook corta la cola y mata yt-dlp con sus hijos antes del instalador.
-    m_updateService = new UpdateService(this);
-    m_updateService->setBeforeInstallHook([this]() {
-        if (m_downloadQueue) {
-            m_downloadQueue->stopAllForShutdown();
-        }
-    });
-    connect(m_updateService, &UpdateService::stateChanged, this, [this](UpdateService::State state) {
-        if (state == UpdateService::State::UpToDate || state == UpdateService::State::UpdateAvailable) {
-            m_lastUpdateCheck = QDateTime::currentDateTime();
-        }
-        if (state != UpdateService::State::Checking) {
-            if (state == UpdateService::State::CheckFailed && m_periodicUpdateCheckActive) {
-                // Al despertar de una suspension la red suele tardar en levantar.
-                schedulePeriodicUpdateCheck(PERIODIC_UPDATE_RETRY_MS, /*withJitter=*/false);
-            }
-            m_periodicUpdateCheckActive = false;
-        }
-        if (state == UpdateService::State::UpdateAvailable) {
-            log(QStringLiteral("Update available: v%1").arg(m_updateService->availableVersion()));
-        } else if (state == UpdateService::State::InstallFailed || state == UpdateService::State::CheckFailed) {
-            log(QStringLiteral("Update: %1").arg(m_updateService->errorString()), LogLevel::Warning);
-        }
-        refreshUpdateNotice();
-    });
-    connect(m_updateService, &UpdateService::installProgress, this, [this](qint64 received, qint64 total) {
-        m_installReceived = received;
-        m_installTotal = total;
-        if (m_helpDialog) {
-            m_helpDialog->setUpdateView(currentUpdateView());
-        }
-    });
     connect(m_toolsManager, &ToolsManager::toolVersionsChanged, this, [this]() {
         if (m_helpDialog) {
             m_helpDialog->setToolVersions(m_toolsManager->toolVersions());
         }
     });
-    connect(m_updateService, &UpdateService::notesChanged, this, &MainWindow::onNotesChanged);
+
+    // Update de la app: libs/lgaupdate, el mismo flujo que las otras apps LGA.
+    setupUpdates();
 
     // yt-dlp y deno se instalan/actualizan solos y en silencio; la app solo chequea.
     QTimer::singleShot(AUTO_UPDATE_DELAY_MS, this, [this]() {
@@ -260,18 +265,10 @@ void MainWindow::setupServices()
             log(QStringLiteral("Automatic updates are off for this run"), LogLevel::Warning);
             return;
         }
-        checkAfterInstallNotes();
         m_toolsManager->startAutomaticUpdate();
-        m_updateService->checkForUpdates();
-
-        // Despues del chequeo del arranque, el periodico: una app que queda abierta dias enteros
-        // no se enteraba nunca de una version nueva.
-        schedulePeriodicUpdateCheck(PERIODIC_UPDATE_INTERVAL_MS, /*withJitter=*/true);
-        auto *periodicTimer = new QTimer(this);
-        periodicTimer->setTimerType(Qt::VeryCoarseTimer);
-        periodicTimer->setInterval(PERIODIC_UPDATE_TICK_MS);
-        connect(periodicTimer, &QTimer::timeout, this, &MainWindow::onPeriodicUpdateTick);
-        periodicTimer->start();
+        // Primero las notas de una version instalada sin verlas, despues el chequeo del arranque y
+        // el periodico (cada 3 horas, +/-15 min) mientras la app siga abierta.
+        m_updateService->scheduleAutomaticCheck();
     });
     onToolsStatusChanged();
 }
@@ -582,197 +579,138 @@ void MainWindow::bringToFront()
     activateWindow();
 }
 
+void MainWindow::setupUpdates()
+{
+    LgaUpdateConfig config;
+    // Identifica los ASSETS del release, no el bundle ni el ejecutable, y no es el mismo en las dos
+    // plataformas: `LGA_Video_Downloader_Mac_v<x>.zip` (deploy.sh) y `VideoDownloader_Setup_v<x>.exe`
+    // (instalador.bat). El bundle se llama "LGA Video Downloader.app" y lgaupdate lo resuelve en
+    // runtime; el instalador de Windows no se renombra (decision del 2026-10-06).
+#ifdef Q_OS_MAC
+    config.productId = QStringLiteral("LGA_Video_Downloader");
+#else
+    config.productId = QStringLiteral("VideoDownloader");
+#endif
+    config.displayName = QStringLiteral("LGA Video Downloader");
+    config.releaseRepoSlug = QStringLiteral("legandrop/LGA_VideoDownloader");
+    config.windowsExecutableName = QStringLiteral("VideoDownloader.exe");
+    config.settingsPath = configPath();
+    // lgaupdate baja a `<updateCacheDir>/updates`: la misma carpeta de siempre, que sale de
+    // AppPaths (Windows: dentro de la instalacion o su fallback; macOS: fuera del bundle).
+    config.updateCacheDir = QFileInfo(AppPaths::heavyDataDir(QStringLiteral("updates"))).absolutePath();
+    config.automaticChecksEnabled = []() { return g_automaticUpdates; };
+    // Desde build/ el instalador de Windows recibiria `/DIR=<carpeta del build>` y se instalaria
+    // encima del arbol de desarrollo. Mismo criterio que el registro compartido de LGA.
+    config.updateBlockedReason = []() -> QString {
+        return LgaRegistry::isDevelopmentBuild() ? QStringLiteral("This is a development build: it does not update itself.")
+                                                 : QString();
+    };
+    config.installBlockedReason = [this]() { return updateInstallBlockedReason(); };
+    // El cartel de version nueva sale sobre la ventana principal, con su velo: Help se cierra.
+    config.prepareForUpdatePrompt = [this]() {
+        if (m_helpDialog) {
+            m_helpDialog->reject();
+        }
+        bringToFront();
+    };
+    config.quitApplication = [this]() {
+        if (m_downloadQueue && m_downloadQueue->activeDownloadCount() > 0) {
+            m_downloadQueue->stopAllForShutdown();
+        }
+        close();
+        QApplication::quit();
+    };
+    const QString localBase = UpdateUrls::githubBase();
+    if (UpdateUrls::isLocalOverride(QUrl(localBase))) {
+        // Prueba sin publicar: el manifiesto y los assets salen del servidor local.
+        config.networkFactory = [localBase](QObject *parent) -> QNetworkAccessManager * {
+            return new LocalReleaseNetwork(QUrl(localBase), parent);
+        };
+        log(QStringLiteral("Updates: using the local test server %1").arg(localBase), LogLevel::Warning);
+    }
+
+    // El barrido de lo que dejo un update anterior (el instalador o el ZIP no los borra nadie: la
+    // app ya se cerro cuando corren) va fuera del hilo de UI. Un build de desarrollo no barre: en
+    // macOS la carpeta es la misma de la copia instalada y podria llevarse una descarga en curso.
+    const bool sweep = g_updateCacheSweep && !LgaRegistry::isDevelopmentBuild();
+    if (sweep) {
+        const QString productId = config.productId;
+        const QString cacheRoot = config.updateCacheDir;
+        QThreadPool::globalInstance()->start([productId, cacheRoot]() {
+            LgaUpdateService::sweepUpdateCache(productId, cacheRoot);
+            AppPaths::sweepLegacyTempInstallers();
+        });
+    }
+
+    m_updateService = new LgaUpdateService(config, this);
+    if (sweep) {
+        // En Windows el [Run] del instalador abre la app nueva antes de que el setup termine: el
+        // barrido del arranque no puede borrar ese instalador (~85 MB), que esta en uso. Se repite
+        // una vez mas tarde, en el hilo de UI y sin update en curso, para no llevarse una descarga.
+        const QString cacheRoot = config.updateCacheDir;
+        QTimer::singleShot(UPDATE_SWEEP_RETRY_MS, this, [this, cacheRoot]() {
+            if (m_updateService && !m_updateService->isBusy()) {
+                LgaUpdateService::sweepUpdateCache(QString(), cacheRoot);
+            }
+        });
+    }
+    connect(m_updateService, &LgaUpdateService::checkStarted, this, [this]() {
+        m_updateChecking = true;
+        refreshUpdateNotice();
+    });
+    connect(m_updateService, &LgaUpdateService::checkFinished, this, [this]() {
+        m_updateChecking = false;
+        refreshUpdateNotice();
+    });
+    connect(m_updateService, &LgaUpdateService::updateAvailable, this, [this](const QString &version) {
+        if (version != m_availableVersion) {
+            log(QStringLiteral("Update available: v%1").arg(version));
+        }
+        m_availableVersion = version;
+        refreshUpdateNotice();
+    });
+    installQaUpdateAutoAccept(this);
+}
+
+QString MainWindow::updateInstallBlockedReason() const
+{
+    // El helper reemplaza la instalacion y la app se cierra: una descarga en curso se cortaria y
+    // perderia sus parciales. Se reevalua al elegir "Update now" y al terminar de bajar el update.
+    const int active = m_downloadQueue ? m_downloadQueue->activeDownloadCount() : 0;
+    if (active > 0) {
+        return QStringLiteral("%1 still in the queue. Let %2 finish, or cancel %2, and update again.")
+            .arg(active == 1 ? QStringLiteral("A download is") : QStringLiteral("%1 downloads are").arg(active),
+                 active == 1 ? QStringLiteral("it") : QStringLiteral("them"));
+    }
+    return QString();
+}
+
 UpdateView MainWindow::currentUpdateView() const
 {
     UpdateView view;
-    view.currentVersion = QStringLiteral(VIDEODOWNLOADER_VERSION);
-    view.installsInPlace = UpdateService::installsInPlace();
-    if (m_updateService) {
-        view.state = m_updateService->state();
-        view.availableVersion = m_updateService->availableVersion();
-        view.error = m_updateService->errorString();
-        view.blockedReason = m_updateService->installBlockedReason();
-    }
-    view.received = m_installReceived;
-    view.total = m_installTotal;
-    view.lastChecked = m_lastUpdateCheck;
-    // Lo nuevo entre la instalada y la ofrecida, en esta plataforma.
-    if (m_updateService && !view.availableVersion.isEmpty()
-        && m_updateService->notesStatus() == UpdateService::NotesStatus::Ready) {
-        const QList<WhatsNew::VersionNotes> range = WhatsNew::range(
-            m_updateService->notes(), view.currentVersion, view.availableVersion, WhatsNew::currentPlatform());
-        if (!range.isEmpty()) {
-            view.notesHtml = WhatsNew::toHtml(range);
-        }
+    view.availableVersion = m_availableVersion;
+    view.checking = m_updateChecking;
+    if (LgaRegistry::isDevelopmentBuild()) {
+        view.blockedReason = QStringLiteral("This is a development build: it does not update itself.");
     }
     return view;
 }
 
-QString MainWindow::historyHtml() const
-{
-    WhatsNew::Notes notes;
-    if (m_updateService && m_updateService->notesStatus() == UpdateService::NotesStatus::Ready) {
-        notes = m_updateService->notes();
-    } else {
-        notes = UpdateService::cachedNotes();
-    }
-    const QList<WhatsNew::VersionNotes> all = WhatsNew::range(notes, QString(), QString(), WhatsNew::currentPlatform());
-    if (!all.isEmpty()) {
-        return WhatsNew::toHtml(all);
-    }
-    if (notes.valid) {
-        // Cargaron, pero ninguna nota es de esta plataforma.
-        return QStringLiteral("<p>There are no release notes for this version yet.</p>");
-    }
-    if (m_updateService && m_updateService->notesStatus() == UpdateService::NotesStatus::Loading) {
-        return QStringLiteral("<p>Loading what's new…</p>");
-    }
-    return QStringLiteral("<p>What's new couldn't be loaded. <a href=\"https://github.com/legandrop/LGA_VideoDownloader/releases\" "
-                          "style=\"color:%1; text-decoration:none;\">See the releases on GitHub</a></p>")
-        .arg(QLatin1String(Theme::kLink));
-}
-
-void MainWindow::checkAfterInstallNotes()
-{
-    // Un build de desarrollo comparte config.ini con la copia instalada: si marcara sus notas
-    // como vistas, la instalada nunca las mostraria.
-    if (LgaRegistry::isDevelopmentBuild()) {
-        return;
-    }
-    const QString key = QStringLiteral("updates/whats_new_last_seen");
-    const QString current = QStringLiteral(VIDEODOWNLOADER_VERSION);
-    const QString lastSeen = m_settings->value(key).toString();
-    switch (WhatsNew::afterInstallAction(lastSeen, current)) {
-    case WhatsNew::AfterInstall::Nothing:
-        return;
-    case WhatsNew::AfterInstall::SaveOnly:
-        // Instalacion nueva: nada que contar.
-        m_settings->setValue(key, current);
-        return;
-    case WhatsNew::AfterInstall::Show:
-        break;
-    }
-    m_afterInstallFrom = lastSeen;
-    // Lo normal es que esten en la cache: las bajo el chequeo que ofrecio este update.
-    if (!showAfterInstallNotes(UpdateService::cachedNotes())) {
-        m_afterInstallPending = true;
-        m_updateService->fetchNotes(QStringLiteral("v" VIDEODOWNLOADER_VERSION));
-    }
-}
-
-bool MainWindow::showAfterInstallNotes(const WhatsNew::Notes &notes)
-{
-    const QString current = QStringLiteral(VIDEODOWNLOADER_VERSION);
-    bool hasCurrent = false;
-    for (const WhatsNew::VersionNotes &entry : notes.versions) {
-        hasCurrent = hasCurrent || WhatsNew::compareVersions(entry.version, current) == 0;
-    }
-    if (!notes.valid || !hasCurrent) {
-        return false;
-    }
-    m_settings->setValue(QStringLiteral("updates/whats_new_last_seen"), current);
-    const QList<WhatsNew::VersionNotes> range =
-        WhatsNew::range(notes, m_afterInstallFrom, current, WhatsNew::currentPlatform());
-    if (range.isEmpty()) {
-        return true;
-    }
-    const QString html = WhatsNew::toHtml(range);
-    // Fuera de la llamada: puede venir de una senal de red o del arranque.
-    QTimer::singleShot(0, this, [this, html]() {
-        WhatsNewDialog dialog(QStringLiteral(VIDEODOWNLOADER_VERSION), html, this);
-        dialog.execOver(this);
-    });
-    return true;
-}
-
-void MainWindow::onNotesChanged()
-{
-    refreshUpdateNotice();
-    if (m_helpDialog) {
-        m_helpDialog->setHistory(historyHtml());
-    }
-    if (!m_afterInstallPending || m_updateService->notesStatus() == UpdateService::NotesStatus::Loading) {
-        return;
-    }
-    m_afterInstallPending = false;
-    const UpdateService::NotesStatus status = m_updateService->notesStatus();
-    if (status == UpdateService::NotesStatus::Ready && showAfterInstallNotes(m_updateService->notes())) {
-        return;
-    }
-    // Sin red se reintenta en el proximo arranque; si el release no trae notas, no hay nada que
-    // esperar.
-    if (status != UpdateService::NotesStatus::Failed) {
-        m_settings->setValue(QStringLiteral("updates/whats_new_last_seen"), QStringLiteral(VIDEODOWNLOADER_VERSION));
-    }
-}
-
-void MainWindow::schedulePeriodicUpdateCheck(qint64 delayMs, bool withJitter)
-{
-    qint64 jitterMs = 0;
-    if (withJitter) {
-        jitterMs = QRandomGenerator::global()->bounded(2 * PERIODIC_UPDATE_JITTER_MS + 1)
-            - PERIODIC_UPDATE_JITTER_MS;
-    }
-    m_nextPeriodicUpdateCheckUtc = QDateTime::currentDateTimeUtc().addMSecs(qMax<qint64>(0, delayMs + jitterMs));
-}
-
-void MainWindow::onPeriodicUpdateTick()
-{
-    if (!m_updateService) {
-        return;
-    }
-    const QDateTime now = QDateTime::currentDateTimeUtc();
-    // Un reloj que se atraso (a mano o por zona) dejaria el proximo chequeo a dias de distancia.
-    if (now.msecsTo(m_nextPeriodicUpdateCheckUtc) > PERIODIC_UPDATE_INTERVAL_MS + PERIODIC_UPDATE_JITTER_MS) {
-        schedulePeriodicUpdateCheck(PERIODIC_UPDATE_INTERVAL_MS, /*withJitter=*/true);
-        return;
-    }
-    if (now < m_nextPeriodicUpdateCheckUtc) {
-        return;
-    }
-
-    // Solo si no hay nada que mostrar todavia: con un update ya ofrecido (o bajandose, o fallido)
-    // un chequeo nuevo pasaria por Checking y borraria el aviso del header mientras dura.
-    const UpdateService::State state = m_updateService->state();
-    if (state != UpdateService::State::Idle && state != UpdateService::State::UpToDate
-        && state != UpdateService::State::CheckFailed) {
-        schedulePeriodicUpdateCheck(PERIODIC_UPDATE_INTERVAL_MS, /*withJitter=*/true);
-        return;
-    }
-
-    schedulePeriodicUpdateCheck(PERIODIC_UPDATE_INTERVAL_MS, /*withJitter=*/true);
-    m_periodicUpdateCheckActive = true;
-    m_updateService->checkForUpdates();
-    if (m_updateService->state() != UpdateService::State::Checking) {
-        m_periodicUpdateCheckActive = false;
-    }
-}
-
 void MainWindow::refreshUpdateNotice()
 {
-    if (!m_updateService) {
-        return;
-    }
-    QString text;
-    switch (m_updateService->state()) {
-    case UpdateService::State::UpdateAvailable:
-        text = QStringLiteral("Update available · v%1").arg(m_updateService->availableVersion());
-        break;
-    case UpdateService::State::Downloading:
-        text = QStringLiteral("Downloading update…");
-        break;
-    case UpdateService::State::Installing:
-        text = QStringLiteral("Installing update…");
-        break;
-    case UpdateService::State::InstallFailed:
-        text = QStringLiteral("Update failed");
-        break;
-    default:
-        break;
-    }
-    m_tabHeader->setUpdateNotice(text);
+    m_tabHeader->setUpdateNotice(m_availableVersion.isEmpty() ? QString()
+                                                              : QStringLiteral("Update available · v%1").arg(m_availableVersion));
     if (m_helpDialog) {
         m_helpDialog->setUpdateView(currentUpdateView());
+    }
+}
+
+void MainWindow::offerAppUpdate()
+{
+    // El chequeo manual muestra el cartel con las notas y Update now, aunque esta version se haya
+    // pospuesto. Si ya hay un cartel o una descarga en curso, lgaupdate lo dice.
+    if (m_updateService) {
+        m_updateService->checkForUpdates(true);
     }
 }
 
@@ -788,24 +726,14 @@ void MainWindow::openHelp()
         m_toolsManager->refreshToolVersions();
     }
     dialog.setUpdateView(currentUpdateView());
-    dialog.setHistory(historyHtml());
     connect(&dialog, &HelpDialog::whatsNewRequested, this, [this]() {
-        // Sin notas en memoria ni en cache: se piden las de la version que corre.
-        if (m_updateService && m_updateService->notesStatus() != UpdateService::NotesStatus::Ready
-            && m_updateService->notesStatus() != UpdateService::NotesStatus::Loading
-            && !UpdateService::cachedNotes().valid) {
-            m_updateService->fetchNotes(QStringLiteral("v" VIDEODOWNLOADER_VERSION));
-        }
-        if (m_helpDialog) {
-            m_helpDialog->setHistory(historyHtml());
-        }
-    });
-    connect(&dialog, &HelpDialog::checkRequested, this, [this]() {
+        // Historial completo, sobre Help. Sin red usa la ultima copia verificada.
         if (m_updateService) {
-            m_updateService->checkForUpdates();
+            m_updateService->showWhatsNewHistory(m_helpDialog);
         }
     });
-    connect(&dialog, &HelpDialog::installRequested, this, &MainWindow::requestAppInstall);
+    connect(&dialog, &HelpDialog::checkRequested, this, &MainWindow::offerAppUpdate);
+    connect(&dialog, &HelpDialog::installRequested, this, &MainWindow::offerAppUpdate);
     connect(&dialog, &HelpDialog::openExtensionFolderRequested, this, [this]() {
         const QString folder = HostRegistration::extensionFolder();
         if (!QFileInfo(folder).isDir()) {
@@ -814,40 +742,8 @@ void MainWindow::openHelp()
         }
         QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
     });
-    connect(&dialog, &HelpDialog::cancelInstallRequested, this, [this]() {
-        if (m_updateService) {
-            m_updateService->cancelInstall();
-        }
-    });
     dialog.execOver(this);
     m_helpDialog = nullptr;
-}
-
-void MainWindow::requestAppInstall()
-{
-    if (!m_updateService) {
-        return;
-    }
-    const int active = m_downloadQueue ? m_downloadQueue->activeDownloadCount() : 0;
-    QWidget *parent = m_helpDialog ? static_cast<QWidget *>(m_helpDialog.data()) : this;
-    if (active > 0 && UpdateService::installsInPlace()) {
-        const auto answer = QMessageBox::question(parent, QStringLiteral("Update"),
-            QStringLiteral("Updating will stop %1 active download(s). Continue?").arg(active),
-            QMessageBox::Yes | QMessageBox::Cancel, QMessageBox::Cancel);
-        if (answer != QMessageBox::Yes) {
-            return;
-        }
-    }
-    m_installReceived = -1;
-    m_installTotal = -1;
-    // Las notas de este update ya estaban a la vista en Help: la version nueva no las vuelve a
-    // mostrar al arrancar. Un build de desarrollo no instala ni toca la marca.
-    if (m_updateService->notesStatus() == UpdateService::NotesStatus::Ready && !LgaRegistry::isDevelopmentBuild()
-        && !m_updateService->availableVersion().isEmpty()) {
-        m_settings->setValue(QStringLiteral("updates/whats_new_last_seen"), m_updateService->availableVersion());
-        m_settings->sync();
-    }
-    m_updateService->installAppUpdate();
 }
 
 bool MainWindow::isValidDownloadPath(const QString &path)

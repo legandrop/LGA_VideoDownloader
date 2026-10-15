@@ -1,14 +1,11 @@
 #include "videodownloader/helpdialog.h"
 #include "videodownloader/theme.h"
 #include "videodownloader/uiwidgets.h"
-#include "videodownloader/whatsnewdialog.h"
 
 #include <QEvent>
-#include <QTextBrowser>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
-#include <QProgressBar>
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QVBoxLayout>
@@ -17,11 +14,6 @@ namespace {
 
 constexpr int DIALOG_WIDTH = 520;
 constexpr int KEY_COLUMN = 96;
-constexpr int CONTENT_WIDTH = DIALOG_WIDTH - 44;
-// Notas debajo del update: acotadas para que la ayuda siga entrando en una pantalla chica. El
-// historial ocupa el lugar de la extension y los creditos, asi que puede ser mas alto.
-constexpr int RANGE_NOTES_MAX_HEIGHT = 220;
-constexpr int HISTORY_MAX_HEIGHT = 420;
 
 // Los links del Help van en #8C7ED9 sin subrayar: el mismo link a lega.com.ar en todas las apps.
 constexpr const char *HELP_LINK_COLOR = "#8C7ED9";
@@ -65,11 +57,6 @@ QLabel *linkLabel(const QString &url, const QString &text, QWidget *parent)
     l->setOpenExternalLinks(true);
     l->setTextInteractionFlags(Qt::TextBrowserInteraction);
     return l;
-}
-
-QString mib(qint64 bytes)
-{
-    return QString::number(bytes / (1024.0 * 1024.0), 'f', 1);
 }
 
 QHBoxLayout *keyValueRow(const QString &key, const char *keyName)
@@ -129,7 +116,7 @@ HelpDialog::HelpDialog(QWidget *parent)
     titleRow->addWidget(label(QStringLiteral("LGA Video Downloader"), "helpTitle", this), 0, Qt::AlignBaseline);
     titleRow->addWidget(label(QStringLiteral("v" VIDEODOWNLOADER_VERSION), "helpVersion", this), 0, Qt::AlignBaseline);
     titleRow->addSpacing(6);
-    m_whatsNewLink = label(QString(), "whatsNewLink", this);
+    m_whatsNewLink = label(link(QStringLiteral("#whats-new"), QStringLiteral("What's new")), "whatsNewLink", this);
     m_whatsNewLink->setTextFormat(Qt::RichText);
     titleRow->addWidget(m_whatsNewLink, 0, Qt::AlignBaseline);
     titleRow->addStretch(1);
@@ -139,7 +126,8 @@ HelpDialog::HelpDialog(QWidget *parent)
     titleRow->addWidget(close, 0, Qt::AlignVCenter);
     layout->addLayout(titleRow);
 
-    // Caja del update: solo cuando hay algo que hacer (disponible, bajando, instalando, fallo).
+    // Caja del update: solo cuando un chequeo encontro una version nueva. La descarga y la
+    // instalacion siguen en los carteles de lgaupdate.
     m_updateBox = new QFrame(this);
     m_updateBox->setObjectName(QStringLiteral("updateBox"));
     auto *updateLayout = new QHBoxLayout(m_updateBox);
@@ -153,28 +141,17 @@ HelpDialog::HelpDialog(QWidget *parent)
     m_updateTitle = label(QString(), "updateTitle", m_updateBox);
     m_updateCaption = label(QString(), "caption", m_updateBox);
     m_updateCaption->setWordWrap(true);
-    m_updateProgress = new QProgressBar(m_updateBox);
-    m_updateProgress->setObjectName(QStringLiteral("updateProgress"));
-    m_updateProgress->setTextVisible(false);
-    m_updateProgress->setRange(0, 1000);
     texts->addWidget(m_updateTitle);
-    texts->addWidget(m_updateProgress);
     texts->addWidget(m_updateCaption);
     updateLayout->addLayout(texts, 1);
     auto *buttons = new QHBoxLayout();
     buttons->setSpacing(6);
     m_later = Ui::button(QStringLiteral("Later"), QStringLiteral("ghost"), QStringLiteral("sm"), m_updateBox);
     m_install = Ui::button(QStringLiteral("Update"), QStringLiteral("primary"), QStringLiteral("sm"), m_updateBox);
-    m_cancelInstall = Ui::button(QStringLiteral("Cancel"), QString(), QStringLiteral("sm"), m_updateBox);
     buttons->addWidget(m_later);
     buttons->addWidget(m_install);
-    buttons->addWidget(m_cancelInstall);
     updateLayout->addLayout(buttons);
     layout->addWidget(m_updateBox);
-
-    // Notas: lo nuevo del update ofrecido, o el historial completo si se abrio "What's new".
-    m_notesView = NotesView::create(this);
-    layout->addWidget(m_notesView);
 
     // Fila "Updates": ultimo chequeo y boton para chequear
     auto *updatesRow = keyValueRow(QStringLiteral("Updates"), "kvKey");
@@ -194,9 +171,9 @@ HelpDialog::HelpDialog(QWidget *parent)
     authorRow->addWidget(author, 1);
     layout->addLayout(authorRow);
 
-    // Extension y creditos: el historial de "What's new" ocupa su lugar mientras esta abierto.
-    m_details = new QWidget(this);
-    auto *details = new QVBoxLayout(m_details);
+    // Extension y creditos.
+    auto *detailsWidget = new QWidget(this);
+    auto *details = new QVBoxLayout(detailsWidget);
     details->setContentsMargins(0, 0, 0, 0);
     details->setSpacing(12);
 
@@ -266,7 +243,7 @@ HelpDialog::HelpDialog(QWidget *parent)
         details->addLayout(row);
     }
     details->addWidget(label(QStringLiteral("Each tool is distributed under its own license."), "caption", this));
-    layout->addWidget(m_details);
+    layout->addWidget(detailsWidget);
 
     auto *footer = new QHBoxLayout();
     footer->setContentsMargins(0, 4, 0, 0);
@@ -282,14 +259,8 @@ HelpDialog::HelpDialog(QWidget *parent)
     connect(m_later, &QPushButton::clicked, this, &QDialog::reject);
     connect(m_check, &QPushButton::clicked, this, &HelpDialog::checkRequested);
     connect(m_install, &QPushButton::clicked, this, &HelpDialog::installRequested);
-    connect(m_cancelInstall, &QPushButton::clicked, this, &HelpDialog::cancelInstallRequested);
     connect(openExtension, &QPushButton::clicked, this, &HelpDialog::openExtensionFolderRequested);
-    connect(m_whatsNewLink, &QLabel::linkActivated, this, [this]() {
-        setHistoryVisible(!m_showHistory);
-        if (m_showHistory) {
-            emit whatsNewRequested();
-        }
-    });
+    connect(m_whatsNewLink, &QLabel::linkActivated, this, &HelpDialog::whatsNewRequested);
 
     setToolVersions({});
     setUpdateView(UpdateView());
@@ -315,150 +286,41 @@ void HelpDialog::setToolVersions(const QMap<QString, QString> &versions)
 
 void HelpDialog::setUpdateView(const UpdateView &view)
 {
-    using State = UpdateService::State;
-    QString dot = QLatin1String(Theme::kAccent);
-    QString title;
-    QString caption;
-    bool box = false;
-    bool accent = true;
-    bool showInstall = false;
-    bool showLater = false;
-    bool showCancel = false;
-    bool showProgress = false;
-    QString installText = QStringLiteral("Update");
-
-    const QString checked = view.lastChecked.isValid()
-        ? (view.lastChecked.date() == QDate::currentDate()
-               ? QStringLiteral("checked today at %1").arg(view.lastChecked.toString(QStringLiteral("HH:mm")))
-               : QStringLiteral("checked on %1").arg(view.lastChecked.toString(QStringLiteral("yyyy-MM-dd HH:mm"))))
-        : QString();
-    const auto capitalized = [](QString text) {
-        if (!text.isEmpty()) {
-            text[0] = text.at(0).toUpper();
-        }
-        return text;
-    };
-    QString status = checked.isEmpty() ? QStringLiteral("Not checked yet") : capitalized(checked);
-    bool canCheck = true;
-
-    switch (view.state) {
-    case State::Idle:
-        break;
-    case State::Checking:
+    // Sin hora del ultimo chequeo: lgaupdate no informa si termino bien o fallo, y "Last checked"
+    // despues de un chequeo sin red diria algo que no paso. El resultado de un Check now lo
+    // muestra su cartel.
+    QString status = QStringLiteral("Checked automatically every few hours");
+    if (!view.blockedReason.isEmpty()) {
+        status = view.blockedReason;
+    } else if (view.checking) {
         status = QStringLiteral("Checking for updates…");
-        canCheck = false;
-        break;
-    case State::UpToDate:
-        status = checked.isEmpty() ? QStringLiteral("Up to date") : QStringLiteral("Up to date · %1").arg(checked);
-        break;
-    case State::CheckFailed:
-        status = QStringLiteral("Couldn't check: %1").arg(view.error);
-        break;
-    case State::UpdateAvailable:
-        box = true;
-        title = QStringLiteral("Update available · v%1").arg(view.availableVersion);
-        caption = !view.blockedReason.isEmpty() ? view.blockedReason
-                  : view.installsInPlace ? QStringLiteral("Closes the app, installs and opens it again")
-                                         : QStringLiteral("Opens the download page");
-        showLater = true;
-        showInstall = true;
-        break;
-    case State::Downloading:
-        box = true;
-        title = QStringLiteral("Downloading update · v%1").arg(view.availableVersion);
-        showProgress = true;
-        caption = view.total > 0 ? QStringLiteral("%1 of %2 MiB").arg(mib(view.received), mib(view.total))
-                                 : QStringLiteral("Starting download…");
-        showCancel = true;
-        canCheck = false;
-        break;
-    case State::Installing:
-        box = true;
-        title = QStringLiteral("Installing update…");
-        caption = QStringLiteral("The app will close and open again by itself");
-        canCheck = false;
-        break;
-    case State::InstallFailed:
-        box = true;
-        accent = false;
-        dot = QLatin1String(Theme::kError);
-        title = QStringLiteral("The update failed");
-        caption = view.error;
-        showInstall = true;
-        installText = QStringLiteral("Try again");
-        break;
     }
 
+    const bool box = !view.availableVersion.isEmpty();
     m_updateBox->setVisible(box);
-    m_dot->setStyleSheet(QStringLiteral("background-color: %1; border-radius: 4px;").arg(dot));
-    m_updateTitle->setText(title);
-    m_updateCaption->setText(caption);
-    m_updateCaption->setVisible(!caption.isEmpty());
-    m_updateProgress->setVisible(showProgress);
-    if (showProgress) {
-        m_updateProgress->setValue(view.total > 0 ? int(view.received * 1000 / view.total) : 0);
-    }
-    m_install->setText(installText);
-    m_install->setVisible(showInstall);
-    m_install->setEnabled(view.blockedReason.isEmpty());
-    // Enter ejecuta la accion principal y ese boton va siempre marcado: Update (o Try again) si
-    // se puede instalar; si no, Close.
-    const bool installIsEnter = showInstall && view.blockedReason.isEmpty();
+    m_dot->setStyleSheet(QStringLiteral("background-color: %1; border-radius: 4px;").arg(QLatin1String(Theme::kAccent)));
+    m_updateTitle->setText(QStringLiteral("Update available · v%1").arg(view.availableVersion));
+#ifdef Q_OS_WIN
+    // En Windows lgaupdate abre el wizard del instalador (no lo corre en silencio).
+    const QString installCaption = QStringLiteral("Closes the app and opens the installer");
+#else
+    const QString installCaption = QStringLiteral("Closes the app, installs and opens it again");
+#endif
+    m_updateCaption->setText(!view.blockedReason.isEmpty() ? view.blockedReason : installCaption);
+    m_install->setVisible(box);
+    m_install->setEnabled(view.blockedReason.isEmpty() && !view.checking);
+    // Enter ejecuta la accion principal y ese boton va siempre marcado: Update si se puede
+    // instalar; si no, Close.
+    const bool installIsEnter = box && m_install->isEnabled();
     Ui::setEnterButton(m_install, installIsEnter);
     Ui::setEnterButton(m_closeButton, !installIsEnter);
-    m_later->setVisible(showLater);
-    m_cancelInstall->setVisible(showCancel);
+    m_later->setVisible(box);
     m_checkStatus->setText(status);
-    m_check->setEnabled(canCheck);
-    if (m_updateBox->property("accent").toBool() != accent) {
-        m_updateBox->setProperty("accent", accent);
+    m_check->setEnabled(view.blockedReason.isEmpty() && !view.checking);
+    if (!m_updateBox->property("accent").toBool()) {
+        m_updateBox->setProperty("accent", true);
         Ui::repolish(m_updateBox);
     }
-    m_boxVisible = box;
-    m_rangeHtml = view.notesHtml;
-    refreshNotes();
-}
-
-void HelpDialog::setHistory(const QString &html)
-{
-    m_historyHtml = html;
-    refreshNotes();
-}
-
-void HelpDialog::setHistoryVisible(bool visible)
-{
-    m_showHistory = visible;
-    refreshNotes();
-}
-
-void HelpDialog::refreshNotes()
-{
-    m_whatsNewLink->setText(link(QStringLiteral("#whats-new"),
-                                 m_showHistory ? QStringLiteral("Hide what's new") : QStringLiteral("What's new")));
-    m_details->setVisible(!m_showHistory);
-    const QString html = m_showHistory ? m_historyHtml : (m_boxVisible ? m_rangeHtml : QString());
-    // Mismo contenido (cada tick del progreso de la descarga pasa por aca): no se recarga, asi no
-    // vuelve el scroll arriba mientras se lee.
-    const QString key = (m_showHistory ? QStringLiteral("history:") : QStringLiteral("range:")) + html;
-    if (key == m_shownNotesKey) {
-        fitHeight();
-        return;
-    }
-    m_shownNotesKey = key;
-    m_notesView->setVisible(false);
-    fitHeight();
-    if (html.isEmpty()) {
-        return;
-    }
-    // El dialogo no puede pasar el alto de la ventana: las notas se quedan con lo que sobra, entre
-    // un piso legible y su tope. Lo que no entra se lee con el scroll del bloque.
-    int maxHeight = m_showHistory ? HISTORY_MAX_HEIGHT : RANGE_NOTES_MAX_HEIGHT;
-    if (parentWidget()) {
-        const int spare = parentWidget()->window()->height() - 64 - height() - layout()->spacing();
-        maxHeight = qBound(m_showHistory ? 160 : 90, spare, maxHeight);
-    }
-    m_notesView->setVisible(true);
-    NotesView::setHtml(m_notesView, html, CONTENT_WIDTH, maxHeight);
     fitHeight();
 }
 

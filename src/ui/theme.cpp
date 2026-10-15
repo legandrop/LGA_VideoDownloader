@@ -230,10 +230,9 @@ QLabel#kvKeyStrong { color: @textBright; font-size: @fs13; font-weight: 500; }
 QLabel#kvValue { color: @text; font-size: @fs13; }
 QLabel#helpBody { color: #a9a9ae; font-size: @fs13; }
 QFrame#helpRule { background-color: @border; border: none; min-height: 1px; max-height: 1px; }
-QProgressBar#updateProgress { background-color: @progressTrack; border: 1px solid @progressBorder; border-radius: 4px; min-height: 8px; max-height: 8px; }
-QProgressBar#updateProgress::chunk { background-color: @progressFill; border-radius: 3px; }
 QPushButton[enterMark="true"] { border: 1px solid #3B316A; }
 QTextBrowser#whatsNewNotes { background-color: @field; border: 1px solid @fieldBorder; border-radius: 6px; color: #a9a9ae; font-size: @fs13; }
+QPlainTextEdit#confirmDetails { background-color: @field; border: 1px solid @fieldBorder; border-radius: 6px; color: @textCaption; font-size: @fs12; }
 QLabel#whatsNewLink { font-size: @fs13; }
 )QSS");
 
@@ -243,7 +242,6 @@ QLabel#whatsNewLink { font-size: @fs13; }
         {"@textStrong", kTextStrong}, {"@textTitle", kTextTitle}, {"@textBright", kTextBright},
         {"@textMuted", kTextMuted}, {"@textCaption", kTextCaption}, {"@textFaint", kTextFaint},
         {"@text", kText}, {"@ok", kOk}, {"@warn", kWarn}, {"@error", kError}, {"@run", kRun},
-        {"@progressTrack", kProgressTrack}, {"@progressBorder", kProgressBorder}, {"@progressFill", kProgressFill},
         {"@fs13_5", fs(13.5)}, {"@fs12_5", fs(12.5)}, {"@fs11_5", fs(11.5)},
         {"@fs18", fs(18)}, {"@fs15", fs(15)}, {"@fs14", fs(14)}, {"@fs13", fs(13)}, {"@fs12", fs(12)},
     };

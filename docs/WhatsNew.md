@@ -16,8 +16,7 @@ platforms: [win, mac]
 - [new] Paste several links at once, or any text that contains them: each link becomes a card in the queue with its own progress, cancel and retry.
 - [new] Choose between MP4 video or audio only (M4A); the default "Most compatible" quality gives H.264 files that open in any editor.
 - [improved] Private videos no longer need a Vimeo username and password: the app uses the session of a browser where you are already logged in, or a cookies.txt file, and the old saved password is deleted.
-- [new][win] The app checks for new versions and installs them for you in one click.
-- [new][mac] The app tells you when a new version is available.
+- [new] When a new version is out, the app shows what changed and installs it for you; you can also be reminded tomorrow or skip that version.
 - [new] Update notices show what's new in each version, and Help has the full history. The app checks for a new version every few hours while it stays open, not only at startup.
 - [new] yt-dlp and the other download tools update themselves in the background, so sites that change keep working without reinstalling.
 - [improved] Errors explain what went wrong and how to fix it, for example when a video needs you to sign in or a site isn't supported; live streams and scheduled premieres are skipped with a clear message.

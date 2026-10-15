@@ -152,6 +152,13 @@ publish_release() {
         return 1
     fi
     echo "Release publicado: https://github.com/${RELEASE_REPO}/releases/tag/${tag}"
+    # El auto-update lee el manifiesto de legandrop/LGA_Updates: sin este disparo, la version
+    # nueva tarda hasta que corra su cron (30-45 min). Si falla, el cron la levanta igual.
+    if "$GH" workflow run refresh_versions.yml --repo legandrop/LGA_Updates >/dev/null 2>&1 </dev/null; then
+        echo "Manifiesto de versiones: refresco disparado."
+    else
+        echo "AVISO: no se pudo disparar el refresco del manifiesto. El cron lo levanta solo."
+    fi
 }
 
 # ==== PUBLICAR: fin

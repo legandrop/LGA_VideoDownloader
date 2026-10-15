@@ -2,6 +2,7 @@
 #include "videodownloader/toolsupdater.h"
 
 #include <QCoreApplication>
+#include <QDateTime>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -16,7 +17,12 @@
 #include <QSaveFile>
 #include <QStandardPaths>
 #include <QTemporaryFile>
+#include <QTimeZone>
 #include <QVersionNumber>
+
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
 
 namespace {
 
@@ -397,6 +403,49 @@ QStringList migrateLegacyWindowsData()
     }
 #endif
     return lines;
+}
+
+QString legacyTempUpdateDir()
+{
+    return QDir(QStandardPaths::writableLocation(QStandardPaths::TempLocation))
+        .filePath(QStringLiteral("LGA_VideoDownloader_updates"));
+}
+
+int sweepLegacyTempInstallers()
+{
+    int removed = 0;
+#ifdef Q_OS_WIN
+    // Solo el nombre exacto del instalador, con version numerica: un comodin se llevaria
+    // "..._v0.8 (copia).exe". Y solo los escritos hace mas de 2 minutos: una copia v0.95 que siga
+    // instalada en la maquina todavia baja ahi y puede estar verificando uno recien bajado.
+    static const QRegularExpression installer(QStringLiteral("^VideoDownloader_Setup_v[0-9]+(\\.[0-9]+)*\\.exe$"));
+    constexpr qint64 kMinAgeSecs = 2 * 60;
+    const QString path = legacyTempUpdateDir();
+    const QFileInfo info(path);
+    if (!info.isDir()) {
+        return 0;
+    }
+    // Un enlace (junction o symlink) llevaria el borrado a una carpeta que no es de la app.
+    const DWORD attributes = GetFileAttributesW(reinterpret_cast<const wchar_t *>(QDir::toNativeSeparators(path).utf16()));
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        qWarning() << "[AppPaths] La carpeta vieja de updates es un enlace, no se barre:" << path;
+        return 0;
+    }
+    const QDateTime now = QDateTime::currentDateTimeUtc();
+    for (const QFileInfo &entry : QDir(path).entryInfoList(QDir::Files | QDir::Hidden | QDir::NoSymLinks)) {
+        if (!installer.match(entry.fileName()).hasMatch()
+            || entry.lastModified(QTimeZone::UTC).secsTo(now) < kMinAgeSecs) {
+            continue;
+        }
+        if (QFile::remove(entry.absoluteFilePath())) {
+            ++removed;
+            qDebug() << "[AppPaths] Instalador viejo borrado" << entry.absoluteFilePath();
+        }
+    }
+    // rmdir solo borra una carpeta vacia: si queda cualquier otra cosa, no pasa nada.
+    QDir().rmdir(path);
+#endif
+    return removed;
 }
 
 } // namespace AppPaths

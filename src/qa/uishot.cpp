@@ -14,10 +14,11 @@
 #include "videodownloader/sessioncookies.h"
 #include "videodownloader/toolsmanager.h"
 #include "videodownloader/toolsupdater.h"
-#include "videodownloader/updateservice.h"
 #include "videodownloader/updateurls.h"
-#include "videodownloader/whatsnew.h"
-#include "videodownloader/whatsnewdialog.h"
+#include "videodownloader/ConfirmDialog.h"
+
+#include "lgaupdate/LgaUpdateService.h"
+#include "lgaupdate/LgaWhatsNew.h"
 
 #include <QAbstractButton>
 #include <QApplication>
@@ -51,19 +52,55 @@ namespace {
 
 const QStringList kStates = {
     QStringLiteral("empty"), QStringLiteral("downloading"), QStringLiteral("error"), QStringLiteral("tools"),
-    QStringLiteral("help"), QStringLiteral("help-update"), QStringLiteral("help-downloading"),
-    QStringLiteral("other-errors"), QStringLiteral("help-update-notes"), QStringLiteral("help-history"),
-    QStringLiteral("after-install"),
+    QStringLiteral("help"), QStringLiteral("help-update"), QStringLiteral("other-errors"),
+    QStringLiteral("update-prompt"), QStringLiteral("whats-new"), QStringLiteral("update-failed"),
 };
 
 // Notas de prueba para los estados que las muestran: `--notes <whats_new.json>`.
-WhatsNew::Notes fixtureNotes(const QStringList &args)
+LgaWhatsNew::Notes fixtureNotes(const QStringList &args)
 {
     QFile file(args.value(args.indexOf(QStringLiteral("--notes")) + 1));
     if (!args.contains(QStringLiteral("--notes")) || !file.open(QIODevice::ReadOnly)) {
         return {};
     }
-    return WhatsNew::parse(file.readAll(), QStringLiteral("legandrop/LGA_VideoDownloader"));
+    return LgaWhatsNew::parse(file.readAll());
+}
+
+// Los carteles de lgaupdate con los mismos textos que arma LgaUpdateService (que no los expone):
+// si cambian alla, hay que cambiarlos aca para que la captura siga mostrando lo real.
+ConfirmDialog::Spec updatePromptSpec(const QString &offered, const QString &current, const QString &notesHtml)
+{
+    ConfirmDialog::Spec spec;
+    spec.iconName = QStringLiteral("download");
+    spec.title = QStringLiteral("Update Available");
+    spec.subtitle = QStringLiteral("A new version of LGA Video Downloader is available: <b>%1</b>.<br><br>"
+                                   "You are currently running version <b>%2</b>.<br><br>"
+                                   "<b>Save your work and close every other LGA Video Downloader window before updating.</b>")
+                        .arg(offered, current);
+    spec.hintHtml = QStringLiteral("<b>U</b> Update now · <b>R</b> Remind me later · <b>S</b> Skip this version<br>"
+                                   "<b>Enter</b> / <b>Esc</b> / <b>C</b> Cancel");
+    spec.buttons = {{QStringLiteral("&Update now"), ConfirmDialog::ButtonStyle::Action, Qt::Key_U},
+                    {QStringLiteral("&Remind me later"), ConfirmDialog::ButtonStyle::Neutral, Qt::Key_R},
+                    {QStringLiteral("&Skip this version"), ConfirmDialog::ButtonStyle::Neutral, Qt::Key_S},
+                    {QStringLiteral("&Cancel"), ConfirmDialog::ButtonStyle::Neutral, Qt::Key_C}};
+    spec.defaultIndex = 3;
+    spec.escapeIndex = 3;
+    spec.contentHtml = notesHtml;
+    return spec;
+}
+
+ConfirmDialog::Spec okSpec(const QString &title, const QString &message, const QString &notesHtml, const QString &details)
+{
+    ConfirmDialog::Spec spec;
+    spec.title = title;
+    spec.subtitle = message;
+    spec.contentHtml = notesHtml;
+    spec.details = details;
+    spec.hintHtml = QStringLiteral("<b>Enter</b> / <b>Esc</b> / <b>O</b> OK");
+    spec.buttons = {{QStringLiteral("&OK"), ConfirmDialog::ButtonStyle::Action, Qt::Key_O}};
+    spec.defaultIndex = 0;
+    spec.escapeIndex = 0;
+    return spec;
 }
 
 constexpr int SHOT_WIDTH = 1200;
@@ -370,14 +407,24 @@ int runUpdateDirsCheck(const QStringList &args)
     bool fallback = false;
     const QString resolved = AppPaths::chooseHeavyDataDir(QDir(appDir).filePath(QStringLiteral("updates")),
                                                           fallbackDir, &fallback);
+    // La app le pasa a lgaupdate la carpeta de arriba: el componente agrega `updates`. Si la
+    // carpeta resuelta no se llama asi, el barrido caeria en OTRA carpeta (`<padre>/updates`).
+    if (QFileInfo(resolved).fileName() != QLatin1String("updates")) {
+        fprintf(stderr, "qa-update-dirs: the fallback folder must be named 'updates', like the app's\n");
+        return 2;
+    }
+    const QString cacheRoot = QFileInfo(resolved).absolutePath();
     fprintf(stdout, "resolved %s fallback=%d\n", qPrintable(QDir::toNativeSeparators(resolved)), fallback ? 1 : 0);
-    fprintf(stdout, "temp %s\n", qPrintable(QDir::toNativeSeparators(UpdateService::legacyTempUpdateDir())));
+    fprintf(stdout, "lgaupdate %s\n", qPrintable(QDir::toNativeSeparators(LgaUpdateService::resolveUpdateDir(cacheRoot))));
+    fprintf(stdout, "temp %s\n", qPrintable(QDir::toNativeSeparators(AppPaths::legacyTempUpdateDir())));
 
-    // El barrido del arranque, sobre las carpetas de prueba y la de %TEMP% (TMP/TEMP del proceso).
-    const QStringList dirs = UpdateService::installerSweepDirs(appDir, fallbackDir);
-    const int removed = UpdateService::removeOldInstallers(dirs, QString());
-    fprintf(stdout, "removed %d\n", removed);
-    for (const QString &dir : dirs) {
+    // El barrido del arranque: la carpeta propia (lgaupdate la vacia entera) y la de %TEMP% de las
+    // versiones <= 0.95 (TMP/TEMP del proceso). NO se corre el barrido de la ubicacion vieja de
+    // lgaupdate (`CacheLocation`, la real del usuario): sin productId no toca nada ahi.
+    LgaUpdateService::sweepUpdateCache(QString(), cacheRoot);
+    const int removed = AppPaths::sweepLegacyTempInstallers();
+    fprintf(stdout, "removed-temp %d\n", removed);
+    for (const QString &dir : {resolved, AppPaths::legacyTempUpdateDir()}) {
         if (!QDir(dir).exists()) {
             fprintf(stdout, "left %s <gone>\n", qPrintable(QDir::toNativeSeparators(dir)));
             continue;
@@ -388,136 +435,6 @@ int runUpdateDirsCheck(const QStringList &args)
                 qPrintable(entries.join(QStringLiteral(", "))));
     }
     return 0;
-}
-
-int runWhatsNewCheck(const QStringList &args)
-{
-    int failures = 0;
-    const auto check = [&failures](const QString &name, bool ok) {
-        fprintf(stdout, "%s %s\n", ok ? "PASS" : "FAIL", qPrintable(name));
-        failures += ok ? 0 : 1;
-    };
-    // Regla de version: minor de 3 cifras rellenado a la derecha, ceros finales que no cuentan.
-    const struct { const char *a; const char *b; int expected; } versions[] = {
-        {"0.96", "0.960", 0}, {"0.95", "0.96", -1}, {"2.66", "2.7", -1}, {"1.015", "1.15", -1},
-        {"0.99", "0.991", -1}, {"0.910.0", "0.910", 0}, {"1.2.1", "1.2", 1}, {"v0.96", "0.96", 0},
-    };
-    for (const auto &v : versions) {
-        check(QStringLiteral("compare %1 %2").arg(QLatin1String(v.a), QLatin1String(v.b)),
-              WhatsNew::compareVersions(QLatin1String(v.a), QLatin1String(v.b)) == v.expected);
-    }
-    check(QStringLiteral("version invalida"), !WhatsNew::isValidVersion(QStringLiteral("0.96-beta")));
-    using AI = WhatsNew::AfterInstall;
-    check(QStringLiteral("after-install: instalacion nueva"), WhatsNew::afterInstallAction(QString(), QStringLiteral("0.96")) == AI::SaveOnly);
-    check(QStringLiteral("after-install: valor ilegible"), WhatsNew::afterInstallAction(QStringLiteral("x"), QStringLiteral("0.96")) == AI::SaveOnly);
-    check(QStringLiteral("after-install: se actualizo"), WhatsNew::afterInstallAction(QStringLiteral("0.95"), QStringLiteral("0.96")) == AI::Show);
-    check(QStringLiteral("after-install: ya vistas"), WhatsNew::afterInstallAction(QStringLiteral("0.96"), QStringLiteral("0.96")) == AI::Nothing);
-    check(QStringLiteral("after-install: version mas vieja"), WhatsNew::afterInstallAction(QStringLiteral("0.97"), QStringLiteral("0.96")) == AI::Nothing);
-
-    // Parse estricto y escape del texto.
-    const QString product = QStringLiteral("legandrop/LGA_VideoDownloader");
-    const QByteArray good = R"({"schemaVersion":1,"product":"legandrop/LGA_VideoDownloader","versions":[
-        {"version":"0.95","items":[{"kind":"fixed","text":"old"}]},
-        {"version":"0.97","date":"2026-11-01","items":[{"kind":"new","text":"<b>bold</b> & %1","platform":["mac"]},
-                                                     {"kind":"improved","text":"both"}]},
-        {"version":"0.96","items":[{"kind":"new","text":"win only","platform":["win"]}]}]})";
-    const WhatsNew::Notes parsed = WhatsNew::parse(good, product);
-    check(QStringLiteral("parse valido, la mas nueva primero"),
-          parsed.valid && parsed.versions.size() == 3 && parsed.versions.first().version == QLatin1String("0.97"));
-    const auto win = WhatsNew::range(parsed, QStringLiteral("0.95"), QStringLiteral("0.97"), QStringLiteral("win"));
-    check(QStringLiteral("rango (0.95, 0.97] en win"), win.size() == 2 && win.at(0).items.size() == 1 && win.at(1).items.size() == 1);
-    const auto mac = WhatsNew::range(parsed, QStringLiteral("0.96"), QString(), QStringLiteral("mac"));
-    const QString html = WhatsNew::toHtml(mac);
-    check(QStringLiteral("rango (0.96, ...] en mac"), mac.size() == 1 && mac.at(0).items.size() == 2);
-    check(QStringLiteral("texto escapado"), html.contains(QStringLiteral("&lt;b&gt;bold&lt;/b&gt; &amp; %1"))
-                                                && !html.contains(QStringLiteral("<b>bold")));
-    const QList<QPair<const char *, QByteArray>> bad = {
-        {"otro product", R"({"schemaVersion":1,"product":"x/y","versions":[]})"},
-        {"otro schemaVersion", R"({"schemaVersion":2,"product":"legandrop/LGA_VideoDownloader","versions":[]})"},
-        {"kind desconocido", R"({"schemaVersion":1,"product":"legandrop/LGA_VideoDownloader","versions":[{"version":"1.0","items":[{"kind":"bug","text":"a"}]}]})"},
-        {"texto vacio", R"({"schemaVersion":1,"product":"legandrop/LGA_VideoDownloader","versions":[{"version":"1.0","items":[{"kind":"new","text":" "}]}]})"},
-        {"version no numerica", R"({"schemaVersion":1,"product":"legandrop/LGA_VideoDownloader","versions":[{"version":"beta","items":[]}]})"},
-        {"platform no es lista", R"({"schemaVersion":1,"product":"legandrop/LGA_VideoDownloader","versions":[{"version":"1.0","items":[{"kind":"new","text":"a","platform":"win"}]}]})"},
-        {"JSON roto", R"({"schemaVersion":1,)"},
-        {"demasiado grande", QByteArray(WhatsNew::kMaxBytes + 1, ' ')},
-    };
-    for (const auto &entry : bad) {
-        check(QStringLiteral("rechaza %1").arg(QLatin1String(entry.first)), !WhatsNew::parse(entry.second, product).valid);
-    }
-
-    // `--qa-whats-new <json> [<instalada> <ofrecida>]`: el rango de un archivo real.
-    const int index = args.indexOf(QStringLiteral("--qa-whats-new"));
-    const QString path = args.value(index + 1);
-    if (!path.isEmpty() && !path.startsWith(QLatin1String("--"))) {
-        QFile file(path);
-        const WhatsNew::Notes notes = file.open(QIODevice::ReadOnly) ? WhatsNew::parse(file.readAll(), product) : WhatsNew::Notes();
-        check(QStringLiteral("archivo %1").arg(path), notes.valid);
-        fprintf(stdout, "error '%s' versions %d\n", qPrintable(notes.error), int(notes.versions.size()));
-        for (const QString &platform : {QStringLiteral("win"), QStringLiteral("mac")}) {
-            for (const WhatsNew::VersionNotes &entry : WhatsNew::range(notes, args.value(index + 2), args.value(index + 3), platform)) {
-                fprintf(stdout, "%s v%s %s items %d\n", qPrintable(platform), qPrintable(entry.version),
-                        qPrintable(entry.date), int(entry.items.size()));
-            }
-        }
-    }
-    fprintf(stdout, "%d failures\n", failures);
-    return failures == 0 ? 0 : 1;
-}
-
-int runWhatsNewFetch(const QStringList &args)
-{
-    // Solo contra un servidor local: nunca baja nada de GitHub.
-    if (!UpdateUrls::isLocalOverride(QUrl(UpdateUrls::githubBase()))) {
-        fprintf(stderr, "qa-whats-new-fetch: set LGA_VD_GITHUB_BASE to a localhost server\n");
-        return 2;
-    }
-    const int index = args.indexOf(QStringLiteral("--qa-whats-new-fetch"));
-    const QString cacheDir = args.value(index + 1);
-    if (cacheDir.isEmpty() || !QDir(cacheDir).exists()) {
-        fprintf(stderr, "usage: --qa-whats-new-fetch <existing-cache-dir> [--qa-close-after-ms N]\n");
-        return 2;
-    }
-    const int closeIndex = args.indexOf(QStringLiteral("--qa-close-after-ms"));
-    const int closeAfterMs = closeIndex >= 0 ? args.value(closeIndex + 1).toInt() : -1;
-    UpdateService::setNotesCacheDirForQa(cacheDir);
-
-    auto *service = new UpdateService;
-    const auto print = [](const QString &line) {
-        fprintf(stdout, "%s\n", qPrintable(line));
-        fflush(stdout);
-    };
-    QObject::connect(service, &UpdateService::stateChanged, qApp, [&service, closeAfterMs, print](UpdateService::State state) {
-        print(QStringLiteral("state %1").arg(int(state)));
-        if (state == UpdateService::State::UpToDate || state == UpdateService::State::CheckFailed) {
-            print(QStringLiteral("no update: %1").arg(service->errorString()));
-            QCoreApplication::exit(3);
-        } else if (state == UpdateService::State::UpdateAvailable && closeAfterMs >= 0) {
-            // Cierre con la descarga de notas en curso: el servicio se destruye con su reply viva.
-            QTimer::singleShot(closeAfterMs, qApp, [&service, print]() {
-                print(QStringLiteral("deleting service, notes status %1").arg(int(service->notesStatus())));
-                delete service;
-                service = nullptr;
-                print(QStringLiteral("service deleted"));
-                QTimer::singleShot(500, qApp, []() { QCoreApplication::exit(0); });
-            });
-        }
-    });
-    QObject::connect(service, &UpdateService::notesChanged, qApp, [&service, closeAfterMs, cacheDir, print]() {
-        const WhatsNew::Notes &notes = service->notes();
-        print(QStringLiteral("notes status %1 versions %2").arg(int(service->notesStatus())).arg(notes.versions.size()));
-        for (const WhatsNew::VersionNotes &entry : WhatsNew::range(notes, service->currentVersion(),
-                                                                   service->availableVersion(), WhatsNew::currentPlatform())) {
-            print(QStringLiteral("range v%1 items %2").arg(entry.version).arg(entry.items.size()));
-        }
-        print(QStringLiteral("cache %1").arg(QFileInfo::exists(QDir(cacheDir).filePath(QLatin1String(WhatsNew::kAssetName)))));
-        QCoreApplication::exit(closeAfterMs >= 0 ? 4 : 0);
-    });
-    QTimer::singleShot(40000, qApp, []() { QCoreApplication::exit(5); });
-    service->checkForUpdates();
-    const int code = QCoreApplication::exec();
-    delete service;
-    print(QStringLiteral("exit %1").arg(code));
-    return code;
 }
 
 int runCookiesCheck()
@@ -755,22 +672,26 @@ int runUiShot(const QStringList &args)
         fprintf(stderr, "ui-shot: output must be a new .png in an existing folder\n");
         return 2;
     }
-    const bool withNotes = state == QLatin1String("help-update-notes") || state == QLatin1String("help-history")
-                           || state == QLatin1String("after-install");
-    const WhatsNew::Notes notes = fixtureNotes(args);
-    if (withNotes && !notes.valid) {
+    const bool withNotes = state == QLatin1String("whats-new");
+    const LgaWhatsNew::Notes notes = fixtureNotes(args);
+    if ((withNotes || args.contains(QStringLiteral("--notes"))) && !notes.valid) {
         fprintf(stderr, "ui-shot: %s needs --notes <valid whats_new.json> (%s)\n", qPrintable(state), qPrintable(notes.error));
         return 2;
     }
     // Las notas de prueba van de la version que corre a la siguiente que traiga el archivo.
     const QString shotCurrent = QStringLiteral(VIDEODOWNLOADER_VERSION);
-    QString shotOffered = shotCurrent;
-    for (const WhatsNew::VersionNotes &entry : notes.versions) {
-        if (WhatsNew::compareVersions(entry.version, shotOffered) > 0) {
+    QString shotOffered = QStringLiteral("0.97");
+    for (const LgaWhatsNew::VersionNotes &entry : notes.versions) {
+        if (LgaWhatsNew::compareVersions(entry.version, shotOffered) > 0) {
             shotOffered = entry.version;
         }
     }
-    const QString rangeHtml = WhatsNew::toHtml(WhatsNew::range(notes, shotCurrent, shotOffered, WhatsNew::currentPlatform()));
+    const QString rangeHtml = notes.valid
+        ? LgaWhatsNew::toHtml(LgaWhatsNew::range(notes, shotCurrent, shotOffered, LgaWhatsNew::currentPlatform()))
+        : QString();
+    const QString historyHtml = notes.valid
+        ? LgaWhatsNew::toHtml(LgaWhatsNew::filtered(notes, LgaWhatsNew::currentPlatform()))
+        : QString();
 
     MainWindow window(MainWindow::Mode::Capture);
     window.setAttribute(Qt::WA_DontShowOnScreen, true);
@@ -809,22 +730,36 @@ int runUiShot(const QStringList &args)
     }
 
     QDialog *dialog = nullptr;
-    if (state == QLatin1String("after-install")) {
+    const bool updateDialog = state == QLatin1String("update-prompt") || state == QLatin1String("whats-new")
+                              || state == QLatin1String("update-failed");
+    if (updateDialog) {
         card->setCookiesSource(QStringLiteral("firefox"), QString());
         loadEmpty(window);
+        window.tabHeader()->setUpdateNotice(QStringLiteral("Update available · v%1").arg(shotOffered));
         auto *scrim = new Scrim(window.centralWidget());
         scrim->setVisible(true);
-        auto *afterInstall = new WhatsNewDialog(shotOffered, rangeHtml, window.centralWidget());
-        afterInstall->setWindowFlags(Qt::Widget);
-        afterInstall->fitHeight();
-        afterInstall->setVisible(true);
-        dialog = afterInstall;
+        ConfirmDialog::Spec spec;
+        if (state == QLatin1String("update-prompt")) {
+            spec = updatePromptSpec(shotOffered, shotCurrent, rangeHtml);
+        } else if (state == QLatin1String("whats-new")) {
+            spec = okSpec(QStringLiteral("What's New"),
+                          QStringLiteral("Release notes of LGA Video Downloader. You are running version <b>%1</b>.").arg(shotCurrent),
+                          historyHtml, QString());
+        } else {
+            spec = okSpec(QStringLiteral("Update Failed"),
+                          QStringLiteral("The downloaded update failed integrity verification."), QString(),
+                          QStringLiteral("expected=0f3c...\nactual=9a1b...\nasset=LGA_Video_Downloader_Mac_v%1.zip").arg(shotOffered));
+        }
+        auto *confirm = ConfirmDialog::build(spec, window.centralWidget());
+        // Hijo comun dentro de la ventana, no una ventana propia: se dibuja con el mismo render.
+        confirm->setWindowFlags(Qt::Widget);
+        confirm->fitHeight();
+        confirm->setVisible(true);
+        dialog = confirm;
     }
     if (help) {
-        window.tabHeader()->setUpdateNotice(state == QLatin1String("help") || state == QLatin1String("help-history") ? QString()
-                                            : state == QLatin1String("help-update") ? QStringLiteral("Update available · v0.90")
-                                            : state == QLatin1String("help-update-notes") ? QStringLiteral("Update available · v%1").arg(shotOffered)
-                                                                                          : QStringLiteral("Downloading update…"));
+        window.tabHeader()->setUpdateNotice(state == QLatin1String("help-update") ? QStringLiteral("Update available · v%1").arg(shotOffered)
+                                                                                 : QString());
         auto *scrim = new Scrim(window.centralWidget());
         scrim->setVisible(true);
         auto *helpDialog = new HelpDialog(window.centralWidget());
@@ -835,26 +770,8 @@ int runUiShot(const QStringList &args)
                                      {QStringLiteral("ffmpeg"), QStringLiteral("N-117208-gbd22d7e601-20240927")},
                                      {QStringLiteral("deno"), QStringLiteral("2.9.6")}});
         UpdateView view;
-        view.currentVersion = QStringLiteral(VIDEODOWNLOADER_VERSION);
-        view.lastChecked = QDateTime(QDate::currentDate(), QTime(10, 40));
-        if (state == QLatin1String("help") || state == QLatin1String("help-history")) {
-            view.state = UpdateService::State::UpToDate;
-            if (state == QLatin1String("help-history")) {
-                helpDialog->setHistory(WhatsNew::toHtml(WhatsNew::range(notes, QString(), QString(), WhatsNew::currentPlatform())));
-                helpDialog->setHistoryVisible(true);
-            }
-        } else if (state == QLatin1String("help-update-notes")) {
-            view.state = UpdateService::State::UpdateAvailable;
+        if (state == QLatin1String("help-update")) {
             view.availableVersion = shotOffered;
-            view.notesHtml = rangeHtml;
-        } else if (state == QLatin1String("help-update")) {
-            view.state = UpdateService::State::UpdateAvailable;
-            view.availableVersion = QStringLiteral("0.90");
-        } else {
-            view.state = UpdateService::State::Downloading;
-            view.availableVersion = QStringLiteral("0.90");
-            view.received = 18LL * 1024 * 1024;
-            view.total = 42LL * 1024 * 1024;
         }
         helpDialog->setUpdateView(view);
         helpDialog->setVisible(true);
@@ -958,4 +875,30 @@ int runUiShot(const QStringList &args)
     }
     fprintf(stdout, "ui-shot ok %s\n", qPrintable(outPath));
     return 0;
+}
+
+void installQaUpdateAutoAccept(QWidget *owner)
+{
+    if (qEnvironmentVariable("LGA_VD_QA_ACCEPT_UPDATE") != QLatin1String("1")
+        || !UpdateUrls::isLocalOverride(QUrl(UpdateUrls::githubBase()))) {
+        return;
+    }
+    auto *timer = new QTimer(owner);
+    timer->setInterval(500);
+    QObject::connect(timer, &QTimer::timeout, owner, [timer]() {
+        auto *prompt = qobject_cast<ConfirmDialog *>(QApplication::activeModalWidget());
+        if (!prompt) {
+            return;
+        }
+        for (QPushButton *button : prompt->findChildren<QPushButton *>()) {
+            if (button->text() == QLatin1String("&Update now")) {
+                fprintf(stdout, "qa: Update now\n");
+                fflush(stdout);
+                timer->stop();
+                button->click();
+                return;
+            }
+        }
+    });
+    timer->start();
 }

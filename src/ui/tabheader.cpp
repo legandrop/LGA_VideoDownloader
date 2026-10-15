@@ -68,7 +68,7 @@ TabHeader::TabHeader(QWidget *parent)
 
     m_toolsNotice = noticeButton(this);
     m_updateNotice = noticeButton(this);
-    m_updateNotice->setToolTip(QStringLiteral("A new version is ready. Open Help to update."));
+    m_updateNotice->setToolTip(QStringLiteral("See what's new and install it"));
     layout->addWidget(m_toolsNotice, 0, Qt::AlignVCenter);
     layout->addWidget(m_updateNotice, 0, Qt::AlignVCenter);
 

@@ -19,7 +19,7 @@ Configuración: `%APPDATA%\LGA\VideoDownloader\config.ini` (Windows) o `~/Librar
 ## Actualizaciones
 
 - **yt-dlp y deno:** al abrir la app se buscan versiones nuevas en GitHub (tag fijo, SHA-256 obligatorio) y se instalan en la carpeta `tools` de la propia app (Windows) o en `~/Library/Application Support/LGA/VideoDownloader/tools` (macOS, fuera del bundle por la firma). El reemplazo se hace solo cuando no hay una descarga corriendo.
-- **La app:** se busca el último release de GitHub con su `SHA256SUMS`, al abrir y después cada 3 horas (±15 min al azar) mientras sigue abierta; al volver de una suspensión el chequeo vencido corre enseguida (`MainWindow::onPeriodicUpdateTick`). Si hay uno nuevo, aparece "Update available" arriba a la derecha y el botón Update en Help, con las notas de lo nuevo entre la versión instalada y la ofrecida (`whats_new.json` del release). En Windows descarga el instalador verificado e instala sobre la misma carpeta; en macOS abre la página del release. **What's new** en Help muestra el historial completo, y después de un update que no se vio venir la app muestra sus notas una vez.
+- **La app:** `libs/lgaupdate`, la biblioteca de updates de las apps LGA. Lee el manifiesto de versiones de `LGA_Updates` al abrir y después cada 3 horas (±15 min al azar) mientras sigue abierta. Si hay una versión nueva, ofrece el update en un cartel con las notas de lo nuevo (`whats_new.json` del release) y lo marca con "Update available" arriba a la derecha y en Help. Baja el instalador (Windows) o el ZIP firmado (macOS), verifica el SHA-256 y lo instala sobre la misma carpeta. **What's new** en Help muestra el historial completo, y después de un update que no se vio venir la app muestra sus notas una vez. Detalle en `docs/Doc_Auto_Update.md`.
 - **ffmpeg** viene con la app y no se actualiza solo.
 
 Detalle por plataforma: [PLATFORM_DIFFERENCES.md](PLATFORM_DIFFERENCES.md). Cola y parseo de yt-dlp: [DOWNLOAD_QUEUE_SYSTEM.md](DOWNLOAD_QUEUE_SYSTEM.md).
@@ -50,16 +50,17 @@ Cada comando valida las notas para el usuario (`docs/WhatsNew.md`) antes de arma
 VideoDownloader.exe --ui-shot <estado> <salida.png> [--dpr 1.5] [--size 1200x860]
 ```
 
-Estados: `empty`, `downloading`, `error`, `tools`, `other-errors`, `help`, `help-update`, `help-downloading`, y con `--notes <whats_new.json>`: `help-update-notes`, `help-history`, `after-install`. `--qa-whats-new [<whats_new.json> [<instalada> <ofrecida>]]` prueba sin red el parse y el rango de las notas; `--qa-whats-new-fetch <carpeta>` corre el chequeo de update y la descarga de notas contra un servidor local (`LGA_VD_GITHUB_BASE`). Dibuja la ventana real con datos de prueba y escribe al lado un `.json` con la geometría. `--qa-walkthrough <links.txt> <carpeta> --qa-isolated <destino>` corre la app real sin ventana (plataforma offscreen), pega los links, aprieta Download y guarda capturas.
+Estados: `empty`, `downloading`, `error`, `tools`, `other-errors`, `help`, `help-update`, y los carteles del update `update-prompt`, `whats-new` y `update-failed` (con `--notes <whats_new.json>`, que `whats-new` exige). Dibuja la ventana real con datos de prueba y escribe al lado un `.json` con la geometría. `--qa-walkthrough <links.txt> <carpeta> --qa-isolated <destino>` corre la app real sin ventana (plataforma offscreen), pega los links, aprieta Download y guarda capturas.
 
 ## Estructura
 
 ```
 include/videodownloader/   Cabeceras
-src/core/                  DownloadQueue (cola y yt-dlp), UpdateService (update de la app)
+src/core/                  DownloadQueue (cola y yt-dlp), NativeHost (extension)
 src/ui/                    MainWindow, AddVideosCard, QueueView, LogView, HelpDialog, tema
 src/utils/                 ToolsManager/ToolsUpdater (tools), BrowserDetect, LinkParser
 src/qa/                    --ui-shot y --qa-walkthrough
+libs/lgaupdate/            Update de la app (biblioteca compartida de las apps LGA)
 resources/                 Fuentes Inter, iconos, fondo del DMG
 tools/, toolsmac/          yt-dlp, ffmpeg y deno que se distribuyen con la app
 ```

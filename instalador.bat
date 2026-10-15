@@ -185,7 +185,8 @@ echo Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts"; ValueTyp
 echo Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.lga.videodownloader"; ValueType: string; ValueName: ""; ValueData: "{app}\com.lga.videodownloader.json"; Flags: uninsdeletekey >> VideoDownloader_installer.iss
 echo. >> VideoDownloader_installer.iss
 echo [Run] >> VideoDownloader_installer.iss
-REM Sin skipifsilent: el auto-update corre el instalador en /SILENT y tiene que relanzar la app.
+REM Sin skipifsilent: las copias v0.95 corren el instalador en /SILENT y tiene que relanzar la app.
+REM lgaupdate (v0.96+) lo abre con el wizard: ahi es el checkbox final, tildado por defecto.
 echo Filename: "{app}\VideoDownloader.exe"; Description: "Ejecutar VideoDownloader"; Flags: nowait postinstall >> VideoDownloader_installer.iss
 
 REM Añadir código Pascal para preguntar sobre eliminar configuración durante desinstalación
@@ -502,6 +503,14 @@ if errorlevel 1 (
     exit /b 1
 )
 echo Release publicado: https://github.com/%RELEASE_REPO%/releases/tag/%TAG%
+REM El auto-update lee el manifiesto de legandrop/LGA_Updates: sin este disparo, la version nueva
+REM tarda hasta que corra su cron (30-45 min). Si falla, el cron la levanta igual.
+call "%GH_CMD%" workflow run refresh_versions.yml --repo legandrop/LGA_Updates >nul 2>nul <nul
+if errorlevel 1 (
+    echo AVISO: No se pudo disparar el refresco del manifiesto. El cron lo levanta solo.
+) else (
+    echo Manifiesto de versiones: refresco disparado.
+)
 exit /b 0
 :publish_sums_failed
 echo ERROR: el instalador subio, pero SHA256SUMS no: el release puede haber quedado SIN SHA256SUMS

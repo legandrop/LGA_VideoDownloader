@@ -1,30 +1,19 @@
 #ifndef HELPDIALOG_H
 #define HELPDIALOG_H
 
-#include <QDateTime>
 #include <QDialog>
 #include <QMap>
 
-#include "updateservice.h"
-
 class QLabel;
-class QProgressBar;
 class QPushButton;
-class QTextBrowser;
 
-// Estado del update tal como lo muestra el dialogo. Lo arma MainWindow desde UpdateService
-// (o la captura de QA con datos de prueba): el dialogo no conoce el servicio.
+// Estado del update tal como lo muestra el dialogo. Lo arma MainWindow con lo que informa el
+// LgaUpdateService (o la captura de QA con datos de prueba): el dialogo no conoce el servicio.
+// La descarga, la instalacion y sus errores los muestran los carteles de lgaupdate, no Help.
 struct UpdateView {
-    UpdateService::State state = UpdateService::State::Idle;
-    QString currentVersion;
-    QString availableVersion;
-    QString error;
-    QString blockedReason;     // build de desarrollo: no se puede instalar desde aca
-    bool installsInPlace = true;
-    qint64 received = -1;
-    qint64 total = -1;
-    QDateTime lastChecked;
-    QString notesHtml;         // notas de lo nuevo entre la instalada y la ofrecida; vacio = sin notas
+    QString availableVersion;  // version nueva que encontro un chequeo; vacio = ninguna
+    bool checking = false;
+    QString blockedReason;     // build de desarrollo: esta copia no se actualiza
 };
 
 // Dialogo de ayuda: version, actualizaciones, extension de navegador, versiones de las tools
@@ -38,11 +27,6 @@ public:
 
     void setUpdateView(const UpdateView &view);
     void setToolVersions(const QMap<QString, QString> &versions);
-    // Historial completo de notas (o un aviso de que no se pudo cargar), en HTML.
-    void setHistory(const QString &html);
-    // El link "What's new" alterna entre la ayuda y el historial, que ocupa el lugar de la
-    // extension y los creditos.
-    void setHistoryVisible(bool visible);
 
     // Abre el dialogo modal centrado sobre la ventana, con el velo detras.
     int execOver(QWidget *window);
@@ -50,8 +34,8 @@ public:
 signals:
     void checkRequested();
     void installRequested();
-    void cancelInstallRequested();
     void openExtensionFolderRequested();
+    // El link "What's new": el historial completo, en el cartel de lgaupdate.
     void whatsNewRequested();
 
 protected:
@@ -60,26 +44,15 @@ protected:
 private:
     // Alto del dialogo segun el layout ya pulido (ver helpdialog.cpp).
     void fitHeight();
-    void refreshNotes();
 
     QLabel *m_whatsNewLink;
-    QTextBrowser *m_notesView;
-    QWidget *m_details;
-    QString m_rangeHtml;
-    QString m_historyHtml;
-    QString m_shownNotesKey;  // lo que muestra el bloque de notas; vacio = nada cargado todavia
-    bool m_boxVisible = false;
-    bool m_showHistory = false;
-
     QLabel *m_dot;
     QLabel *m_updateTitle;
     QLabel *m_updateCaption;
-    QProgressBar *m_updateProgress;
     QLabel *m_checkStatus;
     QPushButton *m_check;
     QPushButton *m_install;
     QPushButton *m_later;
-    QPushButton *m_cancelInstall;
     QPushButton *m_closeButton = nullptr;
     QLabel *m_ytdlpVersion;
     QLabel *m_ffmpegVersion;

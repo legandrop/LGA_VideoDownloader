@@ -1,7 +1,6 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
-#include <QDateTime>
 #include <QJsonObject>
 #include <QMainWindow>
 #include <QPointer>
@@ -19,7 +18,7 @@ class QSettings;
 class QueueView;
 class TabHeader;
 class ToolsManager;
-class UpdateService;
+class LgaUpdateService;
 
 class MainWindow : public QMainWindow
 {
@@ -34,10 +33,10 @@ public:
     ~MainWindow() override;
 
     // Servicios para la UI (ventana principal y dialogo de Help):
-    //  - UpdateService: update de la app (estado, version disponible, installAppUpdate()).
+    //  - LgaUpdateService: update de la app (libs/lgaupdate), con sus propios carteles.
     //  - ToolsManager: rutas y versiones de yt-dlp/deno/ffmpeg, auto-update de tools.
-    //  - DownloadQueue: activeDownloadCount() para confirmar antes de instalar un update.
-    UpdateService *updateService() const { return m_updateService; }
+    //  - DownloadQueue: activeDownloadCount(), que posterga la instalacion de un update.
+    LgaUpdateService *updateService() const { return m_updateService; }
     ToolsManager *toolsManager() const { return m_toolsManager; }
     DownloadQueue *downloadQueue() const { return m_downloadQueue; }
 
@@ -61,6 +60,9 @@ public:
     // Auto-update de tools y de la app al arrancar (activo por defecto). El recorrido de QA
     // aislado lo apaga para usar solo las tools del build.
     static void setAutomaticUpdatesEnabled(bool enabled);
+    // Barrido de los restos de updates anteriores al arrancar (activo por defecto). Los modos de
+    // QA lo apagan: las carpetas que barre las comparte la copia instalada.
+    static void setUpdateCacheSweepEnabled(bool enabled);
 
 private:
     void setupUi();
@@ -80,19 +82,15 @@ private:
     void onRetryRequested(int id);
     void onRetryWithBrowser(int id, const QString &browserKey);
 
+    // Arma el LgaUpdateService con la identidad de esta app y lo engancha al header y a Help.
+    void setupUpdates();
+    // Motivo por el que no se puede instalar ahora (descargas en la cola), o vacio.
+    QString updateInstallBlockedReason() const;
     void refreshUpdateNotice();
     UpdateView currentUpdateView() const;
     void openHelp();
-    void requestAppInstall();
-    // Historial de notas para Help: las del servicio, o la cache, o un aviso.
-    QString historyHtml() const;
-    // "Despues de instalar": al arrancar, si la version cambio sin que el usuario viera sus notas.
-    void checkAfterInstallNotes();
-    bool showAfterInstallNotes(const WhatsNew::Notes &notes);
-    void onNotesChanged();
-    // Chequeo periodico del update de la app: el tick mira el reloj y, si vencio, chequea.
-    void onPeriodicUpdateTick();
-    void schedulePeriodicUpdateCheck(qint64 delayMs, bool withJitter);
+    // Ofrece el update (cartel de lgaupdate con las notas), desde el header o desde Help.
+    void offerAppUpdate();
 
     Mode m_mode;
     QSettings *m_settings = nullptr;
@@ -105,20 +103,14 @@ private:
 
     ToolsManager *m_toolsManager = nullptr;
     DownloadQueue *m_downloadQueue = nullptr;
-    UpdateService *m_updateService = nullptr;
+    LgaUpdateService *m_updateService = nullptr;
     QList<BrowserDetect::Browser> m_browsers;
 
     QPointer<HelpDialog> m_helpDialog;
-    QDateTime m_lastUpdateCheck;
-    // Proximo chequeo periodico (reloj de pared, UTC) y si el chequeo en curso lo lanzo el tick:
-    // un periodico que falla por red se reintenta antes que un intervalo entero.
-    QDateTime m_nextPeriodicUpdateCheckUtc;
-    bool m_periodicUpdateCheckActive = false;
-    qint64 m_installReceived = -1;
-    qint64 m_installTotal = -1;
-    // Notas "despues de instalar" esperando la descarga; desde que version mostrarlas.
-    bool m_afterInstallPending = false;
-    QString m_afterInstallFrom;
+    // Lo que muestran el header y Help del update: la version nueva que encontro un chequeo
+    // (vacio = ninguna) y si hay un chequeo en curso.
+    QString m_availableVersion;
+    bool m_updateChecking = false;
 };
 
 #endif // MAINWINDOW_H
