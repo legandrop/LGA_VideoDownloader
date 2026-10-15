@@ -3,8 +3,6 @@
 #include "lgaupdate/LgaVersionCompare.h"
 #include "lgaupdate/LgaWhatsNew.h"
 
-#include "videodownloader/ConfirmDialog.h"
-
 #include <QApplication>
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -356,7 +354,11 @@ LgaUpdateService::~LgaUpdateService()
     const QList<LgaWhatsNewFetcher *> fetchers =
         findChildren<LgaWhatsNewFetcher *>(Qt::FindDirectChildrenOnly);
     qDeleteAll(fetchers);
+    // Cada uno puso su propio cursor de espera: se saca uno por cada uno que siga puesto.
     if (m_historyRunning) {
+        QApplication::restoreOverrideCursor();
+    }
+    if (m_checkCursorActive) {
         QApplication::restoreOverrideCursor();
     }
     // Si la ventana muere con una descarga en curso, el parcial NO se commitea: se tira. Un
@@ -373,6 +375,22 @@ QWidget *LgaUpdateService::parentWindow() const
         if (parent == owner) return modal;
     }
     return owner;
+}
+
+int LgaUpdateService::presentDialog(QWidget *parent, const LgaUpdateDialogSpec &spec) const
+{
+    if (m_config.presentDialog) {
+        return m_config.presentDialog(parent, spec);
+    }
+    return LgaUpdateDialog::presentFallback(parent, spec);
+}
+
+QString LgaUpdateService::emphasis(const QString &escapedText) const
+{
+    if (m_config.emphasizeHtml) {
+        return m_config.emphasizeHtml(escapedText);
+    }
+    return QStringLiteral("<b>%1</b>").arg(escapedText);
 }
 
 bool LgaUpdateService::isBusy() const
@@ -503,6 +521,12 @@ void LgaUpdateService::checkForUpdates(bool manual)
     }
 
     m_manualCheckActive = manual;
+    if (manual && m_config.busyCursorOnManualCheck && !m_checkCursorActive) {
+        // Lo pidio un click: el chequeo y la espera de las notas pueden tardar unos segundos.
+        // Se saca en `endCheckPhase()`, antes del cartel.
+        QApplication::setOverrideCursor(Qt::BusyCursor);
+        m_checkCursorActive = true;
+    }
     startCheckRequest();
 }
 
@@ -530,6 +554,10 @@ void LgaUpdateService::startCheckRequest()
 
 void LgaUpdateService::endCheckPhase()
 {
+    if (m_checkCursorActive) {
+        m_checkCursorActive = false;
+        QApplication::restoreOverrideCursor();
+    }
     if (m_checkPhaseOpen) {
         m_checkPhaseOpen = false;
         emit checkFinished();
@@ -749,49 +777,58 @@ void LgaUpdateService::promptForUpdate(const QString &version,
     };
 
     m_promptVisible = true;
-    const QList<ConfirmDialog::Button> buttons = {
-        {tr("&Update now"), ConfirmDialog::ButtonStyle::Action, Qt::Key_U},
-        {tr("&Remind me later"), ConfirmDialog::ButtonStyle::Neutral, Qt::Key_R},
-        {tr("&Skip this version"), ConfirmDialog::ButtonStyle::Neutral, Qt::Key_S},
-        {tr("&Cancel"), ConfirmDialog::ButtonStyle::Neutral, Qt::Key_C},
-    };
-    const QString message =
+    using Role = LgaUpdateDialogSpec::Role;
+    LgaUpdateDialogSpec spec;
+    spec.kind = LgaUpdateDialogSpec::Kind::UpdatePrompt;
+    spec.iconName = QStringLiteral("download");
+    spec.title = tr("Update Available");
+    spec.messageHtml =
         tr("A new version of %1 is available: %2.<br><br>"
            "You are currently running version %3.<br><br>"
            "%4")
             .arg(m_config.displayName.toHtmlEscaped(),
-                 QStringLiteral("<b>%1</b>").arg(version.toHtmlEscaped()),
-                 QStringLiteral("<b>%1</b>").arg(QApplication::applicationVersion().toHtmlEscaped()),
-                 QStringLiteral("<b>%1</b>").arg(
-                     tr("Save your work and close every other %1 window before updating.")
-                         .arg(m_config.displayName.toHtmlEscaped())));
-    ConfirmDialog::Spec spec;
-    spec.iconName = QStringLiteral("download");
-    spec.title = tr("Update Available");
-    spec.subtitle = message;
+                 emphasis(version.toHtmlEscaped()),
+                 emphasis(QApplication::applicationVersion().toHtmlEscaped()),
+                 emphasis(tr("Save your work and close every other %1 window before updating.")
+                              .arg(m_config.displayName.toHtmlEscaped())));
     spec.hintHtml = tr("<b>U</b> Update now · <b>R</b> Remind me later · <b>S</b> Skip this version<br>"
                        "<b>Enter</b> / <b>Esc</b> / <b>C</b> Cancel");
-    spec.buttons = buttons;
+    spec.buttons = {
+        {Role::Update, tr("&Update now"), /*primary=*/true, Qt::Key_U},
+        {Role::Snooze, tr("&Remind me later"), false, Qt::Key_R},
+        {Role::Skip, tr("&Skip this version"), false, Qt::Key_S},
+        {Role::Cancel, tr("&Cancel"), false, Qt::Key_C},
+    };
     spec.defaultIndex = 3;
     spec.escapeIndex = 3;
     // Las notas de (instalada, ofrecida] van en la caja con scroll del cartel. Sin notas es el
     // cartel de siempre.
-    spec.contentHtml = notesHtml;
+    spec.notesHtml = notesHtml;
     if (!notesHtml.isEmpty()) {
         // Se guarda ANTES de mostrar: lo que cuenta es que las notas se vieron, decida lo que
         // decida. Asi, despues de instalar esta version, no se vuelven a mostrar.
         storeWhatsNewLastSeen(normalizedVersion(version));
     }
-    const int choice = ConfirmDialog::ask(parentWindow(), spec);
+    const int choice = presentDialog(parentWindow(), spec);
     m_promptVisible = false;
 
+    // Por el rol del boton, no por su posicion: cada app los ordena a su manera.
     UpdateDialogAction action = UpdateDialogAction::Cancel;
-    if (choice == 0) {
-        action = UpdateDialogAction::Update;
-    } else if (choice == 1) {
-        action = UpdateDialogAction::Snooze;
-    } else if (choice == 2) {
-        action = UpdateDialogAction::Skip;
+    if (choice >= 0 && choice < spec.buttons.size()) {
+        switch (spec.buttons.at(choice).role) {
+        case Role::Update:
+            action = UpdateDialogAction::Update;
+            break;
+        case Role::Snooze:
+            action = UpdateDialogAction::Snooze;
+            break;
+        case Role::Skip:
+            action = UpdateDialogAction::Skip;
+            break;
+        case Role::Cancel:
+        case Role::Ok:
+            break;
+        }
     }
 
     // Cancel (o la X) es "ahora no": calla esta version hasta reiniciar la app. Sin esto el
@@ -937,19 +974,20 @@ void LgaUpdateService::showWhatsNewDialog(QWidget *parent,
                                           const QString &message,
                                           const QString &notesHtml)
 {
-    ConfirmDialog::Spec spec;
+    LgaUpdateDialogSpec spec;
+    spec.kind = LgaUpdateDialogSpec::Kind::WhatsNew;
     spec.iconName = QStringLiteral("refresh");
     spec.title = title;
-    spec.subtitle = message;
-    spec.contentHtml = notesHtml;
+    spec.messageHtml = message;
+    spec.notesHtml = notesHtml;
     spec.hintHtml = tr("<b>Enter</b> / <b>Esc</b> / <b>O</b> OK");
-    spec.buttons = {{tr("&OK"), ConfirmDialog::ButtonStyle::Action, Qt::Key_O}};
+    spec.buttons = {{LgaUpdateDialogSpec::Role::Ok, tr("&OK"), /*primary=*/true, Qt::Key_O}};
     spec.defaultIndex = 0;
     spec.escapeIndex = 0;
     // Cuenta como ocupado mientras el modal corre su event loop: ahi adentro el chequeo
     // automatico podria disparar y apilar el "Update Available" encima.
     m_whatsNewDialogVisible = true;
-    ConfirmDialog::ask(parent, spec);
+    presentDialog(parent, spec);
     m_whatsNewDialogVisible = false;
 }
 
@@ -1042,7 +1080,7 @@ void LgaUpdateService::runWhatsNewAfterUpdate()
                         parentWindow(), tr("What's New"),
                         tr("%1 was updated to version %2.")
                             .arg(m_config.displayName.toHtmlEscaped(),
-                                 QStringLiteral("<b>%1</b>").arg(current.toHtmlEscaped())),
+                                 emphasis(current.toHtmlEscaped())),
                         LgaWhatsNew::toHtml(notes));
                     finishWhatsNewAfterUpdate();
                 });
@@ -1084,7 +1122,7 @@ void LgaUpdateService::showWhatsNewHistory(QWidget *dialogParent)
                                 parent, tr("What's New"),
                                 tr("Release notes of %1. You are running version %2.")
                                     .arg(m_config.displayName.toHtmlEscaped(),
-                                         QStringLiteral("<b>%1</b>").arg(
+                                         emphasis(
                                              QApplication::applicationVersion().toHtmlEscaped())),
                                 LgaWhatsNew::toHtml(notes));
                         } else {
@@ -1452,7 +1490,6 @@ void LgaUpdateService::showResultDialog(const QString &title,
                                         const QString &rawDetail,
                                         bool warning)
 {
-    Q_UNUSED(warning)
     // Un cartel de resultado cierra la fase de chequeo ANTES de abrirse (ver `checkFinished`).
     endCheckPhase();
     // El flag cuenta como "ocupado" mientras el modal corre su event loop anidado: ahi adentro
@@ -1465,16 +1502,19 @@ void LgaUpdateService::showResultDialog(const QString &title,
     // apilar un tercer cartel encima.
     const bool wasResultDialogVisible = m_resultDialogVisible;
     m_resultDialogVisible = true;
-    ConfirmDialog::Spec spec;
+    LgaUpdateDialogSpec spec;
+    spec.kind = LgaUpdateDialogSpec::Kind::Result;
     spec.iconName = QStringLiteral("refresh");
     spec.title = title;
-    spec.subtitle = message.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
+    spec.messageHtml =
+        message.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
     spec.details = rawDetail;
+    spec.warning = warning;
     spec.hintHtml = tr("<b>Enter</b> / <b>Esc</b> / <b>O</b> OK");
-    spec.buttons = {{tr("&OK"), ConfirmDialog::ButtonStyle::Action, Qt::Key_O}};
+    spec.buttons = {{LgaUpdateDialogSpec::Role::Ok, tr("&OK"), /*primary=*/true, Qt::Key_O}};
     spec.defaultIndex = 0;
     spec.escapeIndex = 0;
-    ConfirmDialog::ask(parentWindow(), spec);
+    presentDialog(parentWindow(), spec);
     m_resultDialogVisible = wasResultDialogVisible;
     // Si el chequeo automatico se pospuso mientras este cartel estaba abierto, corre ahora.
     runDeferredAutomaticCheck();
@@ -1795,6 +1835,11 @@ if (-not (Wait-UntilGone { Get-AppProcesses } $appWaitLimitMs)) {
         $shell = New-Object -ComObject WScript.Shell
         $shell.Popup('The update was postponed because another __DISPLAY_NAME__ window is still open. Save your work, close every __DISPLAY_NAME__ window, and try again.', 0, '__DISPLAY_NAME__ Update', 48) | Out-Null
     } catch {}
+    # La app que pidio el update ya se cerro: una residente la necesita de vuelta (ver
+    # `LgaUpdateConfig::relaunchWhenUpdatePostponed`).
+    if ($__RELAUNCH_WHEN_POSTPONED__) {
+        try { Start-Process -FilePath (Join-Path $AppDir '__EXECUTABLE_NAME__') } catch {}
+    }
     Remove-Self
     exit 3
 }
@@ -1818,6 +1863,9 @@ exit 2
     QString helperScript = helperTemplate;
     helperScript.replace(QStringLiteral("__EXECUTABLE_NAME__"), executableName);
     helperScript.replace(QStringLiteral("__DISPLAY_NAME__"), QString(m_config.displayName).replace('\'', "''"));
+    helperScript.replace(QStringLiteral("__RELAUNCH_WHEN_POSTPONED__"),
+                         m_config.relaunchWhenUpdatePostponed ? QStringLiteral("true")
+                                                              : QStringLiteral("false"));
 
     QSaveFile helperFile(helperPath);
     const QByteArray helperBytes = helperScript.toUtf8();
@@ -1890,6 +1938,7 @@ BACKUP_PATH=""
 TARGET_SWAPPED=false
 INSTALL_COMPLETE=false
 RELAUNCH_ALLOWED=true
+POSTPONED=false
 
 if [ ! -f "$ARCHIVE_PATH" ] || [ -z "$TARGET_APP_PATH" ] || [ -z "$EXECUTABLE_NAME" ]; then
     exit 1
@@ -1920,7 +1969,11 @@ cleanup() {
         if [ "$RELAUNCH_ALLOWED" = true ] && [ -x "$TARGET_EXEC" ]; then
             "$TARGET_EXEC" >/dev/null 2>&1 &
         fi
-        /usr/bin/osascript -e 'display notification "The update could not finish. __DISPLAY_NAME__ was restored; details were saved in the update log." with title "__DISPLAY_NAME__ Update"' >/dev/null 2>&1 || true
+        if [ "$POSTPONED" = true ]; then
+            /usr/bin/osascript -e 'display notification "The update was postponed because another __DISPLAY_NAME__ window is still open. Save your work, close every __DISPLAY_NAME__ window, and try again." with title "__DISPLAY_NAME__ Update"' >/dev/null 2>&1 || true
+        else
+            /usr/bin/osascript -e 'display notification "The update could not finish. __DISPLAY_NAME__ was restored; details were saved in the update log." with title "__DISPLAY_NAME__ Update"' >/dev/null 2>&1 || true
+        fi
     fi
     rm -f "$HELPER_PATH"
     exit "$EXIT_STATUS"
@@ -1968,8 +2021,10 @@ for ((i = 0; i < 60; i++)); do
     TARGET_PIDS="$(find_target_pids)"
 done
 if [ -n "$TARGET_PIDS" ]; then
-    # Nunca mandar TERM/KILL ni abrir otra instancia cuando una de este bundle sigue viva.
-    RELAUNCH_ALLOWED=false
+    # Nunca mandar TERM/KILL. Reabrir la que se cerro solo si la app lo pide
+    # (`relaunchWhenUpdatePostponed`): en una app de varias ventanas seria una instancia de mas.
+    POSTPONED=true
+    RELAUNCH_ALLOWED=__RELAUNCH_WHEN_POSTPONED__
     exit 3
 fi
 
@@ -1992,6 +2047,9 @@ INSTALL_COMPLETE=true
     QString helperScript = helperTemplate;
     helperScript.replace(QStringLiteral("__PRODUCT_ID__"), m_config.productId);
     helperScript.replace(QStringLiteral("__DISPLAY_NAME__"), m_config.displayName);
+    helperScript.replace(QStringLiteral("__RELAUNCH_WHEN_POSTPONED__"),
+                         m_config.relaunchWhenUpdatePostponed ? QStringLiteral("true")
+                                                              : QStringLiteral("false"));
 
     QSaveFile helperFile(helperPath);
     const QByteArray helperBytes = helperScript.toUtf8();

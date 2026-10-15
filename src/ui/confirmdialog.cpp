@@ -3,6 +3,8 @@
 #include "videodownloader/theme.h"
 #include "videodownloader/uiwidgets.h"
 
+#include "lgaupdate/LgaUpdateDialog.h"
+
 #include <QHBoxLayout>
 #include <QKeySequence>
 #include <QLabel>
@@ -179,6 +181,24 @@ void ConfirmDialog::fitHeight()
                                                      : layout()->totalSizeHint().height();
     setMinimumHeight(needed);
     resize(width(), needed);
+}
+
+ConfirmDialog::Spec ConfirmDialog::fromUpdateSpec(const LgaUpdateDialogSpec &update)
+{
+    Spec spec;
+    spec.iconName = update.iconName;
+    spec.title = update.title;
+    spec.subtitle = update.messageHtml;
+    spec.hintHtml = update.hintHtml;
+    spec.contentHtml = update.notesHtml;
+    spec.details = update.details;
+    for (const LgaUpdateDialogSpec::Button &button : update.buttons) {
+        spec.buttons.append({button.text, button.primary ? ButtonStyle::Action : ButtonStyle::Neutral,
+                             button.shortcut});
+    }
+    spec.defaultIndex = update.defaultIndex;
+    spec.escapeIndex = update.escapeIndex;
+    return spec;
 }
 
 int ConfirmDialog::ask(QWidget *parent, const Spec &spec)

@@ -18,13 +18,11 @@ class QTimer;
  * publica cada release. SIN UI: parsea, filtra, arma HTML y baja el archivo. Lo usa
  * `LgaUpdateService`.
  *
- * Es la MISMA copia que lleva el `lgaupdate` de Media Tools y Shot Player
- * (`../LGA_MediaTools_v2`), que a su vez adapta `FM_WhatsNew` de FileManagerS3. No es un
- * archivo compartido: los repos se compilan por separado y una dependencia cruzada ataria sus
- * releases. Mismo formato, misma regla de versiones (`LgaVersionCompare`, identica a
- * `FM_VersionCompare`) y mismos colores. Lo unico que falta respecto de FileManager es la
- * edicion: estas apps no tienen Studio/Client, asi que se filtra solo por plataforma. Un
- * arreglo en una de las copias va tambien a las otras.
+ * Adapta `FM_WhatsNew` de FileManagerS3: mismo formato, misma regla de versiones
+ * (`LgaVersionCompare`, identica a `FM_VersionCompare`) y mismos colores. Lo unico que falta
+ * respecto de FileManager es la edicion: estas apps no tienen Studio/Client, asi que se filtra
+ * solo por plataforma. Es parte de la pieza canonica `libs/lgaupdate` de LGA_Base_QT_C_Py
+ * (ver su README): un arreglo se hace alla y se re-copia a cada app.
  *
  * El formato lo genera `build_whats_new.py` de LGA_RepoTools (diseno completo en
  * `Docs/WhatsNew_Sistema.md` de ese repo):

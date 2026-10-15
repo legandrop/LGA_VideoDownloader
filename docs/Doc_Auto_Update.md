@@ -1,8 +1,9 @@
 # Actualizacion automatica de la app
 
 LGA Video Downloader se actualiza con `libs/lgaupdate`, la misma biblioteca de FrameRev, Media
-Tools y Theta Explorer (origen y diferencias en `libs/lgaupdate/README.md`). Hasta la v0.95 tenia
-un updater propio (`UpdateService`) que en macOS solo abria la pagina del release.
+Tools y Theta Explorer: copia IDENTICA de la pieza canonica de `../LGA_Base_QT_C_Py` (contrato en
+`libs/lgaupdate/README.md`). No se edita aca: un cambio va a la Base y se re-copia. Hasta la v0.95
+la app tenia un updater propio (`UpdateService`) que en macOS solo abria la pagina del release.
 
 Esto es el update de la APP. yt-dlp y deno se actualizan aparte, con `ToolsUpdater`.
 
@@ -71,8 +72,9 @@ Todo se configura en `MainWindow::setupUpdates()`:
   carpeta es la misma de la copia instalada.
 - `prepareForUpdatePrompt` cierra Help: el cartel sale sobre la ventana principal, con su velo.
 - `quitApplication` corta la cola (si quedo algo) y cierra la app.
-- El cartel es `ConfirmDialog` (`include/videodownloader/ConfirmDialog.h`): la API que pide
-  lgaupdate, con el aspecto de Help.
+- `presentDialog` dibuja los carteles de la biblioteca con `ConfirmDialog`
+  (`include/videodownloader/ConfirmDialog.h`), con el aspecto de Help: `fromUpdateSpec` traduce el
+  `LgaUpdateDialogSpec` (mensaje, notas, detalle, botones) a la spec del dialogo.
 
 ## Probar sin publicar
 
@@ -87,6 +89,11 @@ de `deploy.sh --zip --no-install` servido en local. La app ofrecio el update con
 el ZIP, el helper verifico la firma, reemplazo el bundle (firma valida despues del cambio, sin
 backup sobrante) y abrio la 0.96, que volvio a chequear y no ofrecio nada. Config, registro LGA y
 manifiestos del host de la extension respaldados antes y restaurados despues.
+Repetida el mismo dia con la `libs/lgaupdate` canonica de la Base: la 0.95 aprieta **Update now**
+por el cartel de la app (`presentDialog`), baja y verifica el ZIP, y el helper reemplaza el bundle
+(firma valida, sin backup) y reabre la 0.96. La copia de prueba se anota en el registro LGA
+(`~/Library/Application Support/LGA/VideoDownloader.json`, con su ruta temporal): borrarlo al
+restaurar.
 
 `--ui-shot` dibuja los carteles: `update-prompt` (con `--notes <whats_new.json>`), `whats-new`
 (necesita `--notes`) y `update-failed`; `help` y `help-update` muestran Help.

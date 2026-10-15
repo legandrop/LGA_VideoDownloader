@@ -1,4 +1,5 @@
 #include "videodownloader/mainwindow.h"
+#include "videodownloader/ConfirmDialog.h"
 #include "videodownloader/addvideoscard.h"
 #include "videodownloader/downloadqueue.h"
 #include "videodownloader/hostregistration.h"
@@ -606,6 +607,10 @@ void MainWindow::setupUpdates()
                                                  : QString();
     };
     config.installBlockedReason = [this]() { return updateInstallBlockedReason(); };
+    // Los carteles del updater salen con el dialogo de la app, el mismo de Help.
+    config.presentDialog = [](QWidget *parent, const LgaUpdateDialogSpec &spec) {
+        return ConfirmDialog::ask(parent, ConfirmDialog::fromUpdateSpec(spec));
+    };
     // El cartel de version nueva sale sobre la ventana principal, con su velo: Help se cierra.
     config.prepareForUpdatePrompt = [this]() {
         if (m_helpDialog) {

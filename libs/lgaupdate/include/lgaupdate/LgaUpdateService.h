@@ -1,5 +1,7 @@
 #pragma once
 
+#include "lgaupdate/LgaUpdateDialog.h"
+
 #include <QDateTime>
 #include <QObject>
 #include <QPointer>
@@ -150,6 +152,32 @@ struct LgaUpdateConfig {
      * QApplication::quit().
      */
     std::function<void()> quitApplication;
+
+    /**
+     * Si el helper posterga el update porque otra instancia de la app sigue abierta (nunca la
+     * cierra a la fuerza), vuelve a abrir la que se cerro para actualizar. Para una residente
+     * —FrameRev en la bandeja, con sus atajos globales— cuyo cierre deja al usuario sin la app.
+     * Default false: en una app de varias ventanas seria una instancia de mas.
+     */
+    bool relaunchWhenUpdatePostponed = false;
+
+    // ------------------------------------------------------------------- carteles
+    /**
+     * Dibuja los carteles del updater con los dialogos de la app (ver `LgaUpdateDialog.h`).
+     * Toda app LGA lo pasa: vacio cae a un `QMessageBox` sin el aspecto de la app.
+     */
+    LgaUpdateDialogPresenter presentDialog;
+    /**
+     * Resalta un dato dentro del mensaje (la version, el aviso de guardar el trabajo). Recibe
+     * texto ya escapado y devuelve HTML. Vacio = `<b>texto</b>`.
+     */
+    std::function<QString(const QString &escapedText)> emphasizeHtml;
+    /**
+     * Cursor de espera mientras corre un chequeo MANUAL, hasta el cartel. Para una app sin un
+     * boton que pase a "Checking..." (en el Shot Player, Preferences ya se cerro): sin esto, ese
+     * rato se ve como un click que no hizo nada.
+     */
+    bool busyCursorOnManualCheck = false;
 
     // ------------------------------------------------------------ notas ("What's new")
     /**
@@ -321,14 +349,17 @@ private:
                          const QString &assetName,
                          const QString &sha256Digest,
                          const QString &notesHtml);
-    /// Cierra la fase de chequeo: emite `checkFinished()`, una sola vez por chequeo.
+    /**
+     * Cierra la fase de chequeo: emite `checkFinished()` (una sola vez por chequeo) y saca el
+     * cursor de espera del chequeo manual.
+     */
     void endCheckPhase();
     /// GET del manifiesto para el "What's new" (despues de instalar e historial).
     void requestManifest(
         std::function<void(bool ok, const QByteArray &payload, const QString &detail)> onDone);
     /// Fetcher hijo de este objeto, que se borra solo al terminar.
     LgaWhatsNewFetcher *startNotesFetch(const LgaWhatsNew::AssetRef &asset, bool allowStaleCache);
-    /// Cartel modal con las notas ya en HTML, armado con `Dialogs`.
+    /// Cartel modal "What's New" con las notas ya en HTML.
     void showWhatsNewDialog(QWidget *parent,
                             const QString &title,
                             const QString &message,
@@ -350,6 +381,10 @@ private:
                               const QString &sha256Digest);
     bool launchInstallerWithHelper(const QString &installerPath, QString *errorMessage);
     QWidget *parentWindow() const;
+    /// Muestra `spec` con el presentador de la app (o el de respaldo) y devuelve el boton.
+    int presentDialog(QWidget *parent, const LgaUpdateDialogSpec &spec) const;
+    /// `emphasizeHtml` de la config, o `<b>` si no hay.
+    QString emphasis(const QString &escapedText) const;
 
     LgaUpdateConfig m_config;
     QPointer<QWidget> m_parentWindow;
@@ -370,6 +405,8 @@ private:
     bool m_promptVisible = false;
     /// Hay un chequeo cuyo `checkFinished()` todavia no se emitio.
     bool m_checkPhaseOpen = false;
+    /// El chequeo manual en curso puso el cursor de espera (ver `busyCursorOnManualCheck`).
+    bool m_checkCursorActive = false;
 
     // ------------------------------------------------------------- notas ("What's new")
     /// Esperando las notas antes de mostrar el cartel de update. Cuenta como ocupado.

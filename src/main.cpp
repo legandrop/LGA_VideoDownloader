@@ -105,12 +105,13 @@ void migrateLegacyAppDataDir()
     qInfo() << "Migracion AppData completada:" << legacyDir << "->" << currentDir;
 }
 
-// Borra el usuario y la contrasena de Vimeo que versiones anteriores guardaban EN TEXTO
-// PLANO en config.ini (grupo [vimeo]). La autenticacion ahora es por cookies del navegador
-// y esos datos ya no se leen: dejarlos en disco solo es riesgo. Se limpia tambien el
-// config.ini de la carpeta legacy VimeoDownloader, que la migracion conserva como rollback
-// y trae una copia de las mismas credenciales. El resto de la configuracion no se toca.
-// Idempotente: si no hay grupo [vimeo], no reescribe nada.
+// Borra el usuario y la contrasena que versiones anteriores guardaban EN TEXTO PLANO en
+// config.ini: el grupo [vimeo] y el [youtube] de versiones mas viejas todavia. La
+// autenticacion ahora es por cookies del navegador y esos datos ya no se leen: dejarlos en
+// disco solo es riesgo. Se limpia tambien el config.ini de la carpeta legacy
+// VimeoDownloader, que la migracion conserva como rollback y trae una copia de las mismas
+// credenciales. El resto de la configuracion no se toca.
+// Idempotente: si no hay ninguno de esos grupos, no reescribe nada.
 void purgeLegacyAccountCredentials()
 {
     const QStringList configs = {
@@ -122,10 +123,17 @@ void purgeLegacyAccountCredentials()
             continue;
         }
         QSettings settings(configPath, QSettings::IniFormat);
-        if (!settings.childGroups().contains(QStringLiteral("vimeo"))) {
+        const QStringList groups = settings.childGroups();
+        bool removed = false;
+        for (const QString &group : {QStringLiteral("vimeo"), QStringLiteral("youtube")}) {
+            if (groups.contains(group)) {
+                settings.remove(group);
+                removed = true;
+            }
+        }
+        if (!removed) {
             continue;
         }
-        settings.remove(QStringLiteral("vimeo"));
         settings.sync();
         if (settings.status() == QSettings::NoError) {
             qInfo() << "Credenciales de cuenta guardadas eliminadas de" << configPath;

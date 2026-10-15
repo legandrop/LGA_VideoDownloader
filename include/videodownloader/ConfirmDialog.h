@@ -5,10 +5,12 @@
 #include <QList>
 #include <QString>
 
+struct LgaUpdateDialogSpec;
+
 // Cartel de los carteles del auto-update (`libs/lgaupdate`): version nueva, notas, resultado de un
-// chequeo. La biblioteca lo pide por este nombre y con esta API, la misma que el ConfirmDialog de
-// ThetaExplorer: cada app que usa lgaupdate aporta el suyo con el aspecto de sus dialogos. Aca es
-// el de Help y What's new: caja redondeada propia, sin marco del sistema, sobre el velo que
+// chequeo. La biblioteca describe cada cartel con un `LgaUpdateDialogSpec` y la app lo dibuja con el
+// suyo (`LgaUpdateConfig::presentDialog`). Misma API que el ConfirmDialog de ThetaExplorer; aca con
+// el aspecto de Help y What's new: caja redondeada propia, sin marco del sistema, sobre el velo que
 // oscurece la ventana.
 class ConfirmDialog : public QDialog
 {
@@ -37,6 +39,8 @@ public:
 
     // Devuelve el indice del boton apretado, o spec.escapeIndex.
     static int ask(QWidget *parent, const Spec &spec);
+    // El cartel que pide lgaupdate, en los terminos de este dialogo. Es el `presentDialog` de la app.
+    static Spec fromUpdateSpec(const LgaUpdateDialogSpec &update);
 
     // Arma el cartel sin abrirlo, para la captura de QA (`--ui-shot`).
     static ConfirmDialog *build(const Spec &spec, QWidget *parent);

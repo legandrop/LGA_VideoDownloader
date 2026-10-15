@@ -15,7 +15,7 @@ platforms: [win, mac]
 - [new][win] A browser extension for Chrome, Brave and Edge sends the page you are watching to the app with one click, along with your login, so private and members-only videos download without exporting cookies. Help explains how to install it.
 - [new] Paste several links at once, or any text that contains them: each link becomes a card in the queue with its own progress, cancel and retry.
 - [new] Choose between MP4 video or audio only (M4A); the default "Most compatible" quality gives H.264 files that open in any editor.
-- [improved] Private videos no longer need a Vimeo username and password: the app uses the session of a browser where you are already logged in, or a cookies.txt file, and the old saved password is deleted.
+- [improved] Private videos no longer need a username and password: the app uses the session of a browser where you are already logged in, or a cookies.txt file, and any username and password saved by an earlier version are deleted.
 - [new] When a new version is out, the app shows what changed and installs it for you; you can also be reminded tomorrow or skip that version.
 - [new] Update notices show what's new in each version, and Help has the full history. The app checks for a new version every few hours while it stays open, not only at startup.
 - [new] yt-dlp and the other download tools update themselves in the background, so sites that change keep working without reinstalling.
