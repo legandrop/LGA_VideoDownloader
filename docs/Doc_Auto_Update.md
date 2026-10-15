@@ -135,6 +135,10 @@ se usa todavia), asi que el click real queda en el pendiente de Windows.
 - Nombres de asset exactos, los de arriba. El manifiesto publica su SHA-256 (lo calcula GitHub);
   sin SHA-256 la app no ofrece el update.
 - ZIP de macOS creado con `ditto` desde un bundle firmado y verificado (`deploy.sh` ya lo hace).
+- En macOS publica `tools/macos/publish_release.sh`, copia identica de la pieza canonica de
+  `../LGA_Base_QT_C_Py` (contrato en su `docs/Doc_Deploy_macOS.md` §5); los nombres, el
+  `SHA256SUMS` fusionado con `VideoDownloader_Setup_v<x>.exe` y las notas salen de
+  `tools/macos/release.conf`.
 - Despues de publicar, `deploy.sh --publish` e `instalador.bat --publish` disparan
   `refresh_versions.yml` de `LGA_Updates`; si el disparo falla, el cron lo levanta en 30-45 min.
 - Las copias v0.95 instaladas todavia usan el updater viejo, que lee `SHA256SUMS` del release:
