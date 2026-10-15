@@ -950,16 +950,20 @@ void LgaUpdateService::onCheckFinished()
         const QString snoozeUntilText = readState(&LgaUpdateSettingsKeys::snoozeUntil).toString();
 
         if (normalizedVersion(skippedVersion) == normalizedVersion(info.version)) {
+            logUpdate(QStringLiteral("Sin cartel: el usuario salteo la %1").arg(info.version));
             return;
         }
 
         const QDateTime snoozeUntil = QDateTime::fromString(snoozeUntilText, Qt::ISODate);
         if (snoozeUntil.isValid() && QDateTime::currentDateTime() < snoozeUntil) {
+            logUpdate(QStringLiteral("Sin cartel: pospuesto hasta %1").arg(snoozeUntilText));
             return;
         }
 
         if (!m_sessionDismissedVersion.isEmpty()
             && m_sessionDismissedVersion == normalizedVersion(info.version)) {
+            logUpdate(QStringLiteral("Sin cartel: la %1 se cerro con Cancel en esta sesion")
+                          .arg(info.version));
             return;
         }
     }
@@ -1099,6 +1103,11 @@ void LgaUpdateService::promptForUpdate(const QString &version,
         }
     }
 
+    // Mismo orden que `UpdateDialogAction`.
+    static const char *const kActionNames[] = {"Cancel", "Update now", "Remind me later", "Skip"};
+    logUpdate(QStringLiteral("Cartel de la %1: %2")
+                  .arg(version, QLatin1String(kActionNames[static_cast<int>(action)])));
+
     // Cancel (o la X) es "ahora no": calla esta version hasta reiniciar la app. Sin esto el
     // chequeo periodico la volvia a ofrecer cada pocas horas.
     if (action == UpdateDialogAction::Cancel) {
@@ -1110,8 +1119,10 @@ void LgaUpdateService::promptForUpdate(const QString &version,
         if (m_config.installBlockedReason) {
             const QString reason = m_config.installBlockedReason();
             if (!reason.isEmpty()) {
+                logUpdate(QStringLiteral("Instalacion postergada al elegir Update now: %1").arg(reason));
+                // Sin el log en Details: es un "ahora no", no un fallo que haya que reportar.
                 showResultDialog(tr("Update Postponed"), reason, QString(),
-                                 /*warning=*/true);
+                                 /*warning=*/true, /*attachUpdateLog=*/false);
                 return;
             }
         }
@@ -1556,6 +1567,9 @@ void LgaUpdateService::downloadAndRunUpdate(const QUrl &downloadUrl,
         tr("Downloading %1 %2...").arg(m_config.displayName, fallbackVersion), tr("Cancel"), 0, 0,
         parentWindow());
     m_progressDialog->setObjectName(QStringLiteral("updateDownloadProgressDialog"));
+    if (!m_config.progressDialogStyleSheet.isEmpty()) {
+        m_progressDialog->setStyleSheet(m_config.progressDialogStyleSheet);
+    }
     m_progressDialog->setWindowTitle(tr("Downloading Update"));
     m_progressDialog->setWindowModality(Qt::WindowModal);
     m_progressDialog->setMinimumDuration(0);
@@ -1784,7 +1798,8 @@ void LgaUpdateService::abortDownloadDeferred()
 void LgaUpdateService::showResultDialog(const QString &title,
                                         const QString &message,
                                         const QString &rawDetail,
-                                        bool warning)
+                                        bool warning,
+                                        bool attachUpdateLog)
 {
     // Un cartel de resultado cierra la fase de chequeo ANTES de abrirse (ver `checkFinished`).
     endCheckPhase();
@@ -1806,7 +1821,7 @@ void LgaUpdateService::showResultDialog(const QString &title,
         message.toHtmlEscaped().replace(QLatin1Char('\n'), QStringLiteral("<br>"));
     // En un fallo, el "Details" lleva la ruta del log: es el archivo que el usuario tiene que
     // mandar.
-    spec.details = warning ? withUpdateLogPath(rawDetail) : rawDetail;
+    spec.details = (warning && attachUpdateLog) ? withUpdateLogPath(rawDetail) : rawDetail;
     spec.warning = warning;
     spec.hintHtml = tr("<b>Enter</b> / <b>Esc</b> / <b>O</b> OK");
     spec.buttons = {{LgaUpdateDialogSpec::Role::Ok, tr("&OK"), /*primary=*/true, Qt::Key_O}};
@@ -2032,7 +2047,7 @@ void LgaUpdateService::onDownloadFinished()
             QFile::remove(installerPath);
             m_downloadTargetPath.clear();
             showResultDialog(tr("Update Postponed"), reason, QString(),
-                             /*warning=*/true);
+                             /*warning=*/true, /*attachUpdateLog=*/false);
             return;
         }
     }

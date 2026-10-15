@@ -60,6 +60,7 @@ Con los defaults, una app de la rev 1 se comporta igual: solo re-copia.
 | `updateLogPath` | Log de la app (chequeo, descarga, helper, con rotación a 1 MB); el mismo archivo donde escribe el helper. Los carteles de error llevan su ruta en Details | Sin log de la app; el helper de macOS escribe en `~/Library/Logs/LGA/<productId>/Update.log` |
 | `closePolicy` | `Postpone` o `Force`: qué hace el helper si la app sigue abierta pasado el plazo (15 s en Windows, 30 s en macOS) | `Postpone` |
 | `windowsPythonProcessNames`, `windowsRedisCommandLineMatches`, `windowsPythonCommandLineMatches`, `macBackendProcessPatterns` | Procesos de fondo que el helper espera (Windows: 8 s, y después los cierra o posterga según `closePolicy`; macOS: 20 s, y solo lo anota) | Ninguno |
+| `progressDialogStyleSheet` | Hoja de estilo del diálogo de progreso de la descarga (objectName `updateDownloadProgressDialog`) | El estilo de la app |
 | `updateDirWriteFallback` | Si la carpeta de `updateCacheDir` no acepta una escritura real, bajar al `CacheLocation` o `TempLocation` del usuario | Falla como antes |
 
 Además, sin config: un manifiesto de schema más nuevo pide reinstalar ("This version is too old to

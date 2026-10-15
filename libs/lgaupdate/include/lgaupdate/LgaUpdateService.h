@@ -205,6 +205,11 @@ struct LgaUpdateConfig {
      * rato se ve como un click que no hizo nada.
      */
     bool busyCursorOnManualCheck = false;
+    /**
+     * Hoja de estilo del dialogo de progreso de la descarga (`QProgressDialog` con objectName
+     * `updateDownloadProgressDialog`). Vacia (default) = el estilo de la app.
+     */
+    QString progressDialogStyleSheet;
 
     // ------------------------------------------------------------ notas ("What's new")
     /**
@@ -427,7 +432,8 @@ private:
     void showResultDialog(const QString &title,
                           const QString &message,
                           const QString &rawDetail = QString(),
-                          bool warning = false);
+                          bool warning = false,
+                          bool attachUpdateLog = true);
     /**
      * Aborta la descarga en el proximo ciclo del event loop. `abort()` emite `finished()`
      * sincronicamente, asi que llamarlo desde un handler de red anida `onDownloadFinished`
