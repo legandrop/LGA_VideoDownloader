@@ -7,7 +7,8 @@ REM                 el instalador, SHA256SUMS y las notas para el usuario (What'
 REM   --no-publish  no publica ni pregunta.
 REM   --replace     con --publish, reemplaza el instalador de Windows de un release que ya lo tiene.
 REM Sin flags de publicacion: antes de armar nada mira el release en GitHub y pregunta con una
-REM tecla: publicar (o sumar el instalador al release), instalador local o cancelar.
+REM tecla: publicar (o sumar el instalador al release), instalador local o cancelar. Sin consola
+REM no pregunta: arma solo el instalador local.
 set "NO_RUN="
 set "PUBLISH=prompt"
 set "REPLACE="
@@ -77,6 +78,12 @@ set "RELEASE_REPO=legandrop/LGA_VideoDownloader"
 set "INTERACTIVE="
 powershell -NoProfile -Command "if ([Console]::IsInputRedirected) { exit 3 } else { exit 0 }"
 if not errorlevel 1 set "INTERACTIVE=1"
+REM Sin consola no hay a quien preguntarle: solo el instalador local, como publish_release.sh
+REM --decide en la Mac. Una corrida desatendida que tenga que publicar pasa --publish.
+if /I "%PUBLISH%"=="prompt" if not defined INTERACTIVE (
+    echo Sin consola interactiva: se arma solo el instalador local, sin preguntar.
+    set "PUBLISH=never"
+)
 if /I "%PUBLISH%"=="never" goto :publish_preflight_done
 if /I "%PUBLISH%"=="prompt" goto :publish_menu
 call :gh_detect
@@ -105,7 +112,7 @@ REM      --publish --replace] ni si el changelog va adelante: falta el bump, y e
 REM      script de bump.
 REM   2  instalador local, sin subir nada.     3  cancelar.
 REM Si algo impide publicar se dice por que y quedan solo 2 y 3. Una tecla que no es opcion no hace
-REM nada; sin entrada [EOF] choice cancela. Una corrida desatendida pasa --publish o --no-publish.
+REM nada; Ctrl+C o un error de choice cancelan.
 set "MENU_ACTION="
 set "MENU_STATUS="
 set "MENU_NOTE="
