@@ -12,7 +12,7 @@ platforms: [win, mac]
 
 ## v0.96
 - [new] VimeoDownloader is now LGA VideoDownloader, a rebuilt app that downloads from YouTube, Vimeo, SoundCloud, Instagram and most other video and audio sites.
-- [new][win] A browser extension for Chrome, Brave and Edge sends the page you are watching to the app with one click, along with your login, so private and members-only videos download without exporting cookies. Help explains how to install it.
+- [new][win] A browser extension for Chrome, Brave and Edge sends the page you are watching to the app with one click, along with your login, so private and members-only videos download without exporting cookies. Settings explains how to install it.
 - [new] Paste several links at once, or any text that contains them: each link becomes a card in the queue with its own progress, cancel and retry.
 - [new] Choose between MP4 video or audio only (M4A); the default "Most compatible" quality gives H.264 files that open in any editor.
 - [improved] Private videos no longer need a username and password: the app uses the session of a browser where you are already logged in, or a cookies.txt file, and any username and password saved by an earlier version are deleted.
@@ -22,7 +22,8 @@ platforms: [win, mac]
 - [improved] Errors explain what went wrong and how to fix it, for example when a video needs you to sign in or a site isn't supported; live streams and scheduled premieres are skipped with a clear message.
 - [improved] Cancelling a download, or closing the app, removes its partial files.
 - [new] The log is always visible at the bottom, with filters and a Copy button.
-- [new] Help shows the app version, updates, the versions of the download tools and the credits.
+- [improved] The top of the window matches the other LGA apps: the app name on the left and Settings and Help on the right, with no lone DOWNLOADS tab.
+- [new] Settings has the update check, how to install the browser extension and the versions of the download tools; Help shows the app version, what's new and the credits.
 - [improved] The window fits small laptop screens without overlapping controls.
 - [improved][win] Installing removes the old VimeoDownloader and keeps your download folder, and everything the app downloads lives inside its install folder, so uninstalling removes it all.
 - [improved][mac] The app is now called "LGA Video Downloader", installs from a DMG and no longer needs anything else installed on the Mac.

@@ -52,14 +52,6 @@ IconSpec buildIcon(Icon icon)
     IconSpec s{16, 1.4, {}, {}};
     QPainterPath &p = s.strokePath;
     switch (icon) {
-    case Icon::Help:
-        s.viewBox = 20; s.stroke = 1.7;
-        p.addEllipse(QPointF(10, 10), 8, 8);
-        p.moveTo(7.6, 7.6);
-        svgArc(p, QPointF(12.4, 8.5), 2.5, false, true);
-        p.cubicTo(12.4, 10.2, 10, 10.6, 10, 11.9);
-        s.fillPath.addEllipse(QPointF(10, 14.6), 1.25, 1.25);
-        break;
     case Icon::Folder:
         s.viewBox = 16; s.stroke = 1.4;
         p.moveTo(1.8, 4.2);

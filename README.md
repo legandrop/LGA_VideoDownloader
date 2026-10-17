@@ -12,14 +12,16 @@ Aplicación Qt/C++ (Windows y macOS) para descargar videos con [yt-dlp](https://
 - **Errores:** la tarjeta explica qué pasó y cómo seguir (por ejemplo "Sign in to confirm your age" con *Retry with Firefox*). Las transmisiones en vivo se rechazan al empezar ("Live streams aren't supported") y los sitios que yt-dlp no soporta terminan en "This site isn't supported".
 - **Cancelar:** la X de la tarjeta, *Cancel all* o cerrar la app cortan yt-dlp con sus procesos hijos y borran los archivos parciales de esa descarga (`.part`, `.ytdl`, fragmentos). Nunca archivos completos ni de otras descargas.
 - **Log:** siempre visible abajo, con filtros All/Warnings/Errors y botón Copy.
-- **Help** (icono `?`): versión, actualizaciones, versiones de yt-dlp/ffmpeg/deno y créditos.
+- **Barra de título** propia, la de FaceLock y RotoWorker: icono y nombre a la izquierda, avisos (tools, update), **Settings** y **Help** a la derecha y, en Windows, los botones de ventana (la ventana no tiene barra nativa).
+- **Settings** (engranaje): actualizaciones (Check now), cómo instalar la extensión de navegador y versiones de yt-dlp/ffmpeg/deno.
+- **Help** (icono `?`): versión, What's new, autor y créditos.
 
 Configuración: `%APPDATA%\LGA\VideoDownloader\config.ini` (Windows) o `~/Library/Application Support/LGA/VideoDownloader/config.ini` (macOS). En AppData solo van settings: lo pesado (yt-dlp, deno y las cookies temporales) vive en la carpeta de la app en Windows y en Application Support en macOS.
 
 ## Actualizaciones
 
 - **yt-dlp y deno:** al abrir la app se buscan versiones nuevas en GitHub (tag fijo, SHA-256 obligatorio) y se instalan en la carpeta `tools` de la propia app (Windows) o en `~/Library/Application Support/LGA/VideoDownloader/tools` (macOS, fuera del bundle por la firma). El reemplazo se hace solo cuando no hay una descarga corriendo.
-- **La app:** `libs/lgaupdate`, la biblioteca de updates de las apps LGA. Lee el manifiesto de versiones de `LGA_Updates` al abrir y después cada 3 horas (±15 min al azar) mientras sigue abierta. Si hay una versión nueva, ofrece el update en un cartel con las notas de lo nuevo (`whats_new.json` del release) y lo marca con "Update available" arriba a la derecha y en Help. Baja el instalador (Windows) o el ZIP firmado (macOS), verifica el SHA-256 y lo instala sobre la misma carpeta. **What's new** en Help muestra el historial completo, y después de un update que no se vio venir la app muestra sus notas una vez. Detalle en `docs/Doc_Auto_Update.md`.
+- **La app:** `libs/lgaupdate`, la biblioteca de updates de las apps LGA. Lee el manifiesto de versiones de `LGA_Updates` al abrir y después cada 3 horas (±15 min al azar) mientras sigue abierta. Si hay una versión nueva, ofrece el update en un cartel con las notas de lo nuevo (`whats_new.json` del release) y lo marca con "Update available" arriba a la derecha y en Settings. Baja el instalador (Windows) o el ZIP firmado (macOS), verifica el SHA-256 y lo instala sobre la misma carpeta. **What's new** en Help muestra el historial completo, y después de un update que no se vio venir la app muestra sus notas una vez. Detalle en `docs/Doc_Auto_Update.md`.
 - **ffmpeg** viene con la app y no se actualiza solo.
 
 Detalle por plataforma: [PLATFORM_DIFFERENCES.md](PLATFORM_DIFFERENCES.md). Cola y parseo de yt-dlp: [DOWNLOAD_QUEUE_SYSTEM.md](DOWNLOAD_QUEUE_SYSTEM.md).
@@ -51,16 +53,17 @@ Cada comando valida las notas para el usuario (`docs/WhatsNew.md`) antes de arma
 VideoDownloader.exe --ui-shot <estado> <salida.png> [--dpr 1.5] [--size 1200x860]
 ```
 
-Estados: `empty`, `downloading`, `error`, `tools`, `other-errors`, `help`, `help-update`, y los carteles del update `update-prompt`, `whats-new` y `update-failed` (con `--notes <whats_new.json>`, que `whats-new` exige). Dibuja la ventana real con datos de prueba y escribe al lado un `.json` con la geometría. `--qa-walkthrough <links.txt> <carpeta> --qa-isolated <destino>` corre la app real sin ventana (plataforma offscreen), pega los links, aprieta Download y guarda capturas.
+Estados: `empty`, `downloading`, `error`, `tools`, `other-errors`, `help`, `settings`, `settings-update`, y los carteles del update `update-prompt`, `whats-new` y `update-failed` (con `--notes <whats_new.json>`, que `whats-new` exige). Dibuja la ventana real con datos de prueba y escribe al lado un `.json` con la geometría. `--qa-walkthrough <links.txt> <carpeta> --qa-isolated <destino>` corre la app real sin ventana (plataforma offscreen), pega los links, aprieta Download y guarda capturas. `--qa-titlebar` (Windows, con el runner en `-Platform windows`) prueba el marco propio con la ventana real: estilo nativo, qué responde Windows en la barra, los botones, el cuerpo y los bordes, y maximizar, restaurar, minimizar y cerrar con los botones de la barra.
 
 ## Estructura
 
 ```
 include/videodownloader/   Cabeceras
 src/core/                  DownloadQueue (cola y yt-dlp), NativeHost (extension)
-src/ui/                    MainWindow, AddVideosCard, QueueView, LogView, HelpDialog, tema
+src/ui/                    MainWindow, AppHeaderBar (barra de titulo) y windowsframeless (marco propio en Windows),
+                           AddVideosCard, QueueView, LogView, HelpDialog y SettingsDialog, tema
 src/utils/                 ToolsManager/ToolsUpdater (tools), BrowserDetect, LinkParser
-src/qa/                    --ui-shot y --qa-walkthrough
+src/qa/                    --ui-shot, --qa-walkthrough, --qa-titlebar y los demas --qa-*
 libs/lgaupdate/            Update de la app (biblioteca compartida de las apps LGA)
 resources/                 Fuentes Inter, iconos, fondo del DMG
 tools/, toolsmac/          yt-dlp, ffmpeg y deno que se distribuyen con la app

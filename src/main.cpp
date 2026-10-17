@@ -188,6 +188,10 @@ int main(int argc, char *argv[])
     if (app.arguments().contains(QStringLiteral("--qa-tools-check"))) {
         return runToolsCheck(app.arguments());
     }
+    if (app.arguments().contains(QStringLiteral("--qa-titlebar"))) {
+        Theme::apply(app);
+        return runTitleBarCheck(app.arguments());
+    }
     if (app.arguments().contains(QStringLiteral("--ui-shot"))) {
         Theme::apply(app);
         return runUiShot(app.arguments());

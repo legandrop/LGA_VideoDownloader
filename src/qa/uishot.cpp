@@ -4,7 +4,8 @@
 #include "videodownloader/logview.h"
 #include "videodownloader/mainwindow.h"
 #include "videodownloader/queueview.h"
-#include "videodownloader/tabheader.h"
+#include "videodownloader/appheaderbar.h"
+#include "videodownloader/settingsdialog.h"
 
 #include "videodownloader/apppaths.h"
 #include "videodownloader/downloadqueue.h"
@@ -52,7 +53,8 @@ namespace {
 
 const QStringList kStates = {
     QStringLiteral("empty"), QStringLiteral("downloading"), QStringLiteral("error"), QStringLiteral("tools"),
-    QStringLiteral("help"), QStringLiteral("help-update"), QStringLiteral("other-errors"),
+    QStringLiteral("help"), QStringLiteral("settings"), QStringLiteral("settings-update"),
+    QStringLiteral("other-errors"),
     QStringLiteral("update-prompt"), QStringLiteral("whats-new"), QStringLiteral("update-failed"),
 };
 
@@ -263,7 +265,7 @@ void loadOtherErrors(MainWindow &window)
 
 void loadTools(MainWindow &window)
 {
-    window.tabHeader()->setToolsNotice(QStringLiteral("Installing download tools…"), QStringLiteral("neutral"), QString());
+    window.headerBar()->setToolsNotice(QStringLiteral("Installing download tools…"), QStringLiteral("neutral"), QString());
     QueueView *queue = window.queueView();
     queue->setWaitingForTools(true);
     DownloadItem waiting = fixtureItem(1, QStringLiteral("https://www.youtube.com/watch?v=jNQXAC9IVRw"), DownloadStatus::Pending, QString());
@@ -710,11 +712,12 @@ int runUiShot(const QStringList &args)
     card->setDownloadFolder(QStringLiteral("D:/Downloads/Video"));
     window.queueView()->setFirefoxAvailable(true);
 
-    const bool help = state.startsWith(QLatin1String("help"));
+    const bool help = state == QLatin1String("help");
+    const bool settings = state.startsWith(QLatin1String("settings"));
     if (state == QLatin1String("empty")) {
         card->setCookiesSource(QStringLiteral("firefox"), QString());
         loadEmpty(window);
-    } else if (state == QLatin1String("downloading") || help) {
+    } else if (state == QLatin1String("downloading") || help || settings) {
         card->setCookiesSource(QStringLiteral("firefox"), QString());
         loadDownloading(window);
     } else if (state == QLatin1String("error")) {
@@ -735,7 +738,7 @@ int runUiShot(const QStringList &args)
     if (updateDialog) {
         card->setCookiesSource(QStringLiteral("firefox"), QString());
         loadEmpty(window);
-        window.tabHeader()->setUpdateNotice(QStringLiteral("Update available · v%1").arg(shotOffered));
+        window.headerBar()->setUpdateNotice(QStringLiteral("Update available · v%1").arg(shotOffered));
         auto *scrim = new Scrim(window.centralWidget());
         scrim->setVisible(true);
         ConfirmDialog::Spec spec;
@@ -757,24 +760,32 @@ int runUiShot(const QStringList &args)
         confirm->setVisible(true);
         dialog = confirm;
     }
-    if (help) {
-        window.tabHeader()->setUpdateNotice(state == QLatin1String("help-update") ? QStringLiteral("Update available · v%1").arg(shotOffered)
-                                                                                 : QString());
+    if (help || settings) {
+        const bool withUpdate = state == QLatin1String("settings-update");
+        window.headerBar()->setUpdateNotice(withUpdate ? QStringLiteral("Update available · v%1").arg(shotOffered) : QString());
         auto *scrim = new Scrim(window.centralWidget());
         scrim->setVisible(true);
-        auto *helpDialog = new HelpDialog(window.centralWidget());
-        dialog = helpDialog;
-        // Hijo comun dentro de la ventana, no una ventana propia: se dibuja con el mismo render.
-        helpDialog->setWindowFlags(Qt::Widget);
-        helpDialog->setToolVersions({{QStringLiteral("yt-dlp"), QStringLiteral("2026.08.19")},
-                                     {QStringLiteral("ffmpeg"), QStringLiteral("N-117208-gbd22d7e601-20240927")},
-                                     {QStringLiteral("deno"), QStringLiteral("2.9.6")}});
-        UpdateView view;
-        if (state == QLatin1String("help-update")) {
-            view.availableVersion = shotOffered;
+        PanelDialog *panel = nullptr;
+        if (help) {
+            panel = new HelpDialog(window.centralWidget());
+            window.headerBar()->setHelpActive(true);
+        } else {
+            auto *settingsDialog = new SettingsDialog(window.centralWidget());
+            settingsDialog->setToolVersions({{QStringLiteral("yt-dlp"), QStringLiteral("2026.08.19")},
+                                             {QStringLiteral("ffmpeg"), QStringLiteral("N-117208-gbd22d7e601-20240927")},
+                                             {QStringLiteral("deno"), QStringLiteral("2.9.6")}});
+            UpdateView view;
+            if (withUpdate) {
+                view.availableVersion = shotOffered;
+            }
+            settingsDialog->setUpdateView(view);
+            window.headerBar()->setSettingsActive(true);
+            panel = settingsDialog;
         }
-        helpDialog->setUpdateView(view);
-        helpDialog->setVisible(true);
+        dialog = panel;
+        // Hijo comun dentro de la ventana, no una ventana propia: se dibuja con el mismo render.
+        panel->setWindowFlags(Qt::Widget);
+        panel->setVisible(true);
     }
 
     // Resolver layouts: render() activa los layouts de widgets nunca mostrados, pero los
@@ -817,7 +828,7 @@ int runUiShot(const QStringList &args)
     descriptor.insert(QStringLiteral("version"), QStringLiteral(VIDEODOWNLOADER_VERSION));
     descriptor.insert(QStringLiteral("fixture"), true);
     QJsonObject geometry;
-    geometry.insert(QStringLiteral("tabHeader"), geometryOf(window.tabHeader(), &window));
+    geometry.insert(QStringLiteral("headerBar"), geometryOf(window.headerBar(), &window));
     geometry.insert(QStringLiteral("addCard"), geometryOf(window.addCard(), &window));
     geometry.insert(QStringLiteral("queueView"), geometryOf(window.queueView(), &window));
     geometry.insert(QStringLiteral("logView"), geometryOf(window.logView(), &window));

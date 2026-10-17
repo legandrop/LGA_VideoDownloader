@@ -5,7 +5,11 @@
         <file>styles/dark_theme.qss</file>
     </qresource>
     <qresource prefix="/icons">
-        <!-- Iconos se añadirán aquí cuando estén disponibles -->
+        <!-- Barra de titulo: el icono de la app (el PNG de 256 del .ico) y los dibujos de
+             Settings y Help, copia byte a byte de los de FaceLock y RotoWorker. -->
+        <file alias="app_256.png">icons/app_256.png</file>
+        <file alias="settings.svg">icons/settings.svg</file>
+        <file alias="help.svg">icons/help.svg</file>
     </qresource>
     <!-- Inter embebida (la carga Theme::apply). Inter-SemiBold es el peso 600. -->
     <qresource prefix="/">

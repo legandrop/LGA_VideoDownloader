@@ -159,14 +159,14 @@ REM  Van AL LADO del exe: la app tiene que arrancar sin el PATH de este script, 
 REM  la abre explorer.exe mas abajo y como corre instalada. El arbol es incremental, asi que
 REM  en la corrida normal esto son N chequeos "if not exist" y no se copia nada.
 REM
-REM  La lista sale de lo que la app linkea [find_package Core Gui Widgets Network, y las DLL
+REM  La lista sale de lo que la app linkea [find_package Core Gui Widgets Network Svg, y las DLL
 REM  que importa el exe] y de los plugins que esos modulos cargan: plataforma [qwindows, y
 REM  qoffscreen para las capturas y pruebas sin pantalla], estilo, TLS [las descargas de
 REM  yt-dlp, deno y el update de la app son HTTPS: sin el backend no hay red] e informacion
 REM  de red. Con las DLL de Qt al lado del exe, Qt busca los plugins ahi y ya no en la
 REM  instalacion de Qt: lo que no este en esta lista, la app no lo tiene.
 REM ============================================================
-set "DEP_LIST=libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll Qt6Core.dll Qt6Gui.dll Qt6Widgets.dll Qt6Network.dll platforms\qwindows.dll platforms\qoffscreen.dll styles\qmodernwindowsstyle.dll tls\qschannelbackend.dll tls\qcertonlybackend.dll networkinformation\qnetworklistmanager.dll"
+set "DEP_LIST=libgcc_s_seh-1.dll libstdc++-6.dll libwinpthread-1.dll Qt6Core.dll Qt6Gui.dll Qt6Widgets.dll Qt6Network.dll Qt6Svg.dll platforms\qwindows.dll platforms\qoffscreen.dll styles\qmodernwindowsstyle.dll tls\qschannelbackend.dll tls\qcertonlybackend.dll networkinformation\qnetworklistmanager.dll"
 
 echo Verificando dependencias de runtime...
 set "DEPS_MISSING=false"
@@ -308,6 +308,7 @@ call :copy_dep "%QT_DIR%\bin" "" Qt6Core.dll
 call :copy_dep "%QT_DIR%\bin" "" Qt6Gui.dll
 call :copy_dep "%QT_DIR%\bin" "" Qt6Widgets.dll
 call :copy_dep "%QT_DIR%\bin" "" Qt6Network.dll
+call :copy_dep "%QT_DIR%\bin" "" Qt6Svg.dll
 call :copy_dep "%QT_DIR%\plugins\platforms" "platforms" qwindows.dll
 call :copy_dep "%QT_DIR%\plugins\platforms" "platforms" qoffscreen.dll
 call :copy_dep "%QT_DIR%\plugins\styles" "styles" qmodernwindowsstyle.dll

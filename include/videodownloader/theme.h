@@ -13,7 +13,7 @@ namespace Theme {
 
 // Fondos
 inline constexpr const char *kWindow = "#161616";
-inline constexpr const char *kTabBar = "#101010";
+inline constexpr const char *kTitleBar = "#101010";
 inline constexpr const char *kCard = "#1d1d1d";
 inline constexpr const char *kTile = "#242424";
 inline constexpr const char *kField = "#1a1a1a";
@@ -37,6 +37,14 @@ inline constexpr const char *kTextPlaceholder = "#555555";
 inline constexpr const char *kIcon = "#6a6a6a";
 inline constexpr const char *kAccent = "#774dcb";
 inline constexpr const char *kLink = "#9D8FE0";
+
+// Barra de titulo propia: los grises y fondos de la barra de FaceLock y RotoWorker. Los iconos de la
+// derecha (Settings, Help y los tres botones de ventana) en reposo y con el cursor encima.
+inline constexpr const char *kTitleIcon = "#525252";
+inline constexpr const char *kTitleIconHover = "#E6E6E6";
+inline constexpr const char *kWindowButtonHover = "#1d1d1d";
+inline constexpr const char *kCloseButtonHover = "#a03535";
+inline constexpr const char *kCloseButtonHoverIcon = "#ffffff";
 
 // Estados
 inline constexpr const char *kOk = "#a8d86a";

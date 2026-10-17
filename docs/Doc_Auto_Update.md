@@ -25,10 +25,10 @@ macOS:      LGA_Video_Downloader_Mac_v<version>.zip  (deploy.sh --zip)
   this version** y **Cancel** (calla esa version hasta reiniciar la app).
 - El header muestra **Update available · v<x>** desde que un chequeo encuentra la version nueva,
   aunque el cartel se haya pospuesto. Click: el mismo cartel, con las notas.
-- **Help**: la caja del update (Update / Later), la fila **Updates** con **Check now** (sin hora del
-  ultimo chequeo: lgaupdate no informa si un chequeo fallo, y un chequeo automatico fallido no
-  muestra nada),  y el link **What's new**, que abre el historial completo (sin red, la ultima copia
-  verificada).
+- **Settings**: la caja del update (Update / Later) y la fila **Updates** con **Check now** (sin hora
+  del ultimo chequeo: lgaupdate no informa si un chequeo fallo, y un chequeo automatico fallido no
+  muestra nada). **Help**: el link **What's new**, que abre el historial completo (sin red, la ultima
+  copia verificada).
 - **Update now** con descargas en la cola no instala: avisa que hay que dejarlas terminar o
   cancelarlas. Se vuelve a mirar al terminar de bajar el update.
 - La descarga muestra progreso y se puede cancelar. Despues la app se cierra sola:
@@ -43,8 +43,8 @@ macOS:      LGA_Video_Downloader_Mac_v<version>.zip  (deploy.sh --zip)
     vuelve a verificar la firma, saca la cuarentena y abre la app nueva. Si algo falla restaura el
     backup, reabre la app que habia y avisa con una notificacion. Log:
     `~/Library/Logs/LGA/LGA_Video_Downloader/Update.log`.
-- Un build del arbol de desarrollo nunca se actualiza (`LgaRegistry::isDevelopmentBuild`): Help lo
-  dice y el chequeo manual tambien.
+- Un build del arbol de desarrollo nunca se actualiza (`LgaRegistry::isDevelopmentBuild`): Settings
+  lo dice y el chequeo manual tambien.
 
 ## Implementacion
 
@@ -70,7 +70,7 @@ Todo se configura en `MainWindow::setupUpdates()`:
   update en curso: en Windows el instalador todavia corre cuando abre la app nueva y no se puede
   borrar en el primer barrido. No barren ni los builds de desarrollo ni los modos de QA: en macOS la
   carpeta es la misma de la copia instalada.
-- `prepareForUpdatePrompt` cierra Help: el cartel sale sobre la ventana principal, con su velo.
+- `prepareForUpdatePrompt` cierra Help y Settings: el cartel sale sobre la ventana principal, con su velo.
 - `quitApplication` corta la cola (si quedo algo) y cierra la app.
 - `presentDialog` dibuja los carteles de la biblioteca con `ConfirmDialog`
   (`include/videodownloader/ConfirmDialog.h`), con el aspecto de Help: `fromUpdateSpec` traduce el
@@ -96,7 +96,8 @@ por el cartel de la app (`presentDialog`), baja y verifica el ZIP, y el helper r
 restaurar.
 
 `--ui-shot` dibuja los carteles: `update-prompt` (con `--notes <whats_new.json>`), `whats-new`
-(necesita `--notes`) y `update-failed`; `help` y `help-update` muestran Help.
+(necesita `--notes`) y `update-failed`; `settings` y `settings-update` muestran Settings, sin y con la
+caja del update.
 
 ## La extension de navegador y el update
 

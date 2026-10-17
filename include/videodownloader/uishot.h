@@ -37,6 +37,11 @@ int runUpdateDirsCheck(const QStringList &args);
 // carpeta de prueba, nunca en la carpeta de tools de una copia de la app.
 int runToolsCheck(const QStringList &args);
 
+// `--qa-titlebar`: marco propio de la ventana con un HWND real (Windows, runner con `-Platform windows`):
+// estilo nativo, WM_NCHITTEST en barra, botones, cuerpo, bordes y esquinas, y maximizar, restaurar,
+// minimizar y cerrar con los botones de la barra. Modo captura: sin tools, cola, red ni settings.
+int runTitleBarCheck(const QStringList &args);
+
 // `--qa-cookies`: test sin red del armado de cookies.txt y de la validacion del protocolo de
 // la extension. Imprime PASS/FAIL por caso y devuelve 0 si pasan todos.
 int runCookiesCheck();

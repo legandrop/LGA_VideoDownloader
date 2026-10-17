@@ -162,8 +162,9 @@ QComboBox QAbstractItemView::item:disabled { color: #5a5a5a; }
 QFrame#field { background-color: @field; border: 1px solid @fieldBorder; border-radius: 3px; min-height: 28px; max-height: 28px; }
 QLabel#fieldValue, ElidedLabel#fieldValue { color: @textCaption; font-size: @fs13_5; }
 
-/* Barra superior */
-QToolButton#cornerButton { background: transparent; border: none; padding: 0px; }
+/* Barra de titulo propia: el nombre en el gris de FaceLock y RotoWorker, 13 px, peso 600 */
+QWidget#appHeaderContent { background: transparent; }
+QLabel#appName { color: #E6E6E6; font-size: @fs13; font-weight: 600; }
 QPushButton#noticeChip {
     min-height: 22px; max-height: 22px; padding: 0px 9px; border-radius: 4px; font-size: @fs12;
     font-weight: 600; background-color: #26223f; border: 1px solid #3B316A; color: @run;

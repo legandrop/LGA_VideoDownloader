@@ -62,7 +62,7 @@ else()
 endif()
 
 # Encontrar paquetes de Qt
-find_package(Qt6 COMPONENTS Core Gui Widgets Network REQUIRED)
+find_package(Qt6 COMPONENTS Core Gui Widgets Network Svg REQUIRED)
 
 # Encontrar paquetes específicos de Windows
 if(WIN32)
@@ -96,7 +96,9 @@ set(SOURCES
     src/ui/mainwindow.cpp
     src/ui/theme.cpp
     src/ui/uiwidgets.cpp
-    src/ui/tabheader.cpp
+    src/ui/appheaderbar.cpp
+    src/ui/windowsframeless.cpp
+    src/ui/settingsdialog.cpp
     src/ui/addvideoscard.cpp
     src/ui/queueview.cpp
     src/ui/logview.cpp
@@ -104,6 +106,7 @@ set(SOURCES
     src/ui/confirmdialog.cpp
     src/ui/videopassworddialog.cpp
     src/qa/uishot.cpp
+    src/qa/titlebarcheck.cpp
     src/core/downloadqueue.cpp
     src/core/nativehost.cpp
     src/core/appinstance.cpp
@@ -124,7 +127,10 @@ set(HEADERS
     include/videodownloader/videopassworddialog.h
     include/videodownloader/theme.h
     include/videodownloader/uiwidgets.h
-    include/videodownloader/tabheader.h
+    include/videodownloader/appheaderbar.h
+    include/videodownloader/titlebarbuttons.h
+    include/videodownloader/windowsframeless.h
+    include/videodownloader/settingsdialog.h
     include/videodownloader/addvideoscard.h
     include/videodownloader/queueview.h
     include/videodownloader/logview.h
@@ -203,11 +209,15 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     Qt6::Gui
     Qt6::Widgets
     Qt6::Network
+    # Svg: los iconos de Settings y Help de la barra de titulo (los mismos .svg de FaceLock).
+    Qt6::Svg
     LGAUpdate
 )
 
 # Vincular con bibliotecas específicas de Windows
 if(WIN32)
+    # dwmapi: esquinas redondeadas de la ventana sin marco nativo (windowsframeless.cpp).
+    target_link_libraries(${PROJECT_NAME} PRIVATE dwmapi)
     if(Qt6WinExtras_FOUND)
         target_link_libraries(${PROJECT_NAME} PRIVATE Qt6::WinExtras)
     endif()

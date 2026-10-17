@@ -15,7 +15,7 @@ class QPushButton;
 // dispositivo, sin mapas de bits reescalados.
 
 enum class Icon {
-    Help, Folder, X, Retry, Check, Alert, Clock, Copy, Cookie, Link, External, ArrowDown
+    Folder, X, Retry, Check, Alert, Clock, Copy, Cookie, Link, External, ArrowDown
 };
 
 namespace Icons {

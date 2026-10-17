@@ -1,4 +1,5 @@
 #include "videodownloader/mainwindow.h"
+#include "videodownloader/appheaderbar.h"
 #include "videodownloader/ConfirmDialog.h"
 #include "videodownloader/addvideoscard.h"
 #include "videodownloader/downloadqueue.h"
@@ -7,13 +8,13 @@
 #include "videodownloader/sessioncookies.h"
 #include "videodownloader/logview.h"
 #include "videodownloader/queueview.h"
-#include "videodownloader/tabheader.h"
 #include "videodownloader/toolsmanager.h"
 #include "videodownloader/apppaths.h"
 #include "videodownloader/uishot.h"
 #include "videodownloader/updateurls.h"
 #include "videodownloader/videopassworddialog.h"
 #include "videodownloader/LgaRegistry.h"
+#include "videodownloader/windowsframeless.h"
 
 #include "lgaupdate/LgaUpdateService.h"
 
@@ -29,6 +30,8 @@
 #include <QProcess>
 #include <QScreen>
 #include <QSettings>
+#include <QResizeEvent>
+#include <QShowEvent>
 #include <QStandardPaths>
 #include <QTimer>
 #include <QUrl>
@@ -48,8 +51,13 @@ constexpr int UPDATE_SWEEP_RETRY_MS = 5 * 60 * 1000;
 constexpr int DEFAULT_WIDTH = 1200;
 constexpr int DEFAULT_HEIGHT = 860;
 constexpr int MIN_WIDTH = 900;
-// Lo que ocupa la barra de titulo del sistema por encima del area cliente.
+// Lo que ocupa la barra de titulo del sistema por encima del area cliente. En Windows no hay barra
+// nativa (la barra es AppHeaderBar, adentro de la ventana): el rectangulo de la ventana es lo que se ve.
+#ifdef Q_OS_WIN
+constexpr int TITLE_BAR_ALLOWANCE = 0;
+#else
 constexpr int TITLE_BAR_ALLOWANCE = 40;
+#endif
 
 bool g_automaticUpdates = true;
 bool g_updateCacheSweep = true;
@@ -171,8 +179,9 @@ void MainWindow::setupUi()
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    m_tabHeader = new TabHeader(central);
-    layout->addWidget(m_tabHeader);
+    m_headerBar = new AppHeaderBar(central);
+    layout->addWidget(m_headerBar);
+    initWindowFrame();
 
     auto *content = new QWidget(central);
     content->setObjectName(QStringLiteral("content"));
@@ -188,9 +197,10 @@ void MainWindow::setupUi()
     contentLayout->addWidget(m_logView);
     layout->addWidget(content, 1);
 
-    connect(m_tabHeader, &TabHeader::helpClicked, this, &MainWindow::openHelp);
-    connect(m_tabHeader, &TabHeader::updateNoticeClicked, this, &MainWindow::offerAppUpdate);
-    connect(m_tabHeader, &TabHeader::toolsNoticeClicked, this, [this]() {
+    connect(m_headerBar, &AppHeaderBar::settingsClicked, this, &MainWindow::openSettings);
+    connect(m_headerBar, &AppHeaderBar::helpClicked, this, &MainWindow::openHelp);
+    connect(m_headerBar, &AppHeaderBar::updateNoticeClicked, this, &MainWindow::offerAppUpdate);
+    connect(m_headerBar, &AppHeaderBar::toolsNoticeClicked, this, [this]() {
         if (m_toolsManager && m_toolsManager->status() == ToolsManager::Status::Missing) {
             m_toolsManager->retryInstall();
         }
@@ -251,8 +261,8 @@ void MainWindow::setupServices()
     m_toolsManager->checkToolsInstallation();
 
     connect(m_toolsManager, &ToolsManager::toolVersionsChanged, this, [this]() {
-        if (m_helpDialog) {
-            m_helpDialog->setToolVersions(m_toolsManager->toolVersions());
+        if (m_settingsDialog) {
+            m_settingsDialog->setToolVersions(m_toolsManager->toolVersions());
         }
     });
 
@@ -428,7 +438,7 @@ void MainWindow::onToolsStatusChanged()
     if (m_toolsManager->ffmpegNeedsReinstall()) {
         // ffmpeg no se baja solo: "Installing…" o "Retry" serian una promesa falsa. Tiene
         // prioridad sobre el estado de yt-dlp y Deno porque es lo unico que pide una accion.
-        m_tabHeader->setToolsNotice(QStringLiteral("ffmpeg is missing or damaged"), QStringLiteral("err"),
+        m_headerBar->setToolsNotice(QStringLiteral("ffmpeg is missing or damaged"), QStringLiteral("err"),
                                     ToolsManager::ffmpegReinstallHint());
         m_queueView->setWaitingForTools(true);
         return;
@@ -436,18 +446,18 @@ void MainWindow::onToolsStatusChanged()
     switch (m_toolsManager->status()) {
     case ToolsManager::Status::Checking:
     case ToolsManager::Status::Ready:
-        m_tabHeader->setToolsNotice(QString(), QString(), QString());
+        m_headerBar->setToolsNotice(QString(), QString(), QString());
         break;
     case ToolsManager::Status::Installing:
-        m_tabHeader->setToolsNotice(QStringLiteral("Installing download tools…"), QStringLiteral("neutral"),
+        m_headerBar->setToolsNotice(QStringLiteral("Installing download tools…"), QStringLiteral("neutral"),
                                     QStringLiteral("yt-dlp and Deno install by themselves. Links you add start when they are ready."));
         break;
     case ToolsManager::Status::Updating:
-        m_tabHeader->setToolsNotice(QStringLiteral("Updating download tools…"), QStringLiteral("neutral"),
+        m_headerBar->setToolsNotice(QStringLiteral("Updating download tools…"), QStringLiteral("neutral"),
                                     QStringLiteral("Checking for new versions of yt-dlp and Deno. Downloads keep working."));
         break;
     case ToolsManager::Status::Missing:
-        m_tabHeader->setToolsNotice(QStringLiteral("Download tools missing · Retry"), QStringLiteral("err"),
+        m_headerBar->setToolsNotice(QStringLiteral("Download tools missing · Retry"), QStringLiteral("err"),
                                     QStringLiteral("The automatic install failed. Check your connection and click to retry."));
         break;
     }
@@ -607,14 +617,17 @@ void MainWindow::setupUpdates()
                                                  : QString();
     };
     config.installBlockedReason = [this]() { return updateInstallBlockedReason(); };
-    // Los carteles del updater salen con el dialogo de la app, el mismo de Help.
+    // Los carteles del updater salen con el dialogo de la app, el mismo de Help y Settings.
     config.presentDialog = [](QWidget *parent, const LgaUpdateDialogSpec &spec) {
         return ConfirmDialog::ask(parent, ConfirmDialog::fromUpdateSpec(spec));
     };
-    // El cartel de version nueva sale sobre la ventana principal, con su velo: Help se cierra.
+    // El cartel de version nueva sale sobre la ventana principal, con su velo: Help y Settings se cierran.
     config.prepareForUpdatePrompt = [this]() {
         if (m_helpDialog) {
             m_helpDialog->reject();
+        }
+        if (m_settingsDialog) {
+            m_settingsDialog->reject();
         }
         bringToFront();
     };
@@ -703,10 +716,10 @@ UpdateView MainWindow::currentUpdateView() const
 
 void MainWindow::refreshUpdateNotice()
 {
-    m_tabHeader->setUpdateNotice(m_availableVersion.isEmpty() ? QString()
+    m_headerBar->setUpdateNotice(m_availableVersion.isEmpty() ? QString()
                                                               : QStringLiteral("Update available · v%1").arg(m_availableVersion));
-    if (m_helpDialog) {
-        m_helpDialog->setUpdateView(currentUpdateView());
+    if (m_settingsDialog) {
+        m_settingsDialog->setUpdateView(currentUpdateView());
     }
 }
 
@@ -721,25 +734,38 @@ void MainWindow::offerAppUpdate()
 
 void MainWindow::openHelp()
 {
-    if (m_helpDialog) {
+    if (m_helpDialog || m_settingsDialog) {
         return;
     }
     HelpDialog dialog(this);
     m_helpDialog = &dialog;
-    if (m_toolsManager) {
-        dialog.setToolVersions(m_toolsManager->toolVersions());
-        m_toolsManager->refreshToolVersions();
-    }
-    dialog.setUpdateView(currentUpdateView());
     connect(&dialog, &HelpDialog::whatsNewRequested, this, [this]() {
         // Historial completo, sobre Help. Sin red usa la ultima copia verificada.
         if (m_updateService) {
             m_updateService->showWhatsNewHistory(m_helpDialog);
         }
     });
-    connect(&dialog, &HelpDialog::checkRequested, this, &MainWindow::offerAppUpdate);
-    connect(&dialog, &HelpDialog::installRequested, this, &MainWindow::offerAppUpdate);
-    connect(&dialog, &HelpDialog::openExtensionFolderRequested, this, [this]() {
+    m_headerBar->setHelpActive(true);
+    dialog.execOver(this);
+    m_headerBar->setHelpActive(false);
+    m_helpDialog = nullptr;
+}
+
+void MainWindow::openSettings()
+{
+    if (m_helpDialog || m_settingsDialog) {
+        return;
+    }
+    SettingsDialog dialog(this);
+    m_settingsDialog = &dialog;
+    if (m_toolsManager) {
+        dialog.setToolVersions(m_toolsManager->toolVersions());
+        m_toolsManager->refreshToolVersions();
+    }
+    dialog.setUpdateView(currentUpdateView());
+    connect(&dialog, &SettingsDialog::checkRequested, this, &MainWindow::offerAppUpdate);
+    connect(&dialog, &SettingsDialog::installRequested, this, &MainWindow::offerAppUpdate);
+    connect(&dialog, &SettingsDialog::openExtensionFolderRequested, this, [this]() {
         const QString folder = HostRegistration::extensionFolder();
         if (!QFileInfo(folder).isDir()) {
             log(QStringLiteral("Extension folder not found: %1").arg(QDir::toNativeSeparators(folder)), LogLevel::Warning);
@@ -747,8 +773,126 @@ void MainWindow::openHelp()
         }
         QDesktopServices::openUrl(QUrl::fromLocalFile(folder));
     });
+    m_headerBar->setSettingsActive(true);
     dialog.execOver(this);
-    m_helpDialog = nullptr;
+    m_headerBar->setSettingsActive(false);
+    m_settingsDialog = nullptr;
+}
+
+// ------------------------------------------------------------------ Marco de la ventana
+// Sin barra de titulo nativa en Windows: la barra es AppHeaderBar. El marco propio es el de FaceLock
+// y RotoWorker (windowsframeless.cpp, copiado de RotoWorker con su MainWindowFrame.cpp como modelo):
+// Windows sigue haciendo el arrastre, Snap, Win+flechas y el resize; la app solo le dice que hay bajo
+// el cursor. Fuera de Windows el marco es el del sistema y la barra no muestra los botones de ventana.
+
+void MainWindow::initWindowFrame()
+{
+#ifdef Q_OS_WIN
+    // El marco nativo solo se toca con un HWND de verdad: en la plataforma offscreen de QA winId()
+    // no es un HWND y las llamadas a Win32 no corresponden.
+    m_framelessNative = QGuiApplication::platformName() == QLatin1String("windows");
+    m_headerBar->setWindowButtonsVisible(true);
+    // El hint va ANTES de que exista el HWND; el estilo nativo se repone en applyTo() (showEvent),
+    // porque recien en el primer show hay un HWND real sobre el que actuar.
+    setWindowFlag(Qt::FramelessWindowHint, true);
+#else
+    m_headerBar->setWindowButtonsVisible(false);
+#endif
+    connect(m_headerBar, &AppHeaderBar::minimizeRequested, this, &QWidget::showMinimized);
+    connect(m_headerBar, &AppHeaderBar::maximizeRestoreRequested, this, [this]() {
+#ifdef Q_OS_WIN
+        // Por Windows, como el doble clic en la barra: ver VdWindowsFrameless::toggleMaximized.
+        if (m_framelessNative && VdWindowsFrameless::toggleMaximized(this)) {
+            return;
+        }
+#endif
+        if (isMaximized()) {
+            showNormal();
+        } else {
+            showMaximized();
+        }
+    });
+    connect(m_headerBar, &AppHeaderBar::closeRequested, this, &QWidget::close);
+}
+
+void MainWindow::showEvent(QShowEvent *event)
+{
+    QMainWindow::showEvent(event);
+#ifdef Q_OS_WIN
+    if (m_framelessNative && !m_framelessApplied) {
+        m_framelessApplied = true;
+        VdWindowsFrameless::applyTo(this);
+        // El primer ciclo de marco y pintado no espera un evento de entrada.
+        VdWindowsFrameless::refreshFrame(this);
+    }
+    m_headerBar->setWindowMaximized(isMaximized());
+#endif
+}
+
+bool MainWindow::event(QEvent *event)
+{
+#ifdef Q_OS_WIN
+    // Si Qt recrea la ventana nativa, el HWND nuevo nace con el estilo de Qt (WS_POPUP): se repone el marco.
+    if (event && event->type() == QEvent::WinIdChange && m_framelessNative && m_framelessApplied && internalWinId()) {
+        VdWindowsFrameless::applyTo(this);
+        VdWindowsFrameless::refreshFrame(this);
+    }
+#endif
+    return QMainWindow::event(event);
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+#ifdef Q_OS_WIN
+    if (event && event->type() == QEvent::WindowStateChange) {
+        m_headerBar->setWindowMaximized(isMaximized());
+        updateMaximizedContentInsets();
+    }
+#endif
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    // Como RotoWorker y el original de MediaTools: los margenes de maximizada tambien al cambiar de
+    // tamano, porque Qt puede reescribir el rect de una ventana frameless maximizada por su cuenta.
+    updateMaximizedContentInsets();
+}
+
+#ifdef Q_OS_WIN
+bool MainWindow::nativeEvent(const QByteArray &eventType, void *message, qintptr *result)
+{
+    if (m_framelessNative && eventType == QByteArrayLiteral("windows_generic_MSG")
+        && VdWindowsFrameless::handleNcActivate(this, message, result)) {
+        return true;
+    }
+    if (m_framelessNative
+        && VdWindowsFrameless::handleNativeEvent(this, eventType, message, result, [this](const QPoint &clientPos) {
+               if (!m_headerBar->isVisible()) {
+                   return false;
+               }
+               const QPoint posInBar = m_headerBar->mapFrom(this, clientPos);
+               return m_headerBar->rect().contains(posInBar) && m_headerBar->isDragAreaAt(posInBar);
+           })) {
+        return true;
+    }
+    return QMainWindow::nativeEvent(eventType, message, result);
+}
+#endif
+
+void MainWindow::updateMaximizedContentInsets()
+{
+#ifdef Q_OS_WIN
+    if (!m_framelessNative) {
+        return;
+    }
+    // Maximizada devuelve los margenes reales; en cualquier otro estado devuelve cero y esto los limpia.
+    const QMargins insets = VdWindowsFrameless::maximizedContentInsets(this);
+    if (contentsMargins() != insets) {
+        setContentsMargins(insets);
+    }
+#endif
 }
 
 bool MainWindow::isValidDownloadPath(const QString &path)
