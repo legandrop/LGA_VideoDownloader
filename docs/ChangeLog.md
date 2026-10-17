@@ -1,4 +1,6 @@
-v0.96:
+v1.000:
+
+        - `VERSION / BUMP MANUAL DE A MILESIMOS E INSTALADOR COMO EN LAS OTRAS APPS` La version subia editando `CMakeLists.txt` a mano y corriendo `sync_version`, que buscaba Python en el PATH; el instalador exigia correr `deploy.bat` antes, no tenia modo local y su menu no podia ofrecer el bump. Se copia el modelo de Mighty Tools y Theta Explorer: `bump_version.bat`/`.sh` (sin Python, de a 0.001) suben `CMakeLists.txt` y `VERSION` a la version que encabeza el changelog, con commit y push. `instalador.bat` compila solo, ofrece el bump en el menu, suma `--local` (`instalador_local.bat`) y ofrece revelar el setup. En la Mac, `release.conf` enciende el bump de `publish_release.sh`. La version en desarrollo pasa de v0.96 a v1.000. Se borra `sync_version`. [ Version - Bump manual e instalador como en las otras apps ]
 
         - `UI / HELP SIN EL ROTULO AUTHOR` Help mostraba el credito como una fila "Author · Lega Pugliese · lega.com.ar", con un rotulo que ninguna app LGA usa. Queda el nombre con el link solo, debajo del titulo. [ UI - Help sin el rotulo Author ]
 

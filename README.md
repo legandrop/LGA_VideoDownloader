@@ -35,17 +35,24 @@ Requisitos: Qt 6.8.2, CMake 3.16+, compilador C++17.
 ./compilar.sh       # macOS
 ./deploy.bat        # Windows: versión portable
 ./deploy.sh --zip --dmg   # macOS: .zip de actualización y .dmg de instalación
+./deploy_local.sh   # macOS: compila en Release, instala en /Applications y abre, sin publicar
+instalador_local.bat      # Windows: compila y arma el instalador, sin Git ni GitHub
 ```
+
+### Versión y bump
+
+La versión va de a milésimos (`1.000`, `1.001`...) y se sube a mano. `CMakeLists.txt` y `VERSION` guardan la última versión **publicada**; el primer `vX.YYY:` de `docs/ChangeLog.md` es la versión **en desarrollo**, donde se juntan las entradas hasta el próximo release. `bump_version.bat` (macOS: `./bump_version.sh`) sube `CMakeLists.txt` y `VERSION` a la del changelog, commitea, pushea y ofrece publicar; `--check` solo verifica que los tres coincidan y que el bump esté commiteado. Sin Python: la lógica está en `tools/bump_version.ps1` y en el `.sh`.
 
 ### Publicar un release
 
 ```bash
-instalador.bat --publish        # Windows, después de deploy.bat
+instalador.bat                  # Windows: menú de una tecla antes de compilar
+instalador.bat --publish        # Windows: compila, arma el instalador y publica
 ./deploy.sh --publish           # macOS: compila, arma el .zip y el .dmg y publica
 ./deploy.sh --publish --dry-run # macOS: recorre todo sin escribir en GitHub ni en el repo
 ```
 
-Cada comando valida las notas para el usuario (`docs/WhatsNew.md`) antes de armar nada, exige un árbol commiteado y pusheado, y publica en el release `v<versión>` de este repo. La primera plataforma crea el release; la segunda suma sus archivos y fusiona `SHA256SUMS` (una línea por archivo, sin tocar las de la otra plataforma). Al final suben las notas del release y `whats_new.json`. Sin `--publish`, `instalador.bat` y `./deploy.sh` (si hay consola; si no, arman solo lo local sin preguntar) miran el release antes de armar nada y ofrecen con una tecla publicar o sumar los archivos de su plataforma, instalador o build local, o cancelar; si la versión ya está publicada para esa plataforma, el changelog va adelante (esta app no tiene script de bump) o algo impide publicar, lo dicen y ofrecen solo lo local o cancelar. `--no-publish` no pregunta. En macOS publica `tools/macos/publish_release.sh` (lo propio de esta app está en `tools/macos/release.conf`): antes de compilar comprueba todo lo que impediría publicar, y con el `.zip` y el `.dmg` armados lo vuelve a comprobar y publica; si la publicación falla, la app se instala igual y el script sale con error. Un release que ya tiene los archivos de la plataforma no se pisa sin `--replace`.
+`instalador.bat` compila solo (`deploy.bat --no-run`) después de decidir la publicación. Sin `--publish` ni `--local`, `instalador.bat` y `./deploy.sh` (si hay consola; si no, arman solo lo local sin preguntar) miran el release antes de compilar y ofrecen con una tecla publicar o sumar los archivos de su plataforma, el bump y publicar si el changelog va adelante, instalador o build local, o cancelar; si algo impide publicar, lo dicen y ofrecen solo lo local o cancelar. `--no-publish` no pregunta. Cada publicación valida las notas para el usuario (`docs/WhatsNew.md`) antes de compilar, exige un árbol commiteado y pusheado, y publica en el release `v<versión>` de este repo. La primera plataforma crea el release; la segunda suma sus archivos y fusiona `SHA256SUMS` (una línea por archivo, sin tocar las de la otra plataforma). Al final suben las notas del release y `whats_new.json`. En macOS publica `tools/macos/publish_release.sh` (lo propio de esta app está en `tools/macos/release.conf`): antes de compilar comprueba todo lo que impediría publicar, y con el `.zip` y el `.dmg` armados lo vuelve a comprobar y publica; si la publicación falla, la app se instala igual y el script sale con error. Un release que ya tiene los archivos de la plataforma no se pisa sin `--replace`.
 
 ### Capturas de UI sin abrir ventanas
 

@@ -59,7 +59,7 @@ Todo se configura en `MainWindow::setupUpdates()`:
   `Updates/SkippedVersion` y `Updates/WhatsNewLastSeen`; la cache verificada de las notas queda al
   lado (`whats_new_legandrop_LGA_VideoDownloader.json`). La v0.95 publicada no guardaba que notas
   se vieron: quien actualiza desde ella cuenta como instalacion nueva y no ve un "What's new" al
-  arrancar (ya las vio en el cartel del update si venia de una 0.96 o posterior).
+  arrancar (ya las vio en el cartel del update si venia de una 1.000 o posterior).
 - `updateCacheDir` es la carpeta de arriba de `AppPaths::heavyDataDir("updates")`: el update baja
   a `<carpeta del exe>\updates` en Windows (o su fallback de `%LOCALAPPDATA%`) y a
   `~/Library/Application Support/LGA/VideoDownloader/updates` en macOS, fuera del bundle.

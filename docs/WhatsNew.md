@@ -10,7 +10,7 @@ platforms: [win, mac]
 
 ## Unreleased
 
-## v0.96
+## v1.000
 - [new] VimeoDownloader is now LGA VideoDownloader, a rebuilt app that downloads from YouTube, Vimeo, SoundCloud, Instagram and most other video and audio sites.
 - [new][win] A browser extension for Chrome, Brave and Edge sends the page you are watching to the app with one click, along with your login, so private and members-only videos download without exporting cookies. Settings explains how to install it.
 - [new] Paste several links at once, or any text that contains them: each link becomes a card in the queue with its own progress, cancel and retry.

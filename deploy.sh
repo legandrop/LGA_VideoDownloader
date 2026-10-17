@@ -63,10 +63,11 @@ echo "Version: $APP_VERSION"
 
 # Publicar se decide ANTES de compilar. Sin flags y con terminal, `publish_release.sh --decide`
 # (pieza canonica de la Base) mira el release en GitHub y pregunta con UNA tecla: publicar o sumar
-# macOS al release que ya existe (lo pudo crear Windows), build local o cancelar. Esta app no tiene
-# bump automatizado (BUMP_CMD vacio en tools/macos/release.conf): si la version ya esta publicada o
-# el changelog va adelante, lo dice y no ofrece publicar. Si vuelve con "publicar", el preflight ya
-# paso. Si se elige local, sigue el deploy de siempre (compila, instala y abre).
+# macOS al release que ya existe (lo pudo crear Windows), el bump (BUMP_CMD de
+# tools/macos/release.conf, que sube el numero, commitea y pushea) si esa version ya esta publicada o
+# el changelog va adelante, build local o cancelar. Si vuelve con "publicar", el preflight ya paso
+# con la version que haya dejado el bump. Si se elige local, sigue el deploy de siempre (compila,
+# instala y abre).
 PUBLISH=false
 DECIDED=false
 if [ "$PUBLISH_MODE" = "always" ]; then
@@ -75,7 +76,12 @@ elif [ "$PUBLISH_MODE" = "prompt" ] && [ "$ARG_COUNT" -eq 0 ] && [ -t 0 ]; then
     DECIDE_RC=0
     bash "./tools/macos/publish_release.sh" --decide || DECIDE_RC=$?
     case "$DECIDE_RC" in
-        0) PUBLISH=true; DECIDED=true ;;
+        0)
+            PUBLISH=true; DECIDED=true
+            # El bump pudo cambiar la version.
+            APP_VERSION="$(sed -n 's/^project(VideoDownloader VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt | head -1)"
+            echo "Version: $APP_VERSION"
+            ;;
         10) ;;
         20)
             echo "Cancelado. No se compilo nada."

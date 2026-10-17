@@ -1,20 +1,26 @@
 @echo off
 setlocal
-REM Uso: instalador.bat [--no-run] [--publish o --no-publish]
-REM   --no-run      arma el instalador y su SHA256SUMS, y no pregunta si ejecutarlo.
+REM Uso: instalador.bat [--local] [--no-run] [--publish o --no-publish] [--replace]
+REM   --local       compila y arma el instalador y su SHA256SUMS sin mirar Git ni GitHub y sin
+REM                 publicar; al final ofrece ejecutarlo y revelarlo en el Explorador. Es lo que
+REM                 corre instalador_local.bat.
+REM   --no-run      arma el instalador y su SHA256SUMS, y no pregunta si ejecutarlo ni revelarlo.
 REM   --publish     publica sin preguntar el release v(version) en legandrop/LGA_VideoDownloader:
 REM                 el instalador, SHA256SUMS y las notas para el usuario (What's new).
 REM   --no-publish  no publica ni pregunta.
 REM   --replace     con --publish, reemplaza el instalador de Windows de un release que ya lo tiene.
-REM Sin flags de publicacion: antes de armar nada mira el release en GitHub y pregunta con una
-REM tecla: publicar (o sumar el instalador al release), instalador local o cancelar. Sin consola
-REM no pregunta: arma solo el instalador local.
+REM Sin flags de publicacion: antes de compilar mira el release en GitHub y pregunta con una
+REM tecla: publicar (o sumar el instalador al release), el bump si el changelog va adelante,
+REM instalador local o cancelar. Sin consola no pregunta: arma solo el instalador local.
+REM Compila solo: despues de decidir la publicacion corre deploy.bat --no-run (Release).
 set "NO_RUN="
+set "LOCAL_ONLY="
 set "PUBLISH=prompt"
 set "REPLACE="
 set "SCRIPT_DIR=%~dp0"
 :parse_args
 if "%~1"=="" goto :args_done
+if /I "%~1"=="--local" ( set "LOCAL_ONLY=1" & shift & goto :parse_args )
 if /I "%~1"=="--no-run" ( set "NO_RUN=1" & shift & goto :parse_args )
 if /I "%~1"=="--publish" ( set "PUBLISH=always" & shift & goto :parse_args )
 if /I "%~1"=="--no-publish" ( set "PUBLISH=never" & shift & goto :parse_args )
@@ -22,54 +28,19 @@ if /I "%~1"=="--replace" ( set "REPLACE=1" & shift & goto :parse_args )
 echo Error: opcion desconocida: %~1
 exit /b 1
 :args_done
+if defined LOCAL_ONLY if /I "%PUBLISH%"=="always" (
+    echo Error: --local y --publish se contradicen.
+    exit /b 1
+)
+if defined LOCAL_ONLY set "PUBLISH=never"
 REM Todas las rutas de aca abajo son relativas a la carpeta del script, no a la carpeta desde la
 REM que se lo llama. El setlocal de arriba devuelve la carpeta original al terminar.
 cd /d "%SCRIPT_DIR%"
 
 echo Preparando instalador para VideoDownloader...
 
-REM Verificar que deploy tenga el ejecutable actual.
-REM No alcanza con que la carpeta exista: un deploy anterior a un rename deja
-REM un .exe con el nombre viejo, el instalador lo empaqueta igual y los accesos
-REM directos quedan apuntando a un archivo que no existe.
-if not exist deploy\VideoDownloader.exe (
-    echo Error: falta deploy\VideoDownloader.exe. Ejecute primero deploy.bat
-    exit /b 1
-)
-REM La clave de registro del host apunta a este JSON: sin el, la extension no encuentra la app.
-if not exist deploy\com.lga.videodownloader.json (
-    echo Error: falta deploy\com.lga.videodownloader.json. Ejecute primero deploy.bat
-    exit /b 1
-)
-if not exist deploy\extension\manifest.json (
-    echo Error: falta deploy\extension. Ejecute primero deploy.bat
-    exit /b 1
-)
-
-REM Abortar si el build es posterior a lo desplegado: `xcopy /L /D` lista el
-REM origen solo cuando es mas nuevo que el destino, y no copia nada. Se compara contra
-REM build-release\, el arbol del que deploy.bat saca el exe; build\ es el de desarrollo y es
-REM normal que sea mas nuevo. find con su ruta: desde Git Bash el find de GNU va primero en el PATH,
-REM no entiende /i y el chequeo no veia nunca un deploy viejo.
-set "DEPLOY_STALE="
-if exist build-release\VideoDownloader.exe (
-    for /f "delims=" %%A in ('xcopy build-release\VideoDownloader.exe deploy\ /L /D /Y 2^>nul ^| %SystemRoot%\System32\find.exe /i "VideoDownloader.exe"') do set "DEPLOY_STALE=1"
-)
-if defined DEPLOY_STALE (
-    echo Error: deploy\VideoDownloader.exe es mas viejo que build-release\VideoDownloader.exe
-    echo Ejecute deploy.bat para regenerar el deploy antes de armar el instalador.
-    exit /b 1
-)
-
-REM La version sale de VERSION, el espejo derivado del project() de CMakeLists.txt
-REM (lo escribe sync_version). Define el AppVersion y el nombre del instalador, que
-REM es lo que busca el auto-update de la app: VideoDownloader_Setup_v<version>.exe.
-set "APP_VERSION="
-set /p APP_VERSION=<VERSION
-if not defined APP_VERSION (
-    echo Error: no se pudo leer la version del archivo VERSION
-    exit /b 1
-)
+call :read_version
+if errorlevel 1 exit /b 1
 
 REM ---- Publicacion: se decide ACA, antes de armar el instalador ----
 REM El release vive en este mismo repo. Descubrir al final un gh sin login o notas que faltan
@@ -84,6 +55,7 @@ if /I "%PUBLISH%"=="prompt" if not defined INTERACTIVE (
     echo Sin consola interactiva: se arma solo el instalador local, sin preguntar.
     set "PUBLISH=never"
 )
+if defined LOCAL_ONLY echo Modo local: sin Git ni GitHub ni publicacion.
 if /I "%PUBLISH%"=="never" goto :publish_preflight_done
 if /I "%PUBLISH%"=="prompt" goto :publish_menu
 call :gh_detect
@@ -92,6 +64,8 @@ if errorlevel 1 (
     goto :publish_preflight_failed
 )
 call :git_preflight
+if errorlevel 1 goto :publish_preflight_failed
+call :version_check
 if errorlevel 1 goto :publish_preflight_failed
 call :notes_check
 if errorlevel 1 goto :publish_preflight_failed
@@ -108,8 +82,9 @@ REM criterio de publish_release.sh --decide de la Mac:
 REM   1  publicar v(version) como release nuevo, o sumar el instalador al release que ya existe
 REM      [la Mac pudo publicar primero]. No se ofrece si el release ya tiene el instalador de
 REM      Windows [republicar el mismo numero deja sin update a quien ya lo tiene; para eso esta
-REM      --publish --replace] ni si el changelog va adelante: falta el bump, y esta app no tiene
-REM      script de bump.
+REM      --publish --replace]. Si el changelog va adelante, 1 es el bump a la version que lo
+REM      encabeza [bump_version.bat, con commit y push] y publicar esa. Va antes de compilar
+REM      porque el numero queda adentro del binario: el bump no puede ir despues.
 REM   2  instalador local, sin subir nada.     3  cancelar.
 REM Si algo impide publicar se dice por que y quedan solo 2 y 3. Una tecla que no es opcion no hace
 REM nada; Ctrl+C o un error de choice cancelan.
@@ -147,8 +122,8 @@ if "%REL_STATE%"=="other" set "MENU_ACTION=Sumar el instalador de Windows al rel
 if "%REL_STATE%"=="mine" set "MENU_STATUS=v%APP_VERSION% ya esta publicada en GitHub con el instalador de Windows."
 if "%REL_STATE%"=="mine" set "MENU_NOTE=Para publicar, primero la version nueva en el changelog."
 :publish_menu_show
-if defined CL_AHEAD set "MENU_ACTION="
-if defined CL_AHEAD set "MENU_NOTE=Para publicar v%CL_VERSION% falta el bump [en esta app no esta automatizado]."
+if defined CL_AHEAD set "MENU_ACTION=Bump a v%CL_VERSION% [commit + push] y publicarla"
+if defined CL_AHEAD set "MENU_NOTE="
 if defined PUB_BLOCKER set "MENU_ACTION="
 echo.
 echo ============================================================
@@ -167,10 +142,42 @@ choice /C 123 /N /M "Opcion: "
 set "MENU_KEY=%ERRORLEVEL%"
 if "%MENU_KEY%"=="2" goto :publish_menu_local
 if not "%MENU_KEY%"=="1" goto :publish_menu_cancel
+if defined CL_AHEAD goto :publish_menu_bump
+call :version_check
+if errorlevel 1 goto :publish_menu_fallback
 call :notes_check
 if errorlevel 1 goto :publish_menu_fallback
 set "PUBLISH=always"
 echo Se publica v%APP_VERSION% al terminar.
+goto :publish_preflight_done
+:publish_menu_bump
+REM Antes, las notas de la version DESTINO: si fallan no se toca nada.
+set "APP_VERSION=%CL_VERSION%"
+call :notes_check
+if errorlevel 1 (
+    echo No se hizo el bump.
+    call :read_version
+    goto :publish_menu_fallback
+)
+echo.
+echo Bump a v%CL_VERSION% [commit + push]...
+call "%SCRIPT_DIR%bump_version.bat" --commit --no-publish
+if errorlevel 1 (
+    echo ERROR: el bump fallo [ver arriba].
+    call :read_version
+    goto :publish_menu_fallback
+)
+REM El bump cambio la version y HEAD: se releen y se vuelve a mirar todo lo que se mira al publicar.
+call :read_version
+if errorlevel 1 goto :publish_menu_fallback
+call :version_check
+if errorlevel 1 goto :publish_menu_fallback
+call :git_preflight
+if errorlevel 1 goto :publish_menu_fallback
+call :release_check
+if errorlevel 1 goto :publish_menu_fallback
+set "PUBLISH=always"
+echo OK: version %APP_VERSION%. Se publica al terminar.
 goto :publish_preflight_done
 :publish_menu_fallback
 echo   2. Instalador local, sin subir a GitHub
@@ -178,12 +185,37 @@ echo   3. Cancelar
 choice /C 23 /N /M "Opcion: "
 if "%ERRORLEVEL%"=="1" goto :publish_menu_local
 :publish_menu_cancel
-echo Cancelado. No se armo nada.
+echo Cancelado. No se compilo nada.
 exit /b 1
 :publish_menu_local
 set "PUBLISH=never"
 echo Se arma solo el instalador local, sin publicar.
 :publish_preflight_done
+
+REM Compilar en Release y armar deploy\ [deploy.bat --no-run], con la version ya decidida. Si falla,
+REM el deploy anterior queda como estaba y no se arma el instalador.
+echo Ejecutando deploy.bat --no-run...
+call "%SCRIPT_DIR%deploy.bat" --no-run
+if errorlevel 1 (
+    echo ERROR: fallo deploy.bat. No se armo el instalador.
+    exit /b 1
+)
+cd /d "%SCRIPT_DIR%"
+REM No alcanza con que deploy\ exista: un deploy anterior a un rename deja un .exe con el nombre
+REM viejo, el instalador lo empaqueta igual y los accesos directos quedan apuntando a un archivo que
+REM no existe. La clave de registro del host apunta al JSON: sin el, la extension no encuentra la app.
+if not exist deploy\VideoDownloader.exe (
+    echo Error: falta deploy\VideoDownloader.exe despues de deploy.bat.
+    exit /b 1
+)
+if not exist deploy\com.lga.videodownloader.json (
+    echo Error: falta deploy\com.lga.videodownloader.json despues de deploy.bat.
+    exit /b 1
+)
+if not exist deploy\extension\manifest.json (
+    echo Error: falta deploy\extension despues de deploy.bat.
+    exit /b 1
+)
 
 REM Verificar si Inno Setup está instalado
 set "INNO_PATH=%ProgramFiles(x86)%\Inno Setup 6\ISCC.exe"
@@ -271,7 +303,7 @@ echo Root: HKCU; Subkey: "Software\Google\Chrome\NativeMessagingHosts\com.lga.vi
 echo. >> VideoDownloader_installer.iss
 echo [Run] >> VideoDownloader_installer.iss
 REM Sin skipifsilent: las copias v0.95 corren el instalador en /SILENT y tiene que relanzar la app.
-REM lgaupdate (v0.96+) lo abre con el wizard: ahi es el checkbox final, tildado por defecto.
+REM lgaupdate (v1.000+) lo abre con el wizard: ahi es el checkbox final, tildado por defecto.
 echo Filename: "{app}\VideoDownloader.exe"; Description: "Ejecutar VideoDownloader"; Flags: nowait postinstall >> VideoDownloader_installer.iss
 
 REM Añadir código Pascal para preguntar sobre eliminar configuración durante desinstalación
@@ -420,6 +452,12 @@ if "%ERRORLEVEL%"=="1" (
 ) else (
     echo Instalador no ejecutado.
 )
+choice /C YN /M "¿Desea revelar el instalador en el Explorador de Windows?"
+if "%ERRORLEVEL%"=="1" (
+    explorer.exe /select,"%SCRIPT_DIR%installer\VideoDownloader_Setup_v%APP_VERSION%.exe"
+) else (
+    echo No se abrio el Explorador.
+)
 :after_run
 REM La publicacion ya se decidio antes de armar el instalador [--publish o la opcion 1 del menu].
 if /I not "%PUBLISH%"=="always" exit /b 0
@@ -463,15 +501,31 @@ if errorlevel 1 (
     set "PUB_BLOCKER=HEAD no esta en origin/main [pushear antes de publicar]"
     exit /b 1
 )
-REM VERSION (de donde sale el numero del instalador) tiene que coincidir con CMakeLists.txt.
-call "%SCRIPT_DIR%sync_version.bat" --check-only
-if errorlevel 1 (
-    echo ERROR: VERSION y CMakeLists.txt no coinciden. Correr sync_version.bat y commitear.
-    set "PUB_BLOCKER=VERSION y CMakeLists.txt no coinciden"
-    exit /b 1
-)
 set "HEAD_SHA="
 for /f %%C in ('git rev-parse HEAD') do set "HEAD_SHA=%%C"
+exit /b 0
+
+:version_check
+REM CMakeLists.txt, VERSION y el changelog dicen lo mismo y el bump esta commiteado: si no, el
+REM release saldria con un numero que no es el del codigo del tag.
+call "%SCRIPT_DIR%bump_version.bat" --check
+if errorlevel 1 (
+    echo ERROR: la version no esta lista para publicar [falta el bump o no esta commiteado].
+    exit /b 1
+)
+exit /b 0
+
+:read_version
+REM La version sale de VERSION, que el bump escribe junto con el project() de CMakeLists.txt.
+REM Define el AppVersion y el nombre del instalador, que es lo que busca el auto-update de la app:
+REM VideoDownloader_Setup_v<version>.exe. Se relee despues de un bump.
+set "APP_VERSION="
+set /p APP_VERSION=<"%SCRIPT_DIR%VERSION"
+if not defined APP_VERSION (
+    echo Error: no se pudo leer la version del archivo VERSION
+    exit /b 1
+)
+set "APP_VERSION=%APP_VERSION: =%"
 exit /b 0
 
 :notes_check
