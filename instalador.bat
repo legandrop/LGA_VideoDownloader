@@ -5,8 +5,9 @@ REM   --no-run      arma el instalador y su SHA256SUMS, y no pregunta si ejecuta
 REM   --publish     publica sin preguntar el release v(version) en legandrop/LGA_VideoDownloader:
 REM                 el instalador, SHA256SUMS y las notas para el usuario (What's new).
 REM   --no-publish  no publica ni pregunta.
-REM   --replace     permite reemplazar el instalador de Windows de un release que ya lo tiene.
-REM Sin flags de publicacion: con consola pregunta al final; sin consola no publica.
+REM   --replace     con --publish, reemplaza el instalador de Windows de un release que ya lo tiene.
+REM Sin flags de publicacion: antes de armar nada mira el release en GitHub y pregunta con una
+REM tecla: publicar (o sumar el instalador al release), instalador local o cancelar.
 set "NO_RUN="
 set "PUBLISH=prompt"
 set "REPLACE="
@@ -47,10 +48,11 @@ if not exist deploy\extension\manifest.json (
 REM Abortar si el build es posterior a lo desplegado: `xcopy /L /D` lista el
 REM origen solo cuando es mas nuevo que el destino, y no copia nada. Se compara contra
 REM build-release\, el arbol del que deploy.bat saca el exe; build\ es el de desarrollo y es
-REM normal que sea mas nuevo.
+REM normal que sea mas nuevo. find con su ruta: desde Git Bash el find de GNU va primero en el PATH,
+REM no entiende /i y el chequeo no veia nunca un deploy viejo.
 set "DEPLOY_STALE="
 if exist build-release\VideoDownloader.exe (
-    for /f "delims=" %%A in ('xcopy build-release\VideoDownloader.exe deploy\ /L /D /Y 2^>nul ^| find /i "VideoDownloader.exe"') do set "DEPLOY_STALE=1"
+    for /f "delims=" %%A in ('xcopy build-release\VideoDownloader.exe deploy\ /L /D /Y 2^>nul ^| %SystemRoot%\System32\find.exe /i "VideoDownloader.exe"') do set "DEPLOY_STALE=1"
 )
 if defined DEPLOY_STALE (
     echo Error: deploy\VideoDownloader.exe es mas viejo que build-release\VideoDownloader.exe
@@ -68,15 +70,15 @@ if not defined APP_VERSION (
     exit /b 1
 )
 
-REM ---- Publicacion: lo que puede cortarla se chequea ACA, antes de armar el instalador ----
+REM ---- Publicacion: se decide ACA, antes de armar el instalador ----
 REM El release vive en este mismo repo. Descubrir al final un gh sin login o notas que faltan
-REM es tirar la corrida. Sin consola no hay a quien preguntarle: sin --publish no se publica.
+REM es tirar la corrida. Con --publish, lo que impide publicar corta antes de armar nada.
 set "RELEASE_REPO=legandrop/LGA_VideoDownloader"
 set "INTERACTIVE="
 powershell -NoProfile -Command "if ([Console]::IsInputRedirected) { exit 3 } else { exit 0 }"
 if not errorlevel 1 set "INTERACTIVE=1"
-if /I "%PUBLISH%"=="prompt" if not defined INTERACTIVE set "PUBLISH=never"
 if /I "%PUBLISH%"=="never" goto :publish_preflight_done
+if /I "%PUBLISH%"=="prompt" goto :publish_menu
 call :gh_detect
 if errorlevel 1 (
     echo gh no esta disponible o no tiene login.
@@ -90,14 +92,90 @@ call :release_check
 if errorlevel 1 goto :publish_preflight_failed
 goto :publish_preflight_done
 :publish_preflight_failed
-REM Con --publish se corta antes de armar nada. Sin flags (se iba a preguntar) se arma el
-REM instalador igual, sin publicar.
-if /I "%PUBLISH%"=="always" (
-    echo ERROR: no se puede publicar; no se armo nada.
-    exit /b 1
+echo ERROR: no se puede publicar; no se armo nada.
+exit /b 1
+
+:publish_menu
+REM Sin flags se mira GitHub y se pregunta UNA vez, con una tecla y sin Enter [choice], con el
+REM criterio de publish_release.sh --decide de la Mac:
+REM   1  publicar v(version) como release nuevo, o sumar el instalador al release que ya existe
+REM      [la Mac pudo publicar primero]. No se ofrece si el release ya tiene el instalador de
+REM      Windows [republicar el mismo numero deja sin update a quien ya lo tiene; para eso esta
+REM      --publish --replace] ni si el changelog va adelante: falta el bump, y esta app no tiene
+REM      script de bump.
+REM   2  instalador local, sin subir nada.     3  cancelar.
+REM Si algo impide publicar se dice por que y quedan solo 2 y 3. Una tecla que no es opcion no hace
+REM nada; sin entrada [EOF] choice cancela. Una corrida desatendida pasa --publish o --no-publish.
+set "MENU_ACTION="
+set "MENU_STATUS="
+set "MENU_NOTE="
+set "PUB_BLOCKER="
+set "CL_VERSION="
+set "CL_AHEAD="
+for /f "tokens=1 delims=:" %%L in ('findstr /r /b /c:"v[0-9][0-9.]*[ ]*:" "docs\ChangeLog.md"') do if not defined CL_VERSION set "CL_VERSION=%%L"
+if not defined CL_VERSION goto :publish_menu_gh
+set "CL_VERSION=%CL_VERSION:v=%"
+set "CL_VERSION=%CL_VERSION: =%"
+powershell -NoProfile -Command "try { if ([version]$env:CL_VERSION -gt [version]$env:APP_VERSION.Trim()) { exit 0 } } catch {}; exit 1"
+if not errorlevel 1 set "CL_AHEAD=1"
+:publish_menu_gh
+call :gh_detect
+if errorlevel 1 (
+    set "PUB_BLOCKER=gh no esta disponible o no tiene login"
+    goto :publish_menu_show
 )
-echo AVISO: se arma el instalador sin publicar.
+call :git_preflight
+if errorlevel 1 goto :publish_menu_show
+call :release_state
+if errorlevel 1 goto :publish_menu_show
+set "REL_STATE=none"
+if defined REL_EXISTS set "REL_STATE=other"
+if "%REL_OWN%"=="1" set "REL_STATE=mine"
+if "%REL_DRAFT%"=="1" set "PUB_BLOCKER=el release %TAG% existe como borrador; publicarlo o borrarlo a mano"
+if "%REL_OTHER%"=="1" if "%REL_SUMS%"=="0" set "PUB_BLOCKER=el release %TAG% tiene los archivos de macOS sin SHA256SUMS; subir primero el de la Mac"
+if "%REL_STATE%"=="none" set "MENU_STATUS=v%APP_VERSION% no esta publicada en GitHub."
+if "%REL_STATE%"=="none" set "MENU_ACTION=Publicar v%APP_VERSION% como release nuevo"
+if "%REL_STATE%"=="other" set "MENU_STATUS=v%APP_VERSION% esta en GitHub, sin el instalador de Windows."
+if "%REL_STATE%"=="other" set "MENU_ACTION=Sumar el instalador de Windows al release v%APP_VERSION%"
+if "%REL_STATE%"=="mine" set "MENU_STATUS=v%APP_VERSION% ya esta publicada en GitHub con el instalador de Windows."
+if "%REL_STATE%"=="mine" set "MENU_NOTE=Para publicar, primero la version nueva en el changelog."
+:publish_menu_show
+if defined CL_AHEAD set "MENU_ACTION="
+if defined CL_AHEAD set "MENU_NOTE=Para publicar v%CL_VERSION% falta el bump [en esta app no esta automatizado]."
+if defined PUB_BLOCKER set "MENU_ACTION="
+echo.
+echo ============================================================
+echo  Publicacion en GitHub [VideoDownloader]
+echo ============================================================
+if defined MENU_STATUS echo %MENU_STATUS%
+if defined CL_AHEAD echo El changelog tiene v%CL_VERSION% en desarrollo.
+if defined MENU_NOTE echo %MENU_NOTE%
+if defined PUB_BLOCKER echo No se puede publicar: %PUB_BLOCKER%.
+echo.
+if not defined MENU_ACTION goto :publish_menu_fallback
+echo   1. %MENU_ACTION%
+echo   2. Instalador local, sin subir a GitHub
+echo   3. Cancelar
+choice /C 123 /N /M "Opcion: "
+set "MENU_KEY=%ERRORLEVEL%"
+if "%MENU_KEY%"=="2" goto :publish_menu_local
+if not "%MENU_KEY%"=="1" goto :publish_menu_cancel
+call :notes_check
+if errorlevel 1 goto :publish_menu_fallback
+set "PUBLISH=always"
+echo Se publica v%APP_VERSION% al terminar.
+goto :publish_preflight_done
+:publish_menu_fallback
+echo   2. Instalador local, sin subir a GitHub
+echo   3. Cancelar
+choice /C 23 /N /M "Opcion: "
+if "%ERRORLEVEL%"=="1" goto :publish_menu_local
+:publish_menu_cancel
+echo Cancelado. No se armo nada.
+exit /b 1
+:publish_menu_local
 set "PUBLISH=never"
+echo Se arma solo el instalador local, sin publicar.
 :publish_preflight_done
 
 REM Verificar si Inno Setup está instalado
@@ -336,14 +414,8 @@ if "%ERRORLEVEL%"=="1" (
     echo Instalador no ejecutado.
 )
 :after_run
-if /I "%PUBLISH%"=="never" exit /b 0
-if /I "%PUBLISH%"=="always" goto :do_publish
-choice /C YN /M "Publicar el release v%APP_VERSION% en %RELEASE_REPO%"
-if errorlevel 2 (
-    echo Release no publicado.
-    exit /b 0
-)
-:do_publish
+REM La publicacion ya se decidio antes de armar el instalador [--publish o la opcion 1 del menu].
+if /I not "%PUBLISH%"=="always" exit /b 0
 call :publish_release
 exit /b %ERRORLEVEL%
 
@@ -362,29 +434,33 @@ exit /b %ERRORLEVEL%
 
 :git_preflight
 REM El tag se crea sobre HEAD (--target): tiene que ser el codigo commiteado y estar en origin.
-REM -uno y no --untracked-files=no: adentro de un for /f el = se vuelve espacio, git toma el "no"
-REM como una ruta y nunca veia cambios.
+REM Un archivo sin seguimiento tambien cuenta, igual que en la Mac. Cada corte deja PUB_BLOCKER
+REM para el menu de publicacion.
 set "DIRTY="
-for /f "delims=" %%S in ('git status --porcelain -uno 2^>nul') do set "DIRTY=1"
+for /f "delims=" %%S in ('git status --porcelain 2^>nul') do set "DIRTY=1"
 if defined DIRTY (
     echo ERROR: hay cambios sin commitear; el release tiene que salir de un commit:
-    git status --short -uno
+    git status --short
+    set "PUB_BLOCKER=hay cambios sin commitear [el release tiene que salir de un commit]"
     exit /b 1
 )
 git fetch -q origin
 if errorlevel 1 (
     echo ERROR: no se pudo leer origin.
+    set "PUB_BLOCKER=no se pudo leer origin"
     exit /b 1
 )
 git merge-base --is-ancestor HEAD origin/main
 if errorlevel 1 (
     echo ERROR: HEAD no esta en origin/main. Pushear antes de publicar.
+    set "PUB_BLOCKER=HEAD no esta en origin/main [pushear antes de publicar]"
     exit /b 1
 )
 REM VERSION (de donde sale el numero del instalador) tiene que coincidir con CMakeLists.txt.
 call "%SCRIPT_DIR%sync_version.bat" --check-only
 if errorlevel 1 (
     echo ERROR: VERSION y CMakeLists.txt no coinciden. Correr sync_version.bat y commitear.
+    set "PUB_BLOCKER=VERSION y CMakeLists.txt no coinciden"
     exit /b 1
 )
 set "HEAD_SHA="
@@ -416,28 +492,8 @@ REM Lo que hay en el release v(version) antes de tocarlo. Corre antes de armar n
 REM publicar, porque la Mac pudo publicar en el medio. Corta si el release es un borrador, si ya
 REM tiene el instalador de Windows (salvo --replace) o si tiene assets de macOS sin SHA256SUMS:
 REM fusionar contra nada borraria sus lineas, y el auto-update de la Mac dejaria de verlo.
-set "TAG=v%APP_VERSION%"
-set "REL_EXISTS="
-set "REL_DRAFT=0"
-set "REL_SUMS=0"
-set "REL_OWN=0"
-set "REL_OTHER=0"
-call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" >nul 2>nul
-if errorlevel 1 exit /b 0
-set "REL_EXISTS=1"
-set "VD_RC=%TEMP%\vd_release_check_%RANDOM%%RANDOM%"
-mkdir "%VD_RC%" >nul 2>nul
-REM Las respuestas de gh van a archivos: un gh entre comillas adentro de un for /f no itera. Se
-REM leen con PowerShell porque gh escribe solo LF y findstr /X no las reconoce.
-call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" --json isDraft -q ".isDraft" > "%VD_RC%\draft.txt"
-if errorlevel 1 goto :release_check_gh_failed
-call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" --json assets -q ".assets[].name" > "%VD_RC%\assets.txt"
-if errorlevel 1 goto :release_check_gh_failed
-set "VD_OWN_ASSET=VideoDownloader_Setup_v%APP_VERSION%.exe"
-powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=$env:VD_RC; $a=@(Get-Content -LiteralPath (Join-Path $d 'assets.txt') | ForEach-Object { $_.Trim() }); $draft=@(Get-Content -LiteralPath (Join-Path $d 'draft.txt') | ForEach-Object { $_.Trim() }) -contains 'true'; $other=@($a | Where-Object { $_ -like 'LGA_Video_Downloader_Mac_v*' }).Count -gt 0; Set-Content -LiteralPath (Join-Path $d 'state.txt') -Encoding Ascii -Value ('REL_DRAFT=' + [int]$draft), ('REL_SUMS=' + [int]($a -contains 'SHA256SUMS')), ('REL_OWN=' + [int]($a -contains $env:VD_OWN_ASSET)), ('REL_OTHER=' + [int]$other)"
-if errorlevel 1 goto :release_check_gh_failed
-for /f "usebackq tokens=1,2 delims==" %%A in ("%VD_RC%\state.txt") do set "%%A=%%B"
-rmdir /S /Q "%VD_RC%" >nul 2>nul
+call :release_state
+if errorlevel 1 exit /b 1
 if "%REL_DRAFT%"=="1" (
     echo ERROR: el release %TAG% existe como borrador. Publicarlo o borrarlo a mano antes de seguir.
     exit /b 1
@@ -452,8 +508,36 @@ if "%REL_OTHER%"=="1" if "%REL_SUMS%"=="0" (
     exit /b 1
 )
 exit /b 0
-:release_check_gh_failed
+
+:release_state
+REM Solo lee el release v(version): deja REL_EXISTS, REL_DRAFT, REL_SUMS, REL_OWN y REL_OTHER. Sale
+REM con 1 si no lo pudo leer. Lo usan :release_check y el menu de publicacion.
+set "TAG=v%APP_VERSION%"
+set "REL_EXISTS="
+set "REL_DRAFT=0"
+set "REL_SUMS=0"
+set "REL_OWN=0"
+set "REL_OTHER=0"
+call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" >nul 2>nul
+if errorlevel 1 exit /b 0
+set "REL_EXISTS=1"
+set "VD_RC=%TEMP%\vd_release_check_%RANDOM%%RANDOM%"
+mkdir "%VD_RC%" >nul 2>nul
+REM Las respuestas de gh van a archivos: un gh entre comillas adentro de un for /f no itera. Se
+REM leen con PowerShell porque gh escribe solo LF y findstr /X no las reconoce.
+call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" --json isDraft -q ".isDraft" > "%VD_RC%\draft.txt"
+if errorlevel 1 goto :release_state_gh_failed
+call "%GH_CMD%" release view "%TAG%" --repo "%RELEASE_REPO%" --json assets -q ".assets[].name" > "%VD_RC%\assets.txt"
+if errorlevel 1 goto :release_state_gh_failed
+set "VD_OWN_ASSET=VideoDownloader_Setup_v%APP_VERSION%.exe"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$d=$env:VD_RC; $a=@(Get-Content -LiteralPath (Join-Path $d 'assets.txt') | ForEach-Object { $_.Trim() }); $draft=@(Get-Content -LiteralPath (Join-Path $d 'draft.txt') | ForEach-Object { $_.Trim() }) -contains 'true'; $other=@($a | Where-Object { $_ -like 'LGA_Video_Downloader_Mac_v*' }).Count -gt 0; Set-Content -LiteralPath (Join-Path $d 'state.txt') -Encoding Ascii -Value ('REL_DRAFT=' + [int]$draft), ('REL_SUMS=' + [int]($a -contains 'SHA256SUMS')), ('REL_OWN=' + [int]($a -contains $env:VD_OWN_ASSET)), ('REL_OTHER=' + [int]$other)"
+if errorlevel 1 goto :release_state_gh_failed
+for /f "usebackq tokens=1,2 delims==" %%A in ("%VD_RC%\state.txt") do set "%%A=%%B"
+rmdir /S /Q "%VD_RC%" >nul 2>nul
+exit /b 0
+:release_state_gh_failed
 echo ERROR: no se pudo leer el release %TAG% de %RELEASE_REPO%.
+set "PUB_BLOCKER=no se pudo leer el release %TAG% de %RELEASE_REPO%"
 rmdir /S /Q "%VD_RC%" >nul 2>nul
 exit /b 1
 
