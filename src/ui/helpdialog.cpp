@@ -184,13 +184,12 @@ HelpDialog::HelpDialog(QWidget *parent)
     whatsNew->setTextFormat(Qt::RichText);
     titleRow()->addWidget(whatsNew, 0, Qt::AlignBaseline);
 
-    auto *authorRow = keyValueRow(QStringLiteral("Author"), "kvKey");
+    // El nombre solo, sin rotulo "Author": ninguna app LGA lo usa.
     auto *author = label(QStringLiteral("Lega Pugliese · ") + link(QStringLiteral("https://lega.com.ar"),
                                                                  QStringLiteral("lega.com.ar")), "kvValue");
     author->setTextFormat(Qt::RichText);
     author->setOpenExternalLinks(true);
-    authorRow->addWidget(author, 1);
-    body()->addLayout(authorRow);
+    body()->addWidget(author);
 
     addRule(body());
 

@@ -1,5 +1,7 @@
 v0.96:
 
+        - `UI / HELP SIN EL ROTULO AUTHOR` Help mostraba el credito como una fila "Author · Lega Pugliese · lega.com.ar", con un rotulo que ninguna app LGA usa. Queda el nombre con el link solo, debajo del titulo. [ UI - Help sin el rotulo Author ]
+
         - `UI / BARRA DE TITULO PROPIA, SIN EL TAB UNICO, Y SETTINGS APARTE DE HELP` La ventana tenia una barra de pestanas con una sola pestana (DOWNLOADS) debajo de la barra de Windows. Se reemplaza por la barra de titulo de FaceLock y RotoWorker (`AppHeaderBar`, copiada de RotoWorker con su marco sin borde, `windowsframeless.cpp`): icono, nombre, avisos, Settings y Help con los mismos SVG, y los botones de ventana. Help se parte en dos sobre una base comun (`PanelDialog`): Settings lleva updates, extension y versiones de tools; Help, version, What's new y creditos. Con Qt 6.8 el boton maximizar dejaba la ventana "maximizada" sin que Windows lo supiera (bordes de resize activos): maximiza por `ShowWindow`, como el doble clic. Nuevo `--qa-titlebar` (26/26) y estados `settings`/`settings-update` de `--ui-shot`. Suma `Qt6Svg.dll`. [ UI - Barra de titulo propia y Settings aparte de Help ]
 
         - `DEPLOY MAC / DEPLOY LOCAL` `./deploy_local.sh` compila en Release, verifica el bundle, instala la app en Aplicaciones y la abre, sin ZIP, DMG ni GitHub y sin preguntar. Es el cierre de toda implementacion en la Mac.
