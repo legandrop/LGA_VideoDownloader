@@ -4,8 +4,14 @@ set -euo pipefail
 
 # Publica el release de macOS de una app LGA en GitHub: el .zip (lo que baja el auto-update) y el
 # .dmg (primera instalacion), mas SHA256SUMS y las notas para el usuario (What's new) si la app las
-# usa. Lo llama el `deploy.sh` de cada app, en dos tiempos:
+# usa. Lo llama el `deploy.sh` de cada app, en dos tiempos (mas un sondeo previo opcional):
 #
+#   publish_release.sh --decide [opciones]      ANTES de compilar, con terminal: mira GitHub, pregunta
+#                                               con UNA tecla (publicar / sumar la edicion / bump / local /
+#                                               cancelar), hace el bump si se elige y corre el preflight.
+#                                               Sale 0 = publicar, 10 = build local, 20 = cancelado.
+#   publish_release.sh --probe [opciones]       Solo el estado del release y lo que impide publicar
+#                                               (lo usa --decide; sirve para mirarlo a mano).
 #   publish_release.sh --preflight [opciones]   ANTES de compilar: junta TODOS los problemas que
 #                                               impedirian publicar y corta sin tocar nada.
 #   publish_release.sh --expect-head <sha> [...] DESPUES de armar el .zip y el .dmg: revalida todo
@@ -24,8 +30,13 @@ set -euo pipefail
 
 show_help() {
     cat <<'EOF'
-Uso: tools/macos/publish_release.sh (--preflight | --expect-head <sha>) [opciones]
+Uso: tools/macos/publish_release.sh (--probe | --preflight | --expect-head <sha>) [opciones]
 
+  --decide            Con terminal: mira GitHub, pregunta con UNA tecla que hacer (publicar, sumar
+                      la edicion, bump, build local, cancelar), hace el bump si se elige y corre el
+                      preflight. Exit 0 = publicar, 10 = build local, 20 = cancelado.
+  --probe             Solo lee: el estado del release v<version> y lo que impide publicar,
+                      una cosa por linea (release=... / blocker=...). Nunca corta.
   --preflight         Solo comprueba, antes de compilar. No escribe nada.
   --expect-head SHA   Publica. SHA es el HEAD del preflight: si el repo cambio, no se publica.
   --edition NOMBRE    Edicion (studio/client...) cuando release.conf define release_edition().
@@ -46,6 +57,8 @@ CONF_FILE="tools/macos/release.conf"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --decide) MODE="decide"; shift ;;
+        --probe) MODE="probe"; shift ;;
         --preflight) MODE="preflight"; shift ;;
         --expect-head)
             [[ $# -ge 2 ]] || { echo "ERROR: --expect-head requiere el SHA del preflight."; exit 1; }
@@ -65,7 +78,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$MODE" ]]; then
-    echo "ERROR: falta --preflight o --expect-head."
+    echo "ERROR: falta --decide, --probe, --preflight o --expect-head."
     show_help
     exit 1
 fi
@@ -94,6 +107,8 @@ REFRESH_MANIFEST=true
 PINNED_CERT_SHA1=""       # si no esta vacio, ese certificado tiene que estar valido en el llavero
 RELEASE_TITLE=""
 RELEASE_NOTES=""
+DEV_VERSION_FILE=""       # changelog cuyo primer "vX.Y:" es la version EN DESARROLLO (para --decide)
+BUMP_CMD=""               # bump a esa version con commit + push y sin preguntas; vacio = no se ofrece
 EXPECTED_GH_USER="legandrop"
 EXPECTED_GIT_EMAIL="176236735+legandrop@users.noreply.github.com"
 
@@ -332,6 +347,220 @@ pre_fail() {
     PRE_ERRORS=$((PRE_ERRORS + 1))
 }
 
+# ---- Probe ---------------------------------------------------------------------------------------
+# Para que deploy.sh pregunte segun el estado REAL, y no a ciegas. Solo LEE y nunca corta. Imprime en
+# stdout, una cosa por linea y nada mas:
+#   release=none|other|mine|draft|error   el release v<version>: no existe / existe sin los archivos de
+#                                         macOS de ESTA edicion / ya los tiene / es un borrador / no se
+#                                         pudo leer (tambien sin gh)
+#   blocker=<motivo>                      lo que impide publicar cualquier version (cero o mas lineas)
+# No mira si falta el bump (deploy.sh lo resuelve y puede ofrecerlo) ni el tag (depende de que version
+# se termine publicando): todo eso lo vuelve a comprobar --preflight despues de la decision.
+probe() {
+    local out names draft branch head_sha tag_sha email gh_user vis state="error" gh_ok=false
+    if ! command -v "$GH" >/dev/null 2>&1 || ! "$GH" auth status >/dev/null 2>&1; then
+        echo "blocker=gh (GitHub CLI) no esta instalado o no tiene login (gh auth login)"
+    else
+        gh_ok=true
+        gh_user="$("$GH" api user -q .login 2>/dev/null || true)"
+        if [[ -n "$EXPECTED_GH_USER" && "$gh_user" != "$EXPECTED_GH_USER" ]]; then
+            echo "blocker=gh esta logueado como '${gh_user:-?}', no como $EXPECTED_GH_USER"
+        fi
+    fi
+    email="$(git config user.email || true)"
+    if [[ -n "$EXPECTED_GIT_EMAIL" && "$email" != "$EXPECTED_GIT_EMAIL" ]]; then
+        echo "blocker=git user.email es '${email:-?}', no $EXPECTED_GIT_EMAIL"
+    fi
+    if [[ -n "$(git status --porcelain)" ]]; then
+        echo "blocker=hay cambios sin commitear (el release tiene que salir de un commit)"
+    fi
+    # Fuera de la rama solo se publica el codigo de un tag que ya existe (git checkout <tag>).
+    branch="$(git symbolic-ref --short -q HEAD || true)"
+    if [[ "$branch" != "$CODE_BRANCH" ]]; then
+        head_sha="$(git rev-parse HEAD)"
+        tag_sha="$(git rev-parse -q --verify "refs/tags/${SOURCE_TAG}^{commit}" 2>/dev/null || true)"
+        if [[ "$tag_sha" != "$head_sha" ]]; then
+            echo "blocker=la rama actual es '${branch:-HEAD suelto}', no $CODE_BRANCH"
+        fi
+    fi
+    if [[ -n "$PINNED_CERT_SHA1" ]] && ! security find-identity -v -p codesigning 2>/dev/null | grep -qi "$PINNED_CERT_SHA1"; then
+        echo "blocker=el certificado fijado ($PINNED_CERT_SHA1) no esta, valido, en el llavero"
+    fi
+    if [[ -n "$WHATS_NEW_FILE" ]]; then
+        [[ -f "$WHATS_NEW_FILE" ]] || echo "blocker=falta $WHATS_NEW_FILE (las notas para el usuario)"
+        [[ -f "$WHATS_NEW_SH" ]] || echo "blocker=no encontre $WHATS_NEW_SH (clonar LGA_RepoTools al lado de este repo)"
+    fi
+    if [[ "$gh_ok" == "true" ]]; then
+        if [[ "$REQUIRE_PUBLIC_REPO" == "true" ]]; then
+            vis="$("$GH" repo view "$RELEASE_REPO" --json visibility -q .visibility 2>/dev/null || true)"
+            [[ "$vis" == "PUBLIC" ]] || echo "blocker=$RELEASE_REPO no es publico (${vis:-no se pudo leer})"
+        fi
+        if out="$("$GH" release view "$TAG" --repo "$RELEASE_REPO" --json isDraft,assets 2>&1)"; then
+            draft="$(printf '%s' "$out" | /usr/bin/python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isDraft"]).lower())')"
+            names="$(printf '%s' "$out" | /usr/bin/python3 -c 'import json,sys; [print(a["name"]) for a in json.load(sys.stdin)["assets"]]')"
+            if [[ "$draft" == "true" ]]; then
+                state="draft"
+                echo "blocker=el release $TAG existe como borrador (publicarlo o borrarlo a mano)"
+            elif printf '%s\n' "$names" | grep -qx -e "$ZIP_NAME" -e "$DMG_NAME"; then
+                state="mine"
+            else
+                state="other"
+            fi
+        elif printf '%s\n' "$out" | grep -qi "not found"; then
+            state="none"
+        else
+            echo "blocker=no se pudo leer el release $TAG de $RELEASE_REPO"
+        fi
+    fi
+    echo "release=$state"
+}
+
+# ---- Decide --------------------------------------------------------------------------------------
+# Lo que `deploy.sh` corre ANTES de compilar cuando no se le paso --publish ni --no-publish y hay
+# terminal. Mira el release con probe() y pregunta UNA vez, con una tecla y sin Enter (una tecla que
+# no es opcion no hace nada). Los numeros no cambian de significado aunque falte una opcion:
+#   1  publicar v<version> (release nuevo) o sumar los archivos de esta edicion al que ya existe; o,
+#      si esa version ya los tiene o el changelog va adelante, el bump (BUMP_CMD) a la version del
+#      changelog y publicar esa. Reemplazar no se ofrece: republicar el mismo numero con otro codigo
+#      deja sin update a quien ya lo tiene (para eso esta --publish --replace).
+#   2  build local, sin subir nada.        3  cancelar.
+# Si lo elegido no se puede hacer (notas, bump, preflight) se vuelve a ofrecer 2/3: el build no
+# depende de GitHub, asi que nunca se corta solo. Exit 0 = publicar (el preflight ya paso, y con
+# la version que haya dejado el bump: deploy.sh la relee), 10 = build local, 20 = cancelado.
+read_key() {  # <opciones validas>; deja la tecla, en mayuscula, en KEY
+    local k
+    while true; do
+        IFS= read -rsn1 k || { KEY=""; return 1; }
+        k="$(printf '%s' "$k" | tr '[:lower:]' '[:upper:]')"
+        if [[ -n "$k" && "$1" == *"$k"* ]]; then
+            KEY="$k"
+            echo "$k"
+            return 0
+        fi
+    done
+}
+
+dev_version() {  # el primer encabezado de version de DEV_VERSION_FILE: "vX.Y:", "X.Y:" o "## vX.Y"
+    [[ -n "$DEV_VERSION_FILE" && -f "$DEV_VERSION_FILE" ]] || return 0
+    awk 'match($0, /^[[:space:]]*v?[0-9]+(\.[0-9]+)+[[:space:]]*:/) || match($0, /^##[[:space:]]+v?[0-9]+(\.[0-9]+)+[[:space:]]*$/) {
+        s = substr($0, RSTART, RLENGTH); gsub(/[[:space:]v:#]/, "", s); print s; exit }' "$DEV_VERSION_FILE"
+}
+
+version_gt() {  # <a> <b>; exit 0 si a > b
+    /usr/bin/python3 -c 'import sys; t = lambda v: tuple(int(x) for x in v.split(".")); sys.exit(0 if t(sys.argv[1]) > t(sys.argv[2]) else 1)' "$1" "$2"
+}
+
+decide_local_or_cancel() {
+    echo "  2. Build local, sin subir a GitHub"
+    echo "  3. Cancelar"
+    printf 'Opcion: '
+    read_key "23" || exit 20
+    [[ "$KEY" == "3" ]] && exit 20
+    exit 10
+}
+
+decide_preflight() {  # [--yes]; corre el preflight en otro proceso, con la version que haya ahora
+    local args=(--preflight --conf "$CONF_FILE")
+    [[ -n "$EDITION" ]] && args+=(--edition "$EDITION")
+    [[ $# -gt 0 ]] && args+=("$@")
+    echo ""
+    echo "==> Verificando que se pueda publicar..."
+    if bash "$SCRIPT_DIR/$(basename "${BASH_SOURCE[0]}")" "${args[@]}"; then
+        exit 0
+    fi
+    echo ""
+    decide_local_or_cancel
+}
+
+decide() {
+    local out line state="error" dev ahead=false action="" label="" note="" target edition_label
+    local blockers=()
+    edition_label="macOS${EDITION:+ $EDITION}"
+    if [[ ! -t 0 ]]; then
+        exit 10   # sin terminal no hay a quien preguntarle
+    fi
+    out="$(probe)"
+    while IFS= read -r line; do
+        case "$line" in
+            release=*) state="${line#release=}" ;;
+            blocker=*) blockers+=("${line#blocker=}") ;;
+        esac
+    done <<< "$out"
+    dev="$(dev_version)"
+    if [[ "$dev" =~ $VERSION_REGEX ]] && version_gt "$dev" "$APP_VERSION"; then
+        ahead=true
+    fi
+
+    echo ""
+    echo "==> Publicacion en GitHub [$APP_NAME]"
+    case "$state" in
+        none) echo "    $TAG no esta publicada en GitHub." ;;
+        other) echo "    $TAG esta en GitHub, sin los archivos de $edition_label." ;;
+        mine) echo "    $TAG ya esta publicada para $edition_label en GitHub." ;;
+    esac
+    [[ "$ahead" == "true" ]] && echo "    El changelog tiene v$dev en desarrollo."
+
+    if [[ "$ahead" == "true" ]]; then
+        if [[ -n "$BUMP_CMD" ]]; then
+            action="bump"; target="$dev"
+            label="Bump a v$dev (commit + push) y publicarla"
+            if [[ "$state" == "other" ]]; then
+                note="(Para sumar $edition_label a $TAG con el codigo de ese release: git checkout $SOURCE_TAG)"
+            fi
+        else
+            note="Para publicar v$dev falta el bump (en esta app no esta automatizado)."
+        fi
+    elif [[ "$state" == "mine" ]]; then
+        note="Para publicar, primero la version nueva en el changelog."
+    elif [[ "$state" == "none" ]]; then
+        action="publish"; label="Publicar $TAG como release nuevo"
+    elif [[ "$state" == "other" ]]; then
+        action="publish"; label="Sumar $edition_label al release $TAG"
+    fi
+    [[ -n "$note" ]] && echo "    $note"
+    if [[ ${#blockers[@]} -gt 0 ]]; then
+        action=""
+        echo "    No se puede publicar:"
+        for line in "${blockers[@]}"; do
+            echo "      - $line"
+        done
+    fi
+    echo ""
+    [[ -n "$action" ]] || decide_local_or_cancel
+
+    echo "  1. $label"
+    echo "  2. Build local, sin subir a GitHub"
+    echo "  3. Cancelar"
+    printf 'Opcion: '
+    read_key "123" || exit 20
+    case "$KEY" in
+        2) exit 10 ;;
+        3) exit 20 ;;
+    esac
+    [[ "$action" == "publish" ]] && decide_preflight
+
+    # Bump. Antes, las notas de la version DESTINO: si fallan no se toca nada.
+    if [[ -n "$WHATS_NEW_FILE" ]]; then
+        echo ""
+        echo "==> Notas para el usuario (What's new) de v$target..."
+        if ! sh "$WHATS_NEW_SH" check "$WHATS_NEW_FILE" "$target"; then
+            echo "No se hizo el bump: faltan o fallan las notas de v$target, o se contesto que no."
+            echo ""
+            decide_local_or_cancel
+        fi
+    fi
+    echo ""
+    echo "==> Bump a v$target (commit + push)..."
+    if ! bash -c "$BUMP_CMD" </dev/tty; then
+        echo "El bump fallo (ver arriba)."
+        echo ""
+        decide_local_or_cancel
+    fi
+    # El preflight relee la version y comprueba bump, tag, arbol limpio y HEAD en origin. Las
+    # notas ya se controlaron: que no pregunte dos veces.
+    decide_preflight --yes
+}
+
 # ---- Preflight -----------------------------------------------------------------------------------
 # Junta TODOS los errores en vez de cortar en el primero. Solo LEE.
 preflight() {
@@ -565,7 +794,11 @@ publish() {
     return 0
 }
 
-if [[ "$MODE" == "preflight" ]]; then
+if [[ "$MODE" == "decide" ]]; then
+    decide
+elif [[ "$MODE" == "probe" ]]; then
+    probe
+elif [[ "$MODE" == "preflight" ]]; then
     preflight
 else
     publish

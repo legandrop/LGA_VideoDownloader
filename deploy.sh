@@ -20,8 +20,9 @@ show_help() {
     echo "  --replace     Con --publish: reemplazar los archivos de macOS si el release ya los tiene"
     echo "  --yes         Con --publish: no preguntar en el control de las notas"
     echo ""
-    echo "Sin flags y con terminal interactiva, pregunta primero si publicar. Sin terminal (pipe,"
-    echo "CI) no pregunta nada: hay que pasar los flags."
+    echo "Sin flags y con terminal interactiva, mira GitHub y pregunta primero, con una tecla: publicar"
+    echo "(o sumar macOS al release), build local o cancelar. Sin terminal (pipe, CI) no pregunta"
+    echo "nada: hay que pasar los flags."
 }
 
 CREATE_ZIP=false
@@ -60,14 +61,28 @@ if [ -z "$APP_VERSION" ]; then
 fi
 echo "Version: $APP_VERSION"
 
-# Publicar se decide ANTES de compilar. Sin flags y con terminal se pregunta, como en las otras
-# apps LGA; si se dice que no, sigue el deploy de siempre (compila, instala y abre).
+# Publicar se decide ANTES de compilar. Sin flags y con terminal, `publish_release.sh --decide`
+# (pieza canonica de la Base) mira el release en GitHub y pregunta con UNA tecla: publicar o sumar
+# macOS al release que ya existe (lo pudo crear Windows), build local o cancelar. Esta app no tiene
+# bump automatizado (BUMP_CMD vacio en tools/macos/release.conf): si la version ya esta publicada o
+# el changelog va adelante, lo dice y no ofrece publicar. Si vuelve con "publicar", el preflight ya
+# paso. Si se elige local, sigue el deploy de siempre (compila, instala y abre).
 PUBLISH=false
+DECIDED=false
 if [ "$PUBLISH_MODE" = "always" ]; then
     PUBLISH=true
 elif [ "$PUBLISH_MODE" = "prompt" ] && [ "$ARG_COUNT" -eq 0 ] && [ -t 0 ]; then
-    read -r -p "Publicar el release v${APP_VERSION} en GitHub? (Y/N): " answer
-    [[ "$answer" =~ ^[Yy]$ ]] && PUBLISH=true
+    DECIDE_RC=0
+    bash "./tools/macos/publish_release.sh" --decide || DECIDE_RC=$?
+    case "$DECIDE_RC" in
+        0) PUBLISH=true; DECIDED=true ;;
+        10) ;;
+        20)
+            echo "Cancelado. No se compilo nada."
+            exit 1
+            ;;
+        *) echo "AVISO: no se pudo decidir la publicacion (ver arriba): se sigue con el build local." ;;
+    esac
 fi
 if [ "$PUBLISH" != "true" ] && [ ${#PUBLISH_ARGS[@]} -gt 0 ]; then
     echo "ERROR: ${PUBLISH_ARGS[*]} solo tiene sentido con --publish."
@@ -85,7 +100,10 @@ if [ "$PUBLISH" = "true" ]; then
     CREATE_ZIP=true
     CREATE_DMG=true
     PUBLISH_HEAD="$(git rev-parse HEAD)"
-    bash "./tools/macos/publish_release.sh" --preflight ${PUBLISH_ARGS[@]+"${PUBLISH_ARGS[@]}"} || exit 1
+    # Con --decide el preflight ya corrio: no se repite.
+    if [ "$DECIDED" != "true" ]; then
+        bash "./tools/macos/publish_release.sh" --preflight ${PUBLISH_ARGS[@]+"${PUBLISH_ARGS[@]}"} || exit 1
+    fi
 fi
 
 # BORRAR DEPLOY ANTERIOR
