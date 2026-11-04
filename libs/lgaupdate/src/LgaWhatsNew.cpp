@@ -1,7 +1,9 @@
 #include "lgaupdate/LgaWhatsNew.h"
 
+#include "lgaupdate/LgaNetRetry.h"
 #include "lgaupdate/LgaVersionCompare.h"
 
+#include <QCoreApplication>
 #include <QCryptographicHash>
 #include <QDir>
 #include <QFile>
@@ -493,6 +495,22 @@ LgaWhatsNewFetcher::LgaWhatsNewFetcher(QNetworkAccessManager *network, QObject *
     , m_network(network)
 {
     qRegisterMetaType<LgaWhatsNewFetchResult>();
+    // Al cerrarse la app no sale ningun reintento pendiente: la espera se corta y el fetch queda
+    // sin terminar, como con `cancel()`.
+    if (QCoreApplication *app = QCoreApplication::instance()) {
+        connect(app, &QCoreApplication::aboutToQuit, this, [this]() {
+            delete m_retryContext.data();
+        });
+    }
+}
+
+void LgaWhatsNewFetcher::logLine(const QString &message) const
+{
+    if (m_request.log) {
+        m_request.log(message);
+    } else {
+        qInfo().noquote() << QStringLiteral("LgaWhatsNewFetcher: %1").arg(message);
+    }
 }
 
 LgaWhatsNewFetcher::~LgaWhatsNewFetcher()
@@ -508,6 +526,8 @@ bool LgaWhatsNewFetcher::isRunning() const
 void LgaWhatsNewFetcher::cancel()
 {
     m_running = false;
+    // Un reintento que esperaba su turno no sale: nada de pedidos despues de cancelar.
+    delete m_retryContext.data();
     if (m_deadline) {
         m_deadline->stop();
     }
@@ -619,6 +639,25 @@ void LgaWhatsNewFetcher::fetch(const Request &request)
         return;
     }
 
+    m_budget.reset();
+    sendRequest();
+}
+
+void LgaWhatsNewFetcher::sendRequest()
+{
+    // Entre un intento y el siguiente el manager puede haber muerto (es de quien llama). En el
+    // primero no pasa: `fetch()` ya lo miro, asi que esto nunca termina adentro de `fetch()`.
+    if (!m_network) {
+        finish(failedOrStale(QStringLiteral("sin network manager para el %1")
+                                 .arg(m_budget.label())));
+        return;
+    }
+    // Estado POR INTENTO: lo de un intento cortado no se mezcla con el siguiente.
+    m_tooLarge = false;
+    m_timedOut = false;
+    m_buffer.clear();
+
+    const QUrl url = LgaWhatsNew::assetUrl(m_request.repoSlug, m_request.asset.tag);
     QNetworkRequest networkRequest(url);
     if (!m_request.userAgent.isEmpty()) {
         networkRequest.setHeader(QNetworkRequest::UserAgentHeader, m_request.userAgent);
@@ -628,6 +667,7 @@ void LgaWhatsNewFetcher::fetch(const Request &request)
     // Inactividad, ademas del tope TOTAL del timer: los dos, porque un servidor que gotea un
     // byte por segundo nunca dispara el de inactividad.
     networkRequest.setTransferTimeout(m_request.timeoutMs);
+    logLine(QStringLiteral("Notas (%1): %2").arg(m_budget.label(), url.toString()));
     m_reply = m_network->get(networkRequest);
     connect(m_reply, &QNetworkReply::readyRead, this, &LgaWhatsNewFetcher::onReadyRead);
     connect(m_reply, &QNetworkReply::finished, this, &LgaWhatsNewFetcher::onReplyFinished);
@@ -680,7 +720,39 @@ void LgaWhatsNewFetcher::onReplyFinished()
     const QNetworkReply::NetworkError error = reply->error();
     const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
     const QString errorString = reply->errorString();
+    // Corte, timeout (el de Qt o el tope total de este fetcher) o 429/5xx. Un asset demasiado
+    // grande no: ese `abort()` lo hizo este fetcher a proposito y el archivo no va a achicarse.
+    const bool transient =
+        !m_tooLarge && LgaNetRetry::shouldRetry(reply, /*cancelledOnPurpose=*/false);
+    // El texto del intento que fallo, antes de que `allowRetry` cuente el siguiente. `allowRetry`
+    // va ultimo: cuenta solo si de verdad se reintenta, en el servidor donde fallo
+    // (`reply->url()`, despues de los redirects). `deleteLater` todavia no borro el reply.
+    const QString failedAttempt = m_budget.label();
+    const bool retry = transient && m_budget.allowRetry(reply);
     reply->deleteLater();
+
+    if (retry) {
+        // Un solo `arg()` con todo: un texto de error con un `%N` adentro no se come al resto.
+        logLine(QStringLiteral("Notas fallidas (%1): httpStatus=%2 networkError=%3 (%4)%5; se "
+                               "reintenta en %6 ms")
+                    .arg(failedAttempt, QString::number(httpStatus),
+                         QString::number(static_cast<int>(error)), errorString,
+                         m_timedOut ? QStringLiteral(" timeout de %1 ms").arg(m_request.timeoutMs)
+                                    : QString(),
+                         QString::number(LgaNetRetry::delayMs())));
+        m_buffer.clear();
+        // Con contexto propio y no `this`: `cancel()` lo borra y el reintento no sale.
+        QObject *context = new QObject(this);
+        m_retryContext = context;
+        QTimer::singleShot(LgaNetRetry::delayMs(), context, [this, context]() {
+            m_retryContext.clear();
+            context->deleteLater();
+            if (m_running) {
+                sendRequest();
+            }
+        });
+        return;
+    }
 
     const auto fallback = [this](const QString &detail) { finish(failedOrStale(detail)); };
 
@@ -689,14 +761,14 @@ void LgaWhatsNewFetcher::onReplyFinished()
         return;
     }
     if (m_timedOut) {
-        fallback(QStringLiteral("timeout de %1 ms").arg(m_request.timeoutMs));
+        fallback(QStringLiteral("timeout de %1 ms (%2)")
+                     .arg(QString::number(m_request.timeoutMs), failedAttempt));
         return;
     }
     if (error != QNetworkReply::NoError || httpStatus < 200 || httpStatus >= 300) {
-        fallback(QStringLiteral("fallo de red httpStatus=%1 networkError=%2 (%3)")
-                     .arg(httpStatus)
-                     .arg(static_cast<int>(error))
-                     .arg(errorString));
+        fallback(QStringLiteral("fallo de red httpStatus=%1 networkError=%2 (%3) (%4)")
+                     .arg(QString::number(httpStatus), QString::number(static_cast<int>(error)),
+                          errorString, failedAttempt));
         return;
     }
 

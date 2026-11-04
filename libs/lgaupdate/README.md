@@ -1,6 +1,6 @@
 # lgaupdate — auto-update de las apps LGA
 
-**Pieza canónica de `LGA_Base_QT_C_Py`, rev 2 (2026-10-15).** Cada app la copia **idéntica** a su
+**Pieza canónica de `LGA_Base_QT_C_Py`, rev 3 (2026-11-04).** Cada app la copia **idéntica** a su
 `libs/lgaupdate`, este README incluido, y no la edita: un cambio se hace acá, se sube la revisión
 y se vuelve a copiar a todas. Así comparar una copia con la canónica es un `diff -r` sin
 excepciones.
@@ -92,6 +92,50 @@ para un aviso que no interrumpe (sale aunque el usuario haya pospuesto el cartel
 El presentador decide por `spec.kind` y por el **rol** de cada botón, no por su posición: cada app
 ordena los botones a su manera y el servicio interpreta el rol del elegido.
 
+### Rev 3: reintentos de red (sin config)
+
+Regla de LGA (`LGA_RepoTools/Docs/Convencion_Red_Reintentos.md`): un pedido que falla por
+conexión (rechazada, cortada, timeout, DNS), por un corte de HTTP/2 o con 408/429/5xx se vuelve a
+mandar **3 veces, con 5 s entre intentos**; un 4xx definitivo no. Motivo: GateBouncer, el firewall
+por aplicación de la PC de trabajo, bloquea el primer intento de cada programa y de cada destino
+nuevo. Vale para el chequeo, el manifiesto de las notas, las notas y la descarga. Qué se reintenta
+y cuánto se espera lo decide `include/lgaupdate/LgaNetRetry.h`, que las apps sin lgaupdate copian
+idéntico.
+
+- La cuenta es **por servidor** (`LgaNetRetry::Budget`): las notas y el instalador salen de
+  github.com y siguen un redirect al servidor de los archivos, y cada uno puede quedar bloqueado
+  en su primer intento. Cada servidor donde el pedido falla tiene sus 3 reintentos, con un tope de
+  10 intentos en total.
+
+- La espera es un `QTimer::singleShot` con contexto, nunca un hilo dormido. La cortan el Cancel de
+  la descarga, `LgaWhatsNewFetcher::cancel()`, la destrucción del servicio y `aboutToQuit`.
+- Cada intento va al log de updates («intento 1 de 4», después «intento 3 (2 de 4 en
+  &lt;servidor&gt;)»); sin `updateLogPath`, a `qInfo`. El fetcher recibe el suyo en `Request::log`.
+- El chequeo sigue siendo una sola fase (`checkStarted` y `checkFinished` una vez) y cuenta como
+  ocupado mientras espera. El reintento largo del periódico (`periodicCheckRetryMs`) va después de
+  los cuatro intentos.
+- La descarga reanuda por `Range` desde donde quedó (desde cero si no llegó nada; si el servidor
+  ignora el `Range` y manda 200, empieza de nuevo). Los cortes de una misma descarga suman en la
+  misma cuenta: no vuelve a empezar porque el intento anterior haya traído datos. Durante la espera
+  el diálogo de progreso dice «Connection problem. Retrying (attempt 2 of 4)...», con el número del
+  servidor que falló.
+- `checkTimeoutMs` y `downloadTimeoutMs` valen por intento: un chequeo con timeouts puede tardar
+  4 × 15 s + 3 × 5 s. Una prueba de la app que simula fallos de red baja la espera con
+  `LgaNetRetry::delayMsOverrideForTests()`.
+
+**Banco de pruebas** (`tests/`, apagado por defecto): el servicio y el fetcher reales contra
+servidores propios en 127.0.0.1 (HTTP/1.1, HTTP/2 sin TLS para los cortes por RST_STREAM y GOAWAY,
+y un proxy de prueba para los redirects de github.com), sin red y sin instalar nada. Se compila
+fuera del repo y se
+corre solo con el runner de QA:
+
+```powershell
+cmake -S <repo> -B <carpeta fuera del repo> -G Ninja -DLGAUPDATE_BUILD_TESTS=ON
+cmake --build <carpeta> --target lgaupdate_retry_tests
+powershell -NoProfile -ExecutionPolicy Bypass -File <Base>\tools\qa\run_headless.ps1 `
+    -Exe <carpeta>\lgaupdate_tests\lgaupdate_retry_tests.exe -Arguments '<carpeta de trabajo nueva>' -TimeoutSec 240
+```
+
 ## Historia
 
 Antes de la rev 1 había tres copias que ya diferían: la de Theta Explorer (la más nueva), la de
@@ -109,3 +153,5 @@ mensaje de schema nuevo— como opciones, para que FileManager S3 y PipeSync se 
 y las demás apps sigan igual. Los tests viven en FrameRev (`tests/TestLgaUpdateService.cpp`, con
 red simulada, y `tests/TestLgaWhatsNew.cpp`, con los casos de ediciones y audiencias que venían de
 `FM_WhatsNewTest`).
+
+La rev 3 suma los reintentos de red de la regla de LGA y su banco de pruebas propio, en `tests/`.

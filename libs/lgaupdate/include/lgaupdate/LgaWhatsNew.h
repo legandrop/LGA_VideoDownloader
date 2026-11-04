@@ -1,5 +1,7 @@
 #pragma once
 
+#include "lgaupdate/LgaNetRetry.h"
+
 #include <QByteArray>
 #include <QList>
 #include <QObject>
@@ -8,6 +10,7 @@
 #include <QStringList>
 #include <QUrl>
 
+#include <functional>
 #include <optional>
 
 class QJsonObject;
@@ -217,8 +220,11 @@ struct LgaWhatsNewFetchResult {
  *   SHA-256 contra el del manifiesto y recien ahi guarda la cache y parsea. Un digest que no
  *   coincide descarta el archivo y termina en `Failed`: las notas nunca se muestran sin
  *   verificar.
- * - Timeout TOTAL acotado (`timeoutMs`) y tope de tamano: sin red termina en `Failed` sin
- *   bloquear nada.
+ * - Timeout TOTAL acotado (`timeoutMs`, por intento) y tope de tamano: sin red termina en
+ *   `Failed` sin bloquear nada.
+ * - Un fallo de conexion, un timeout, un corte de HTTP/2 o un 408/429/5xx se reintentan con la
+ *   regla de red de LGA (`LgaNetRetry.h`: 3 reintentos por servidor, 5 s entre uno y otro).
+ *   `cancel()` corta tambien la espera.
  *
  * Emite `finished` UNA sola vez por `fetch()`, siempre asincrono (nunca dentro de la llamada).
  * Una instancia sirve para un fetch a la vez; para otro en paralelo, otra instancia.
@@ -243,6 +249,11 @@ public:
          * "despues de instalar" necesitan las notas de la version exacta.
          */
         bool allowStaleCache = false;
+        /**
+         * Donde anotar cada intento de la descarga y cada reintento (el log de updates de
+         * `LgaUpdateService`). Vacio = `qInfo`. Se llama solo mientras el fetch esta en curso.
+         */
+        std::function<void(const QString &message)> log;
     };
 
     explicit LgaWhatsNewFetcher(QNetworkAccessManager *network, QObject *parent = nullptr);
@@ -257,6 +268,10 @@ signals:
     void finished(const LgaWhatsNewFetchResult &result);
 
 private:
+    /// Un intento del GET de las notas (cuenta en `m_budget`), con su tope total.
+    void sendRequest();
+    /// `m_request.log`, o `qInfo` si el pedido no trae log.
+    void logLine(const QString &message) const;
     void onReplyFinished();
     void onReadyRead();
     void finish(const LgaWhatsNewFetchResult &result);
@@ -275,6 +290,14 @@ private:
      */
     QPointer<QNetworkReply> m_reply;
     QTimer *m_deadline = nullptr;
+    /**
+     * Cuenta de intentos de este fetch, por servidor: las notas salen de github.com y siguen un
+     * redirect al servidor de los archivos, y cada uno puede quedar bloqueado en su primer
+     * intento (`LgaNetRetry::Budget`).
+     */
+    LgaNetRetry::Budget m_budget;
+    /// Contexto del reintento pendiente: borrarlo lo corta (`cancel()`, cierre de la app).
+    QPointer<QObject> m_retryContext;
     Request m_request;
     QByteArray m_buffer;
     bool m_running = false;

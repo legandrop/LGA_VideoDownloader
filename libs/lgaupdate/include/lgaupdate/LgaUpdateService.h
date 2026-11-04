@@ -1,5 +1,6 @@
 #pragma once
 
+#include "lgaupdate/LgaNetRetry.h"
 #include "lgaupdate/LgaUpdateDialog.h"
 
 #include <QDateTime>
@@ -21,8 +22,12 @@
  *   2 — absorbe lo de `FM_UpdateService` (FileManagerS3 y PipeSync), todo opt-in: log de
  *       updates, `closePolicy`, procesos de fondo, fallback de carpeta escribible, claves del
  *       .ini configurables con fallback a las viejas, y notas por edicion y audiencia.
+ *   3 — reintentos de red (`LgaNetRetry.h`): todo pedido que falla por conexion, timeout, corte
+ *       de HTTP/2 o 408/429/5xx se vuelve a mandar 3 veces POR SERVIDOR (tope 10 en total), 5 s
+ *       entre intentos (chequeo, manifiesto de las notas, notas y descarga, que ademas reanuda
+ *       por `Range`).
  */
-#define LGAUPDATE_REVISION 2
+#define LGAUPDATE_REVISION 3
 
 class QNetworkAccessManager;
 class QNetworkReply;
@@ -127,11 +132,13 @@ struct LgaUpdateConfig {
     /// todas en el mismo segundo.
     int periodicCheckJitterMs = 15 * 60 * 1000;
     /// Reintento de un chequeo periodico que fallo por red (tipico al despertar, con la red
-    /// todavia sin levantar). Sin esto el siguiente intento quedaba a un intervalo entero.
+    /// todavia sin levantar). Sin esto el siguiente intento quedaba a un intervalo entero. Corre
+    /// DESPUES de los reintentos cortos de `LgaNetRetry` (cuatro intentos, 5 s entre uno y otro).
     int periodicCheckRetryMs = 10 * 60 * 1000;
     /**
      * Timeouts de red. NO son opcionales en la practica: sin ellos una conexion colgada deja
-     * el flujo esperando para siempre y el usuario no se entera de nada.
+     * el flujo esperando para siempre y el usuario no se entera de nada. Valen POR INTENTO: un
+     * timeout cuenta como fallo de red y se reintenta (`LgaNetRetry`).
      */
     int checkTimeoutMs = 15000;
     int downloadTimeoutMs = 300000;
@@ -409,9 +416,24 @@ signals:
     void updateAvailable(const QString &version);
 
 private:
-    /// Dispara el GET del manifiesto. Comun al chequeo automatico y al manual.
+    /// Abre la fase de chequeo y manda el primer intento. Comun al chequeo automatico y al manual.
     void startCheckRequest();
+    /// Un intento del GET del manifiesto del chequeo (cuenta en `m_checkBudget`).
+    void sendCheckRequest();
     void onCheckFinished();
+    /**
+     * Objeto de contexto de UN reintento pendiente (`QTimer::singleShot` con contexto): borrarlo
+     * corta el reintento. Cuelga de `m_retryHolder`, asi el cierre de la app los corta todos.
+     */
+    QObject *newRetryContext();
+    /// Corta todos los reintentos pendientes. Conectado a `QCoreApplication::aboutToQuit`.
+    void cancelPendingRetries();
+    /**
+     * Anota un intento de red en el log de updates y, si la app no fijo `updateLogPath`, en el
+     * de la app (`qInfo`): un primer intento bloqueado por un firewall por aplicacion tiene que
+     * dejar rastro aunque despues ande.
+     */
+    void logNet(const QString &message) const;
     void onDownloadReadyRead();
     void onDownloadFinished();
     /// Arranca (o reanuda) el GET del instalador. `resumeFrom > 0` manda un header Range.
@@ -473,6 +495,11 @@ private:
     /// GET del manifiesto para el "What's new" (despues de instalar e historial).
     void requestManifest(
         std::function<void(bool ok, const QByteArray &payload, const QString &detail)> onDone);
+    /// Un intento de `requestManifest`; ante un fallo transitorio programa el siguiente. La cuenta
+    /// viaja por valor de un intento al otro: es la de ESTE pedido.
+    void sendManifestRequest(
+        LgaNetRetry::Budget budget,
+        std::function<void(bool ok, const QByteArray &payload, const QString &detail)> onDone);
     /// Fetcher hijo de este objeto, que se borra solo al terminar.
     LgaWhatsNewFetcher *startNotesFetch(const LgaWhatsNew::AssetRef &asset, bool allowStaleCache);
     /// Cartel modal "What's New" con las notas ya en HTML.
@@ -523,6 +550,23 @@ private:
     QNetworkReply *m_checkReply = nullptr;
     QNetworkReply *m_downloadReply = nullptr;
     QProgressDialog *m_progressDialog = nullptr;
+
+    // ------------------------------------------------------------ reintentos de red
+    /// Padre de los contextos de los reintentos pendientes (ver `newRetryContext`).
+    QObject *m_retryHolder = nullptr;
+    /// Cuenta de intentos del chequeo en curso, por servidor (`LgaNetRetry::Budget`).
+    LgaNetRetry::Budget m_checkBudget;
+    /**
+     * Reintento pendiente del chequeo. Mientras espera no hay reply, pero el chequeo sigue en
+     * curso: cuenta como ocupado y la fase (`checkFinished`) sigue abierta.
+     */
+    QPointer<QObject> m_checkRetry;
+    /// Reintento pendiente de la descarga, con el dialogo de progreso abierto. Cuenta como ocupado.
+    QPointer<QObject> m_downloadRetry;
+    /// Texto de la descarga en el dialogo de progreso, para volver a el cuando el reintento anda.
+    QString m_downloadLabelText;
+    /// El dialogo de progreso dice que se esta reintentando.
+    bool m_downloadShowingRetry = false;
     bool m_manualCheckActive = false;
     /**
      * Hay un cartel de RESULTADO abierto (chequeo fallido, ya estas al dia, descarga fallida).
@@ -581,7 +625,11 @@ private:
     QUrl m_downloadUrl;
     qint64 m_downloadWritten = 0;
     qint64 m_downloadTotal = -1;
-    int m_downloadRetries = 0;
+    /**
+     * Cuenta de intentos de ESTA descarga, por servidor (github.com y despues el de los archivos).
+     * Una descarga que avanza y se vuelve a cortar NO la reinicia: es el mismo pedido.
+     */
+    LgaNetRetry::Budget m_downloadBudget;
     bool m_downloadSpaceChecked = false;
     bool m_downloadUserCancelled = false;
 

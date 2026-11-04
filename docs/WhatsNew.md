@@ -16,7 +16,7 @@ platforms: [win, mac]
 - [new] Paste several links at once, or any text that contains them: each link becomes a card in the queue with its own progress, cancel and retry.
 - [new] Choose between MP4 video or audio only (M4A); the default "Most compatible" quality gives H.264 files that open in any editor.
 - [improved] Private videos no longer need a username and password: the app uses the session of a browser where you are already logged in, or a cookies.txt file, and any username and password saved by an earlier version are deleted.
-- [new] When a new version is out, the app shows what changed and installs it for you; you can also be reminded tomorrow or skip that version.
+- [new] Cuando sale una versión nueva, la app muestra qué cambió y la instala por vos, o te la recuerda mañana o saltea esa versión; si la conexión falla al buscar o bajar la actualización, espera y vuelve a probar sola, y una descarga cortada sigue desde donde quedó.
 - [new] Update notices show what's new in each version, and Help has the full history. The app checks for a new version every few hours while it stays open, not only at startup.
 - [new] yt-dlp and the other download tools update themselves in the background, so sites that change keep working without reinstalling.
 - [improved] Errors explain what went wrong and how to fix it, for example when a video needs you to sign in or a site isn't supported; live streams and scheduled premieres are skipped with a clear message.

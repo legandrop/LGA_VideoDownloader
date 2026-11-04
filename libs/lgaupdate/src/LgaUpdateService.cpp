@@ -1,5 +1,6 @@
 #include "lgaupdate/LgaUpdateService.h"
 
+#include "lgaupdate/LgaNetRetry.h"
 #include "lgaupdate/LgaVersionCompare.h"
 #include "lgaupdate/LgaWhatsNew.h"
 
@@ -34,10 +35,6 @@
 
 namespace {
 
-// Reintentos de una descarga cortada, reanudando por Range desde donde quedo. Acotado a
-// proposito: si la conexion esta rota de verdad, insistir solo demora el aviso al usuario.
-constexpr int kMaxDownloadRetries = 3;
-
 // "Remind me later" calla el chequeo automatico este tiempo. Era una semana: demasiado para una
 // version que el usuario solo queria posponer.
 constexpr int kSnoozeDays = 1;
@@ -53,6 +50,14 @@ constexpr qint64 kUpdateLogMaxBytes = 1024 * 1024;
 // Version del formato del manifiesto que este componente sabe leer. Si LGA_Updates publica una
 // mayor, el chequeo falla con un mensaje claro en vez de leer campos que cambiaron de sentido.
 constexpr int kManifestSchemaVersion = 1;
+
+/// El reintento ya disparo: su contexto sale del holder (ya no es un reintento pendiente que
+/// cortar) y se borra en el proximo ciclo del event loop, no adentro de su propia llamada.
+void releaseRetryContext(QObject *context)
+{
+    context->setParent(nullptr);
+    context->deleteLater();
+}
 
 /// `schemaVersion` del manifiesto, o 0 si no se puede leer (no parsea, o no trae el campo).
 int manifestSchemaVersion(const QByteArray &payload)
@@ -456,6 +461,39 @@ LgaUpdateService::LgaUpdateService(LgaUpdateConfig config, QWidget *parentWindow
     } else if (m_network->parent() != this) {
         m_network->setParent(this);
     }
+
+    // Los reintentos de red esperan con `QTimer::singleShot` sobre un contexto hijo de este
+    // holder: borrar el contexto corta el reintento. Al cerrarse la app se cortan todos, asi
+    // ningun pedido sale despues de `aboutToQuit` (y morir el servicio se los lleva igual).
+    m_retryHolder = new QObject(this);
+    if (QCoreApplication *app = QCoreApplication::instance()) {
+        connect(app, &QCoreApplication::aboutToQuit, this,
+                &LgaUpdateService::cancelPendingRetries);
+    }
+}
+
+QObject *LgaUpdateService::newRetryContext()
+{
+    return new QObject(m_retryHolder);
+}
+
+void LgaUpdateService::cancelPendingRetries()
+{
+    const QList<QObject *> pending = m_retryHolder->children();
+    if (!pending.isEmpty()) {
+        logUpdate(QStringLiteral("La app se cierra: se cortan %1 reintento(s) de red pendiente(s)")
+                      .arg(pending.size()));
+    }
+    // Los QPointer de `m_checkRetry` y `m_downloadRetry` quedan en null solos.
+    qDeleteAll(pending);
+}
+
+void LgaUpdateService::logNet(const QString &message) const
+{
+    logUpdate(message);
+    if (m_config.updateLogPath.isEmpty()) {
+        qInfo().noquote() << QStringLiteral("Updater: %1").arg(message);
+    }
 }
 
 LgaUpdateService::~LgaUpdateService()
@@ -624,8 +662,10 @@ QString LgaUpdateService::resolveDownloadDir() const
 
 bool LgaUpdateService::isBusy() const
 {
-    return m_checkReply || m_downloadReply || m_promptVisible || m_resultDialogVisible
-        || m_notesPending || m_whatsNewDialogVisible;
+    // Esperar un reintento tambien es estar ocupado: no hay reply en vuelo, pero el chequeo o la
+    // descarga siguen en curso y otro pedido encima los pisaria.
+    return m_checkReply || m_checkRetry || m_downloadReply || m_downloadRetry || m_promptVisible
+        || m_resultDialogVisible || m_notesPending || m_whatsNewDialogVisible;
 }
 
 void LgaUpdateService::scheduleAutomaticCheck()
@@ -658,8 +698,13 @@ void LgaUpdateService::scheduleAutomaticCheck()
     // notas. Cada paso de red tiene su timeout, pero si alguno no terminara, sin esto la app
     // dejaria de ofrecer updates en silencio. Con el cartel de notas abierto no se fuerza
     // nada: al cerrarlo, el propio paso libera el chequeo.
-    const int watchdogMs =
-        m_config.whatsNewAfterUpdateDelayMs + 2 * m_config.checkTimeoutMs + 5000;
+    //
+    // Son dos pasos de red (manifiesto y notas), y cada uno puede gastar todos sus intentos
+    // (`LgaNetRetry::kMaxAttempts`, sumando servidores) con su timeout y las esperas entre ellos:
+    // el tope los cubre a los dos enteros.
+    const int stepMs = LgaNetRetry::kMaxAttempts * m_config.checkTimeoutMs
+        + (LgaNetRetry::kMaxAttempts - 1) * LgaNetRetry::delayMs();
+    const int watchdogMs = m_config.whatsNewAfterUpdateDelayMs + 2 * stepMs + 5000;
     QTimer::singleShot(watchdogMs, this, [this]() {
         if (m_afterUpdateRunning && !m_whatsNewDialogVisible) {
             qWarning().noquote()
@@ -706,6 +751,7 @@ void LgaUpdateService::onPeriodicTick()
     m_periodicCheckActive = true;
     checkForUpdates(false);
     // Puede no haber arrancado nada (chequeo automatico deshabilitado, binario no actualizable).
+    // El primer intento sale sincronico: sin reply ahora, no hubo chequeo.
     if (!m_checkReply) {
         m_periodicCheckActive = false;
     }
@@ -761,6 +807,16 @@ void LgaUpdateService::checkForUpdates(bool manual)
 
 void LgaUpdateService::startCheckRequest()
 {
+    // Una sola fase por chequeo, aunque gaste varios intentos: `checkStarted` sale una vez y
+    // `checkFinished` al final, asi un boton "Checking..." no parpadea entre reintentos.
+    m_checkBudget.reset();
+    sendCheckRequest();
+    m_checkPhaseOpen = true;
+    emit checkStarted();
+}
+
+void LgaUpdateService::sendCheckRequest()
+{
     QNetworkRequest request{QUrl(m_config.manifestUrl)};
     request.setHeader(
         QNetworkRequest::UserAgentHeader,
@@ -773,12 +829,11 @@ void LgaUpdateService::startCheckRequest()
     // Sin timeout una conexion colgada deja el flujo esperando para siempre.
     request.setTransferTimeout(m_config.checkTimeoutMs);
 
-    logUpdate(QStringLiteral("Chequeo %1: version instalada %2, manifiesto %3")
-                  .arg(m_manualCheckActive ? QStringLiteral("manual") : QStringLiteral("automatico"),
-                       QApplication::applicationVersion(), m_config.manifestUrl));
+    logNet(QStringLiteral("Chequeo %1 (%2): version instalada %3, manifiesto %4")
+               .arg(m_manualCheckActive ? QStringLiteral("manual") : QStringLiteral("automatico"),
+                    m_checkBudget.label(), QApplication::applicationVersion(),
+                    m_config.manifestUrl));
     m_checkReply = m_network->get(request);
-    m_checkPhaseOpen = true;
-    emit checkStarted();
     connect(m_checkReply, &QNetworkReply::finished, this, &LgaUpdateService::onCheckFinished);
     connect(m_checkReply, &QNetworkReply::sslErrors, this,
             [](const QList<QSslError> &errors) { logSslErrors(errors); });
@@ -806,14 +861,45 @@ void LgaUpdateService::onCheckFinished()
     //  - en los que terminan callados, al salir de esta funcion (este guard);
     //  - cuando hay update, al terminar la espera de las notas (`promptWithNotes`), para que el
     //    boton siga en "Checking..." mientras tanto.
+    //  - mientras espera un reintento, nunca: el chequeo sigue en curso.
     bool waitingForNotes = false;
-    const auto checkPhaseGuard = qScopeGuard([this, &waitingForNotes]() {
-        if (!waitingForNotes) {
+    bool retrying = false;
+    const auto checkPhaseGuard = qScopeGuard([this, &waitingForNotes, &retrying]() {
+        if (!waitingForNotes && !retrying) {
             endCheckPhase();
         }
     });
 
     if (!reply) {
+        return;
+    }
+
+    // Fallo de conexion, timeout o 429/5xx: se vuelve a mandar el mismo pedido despues de la
+    // espera de la regla de red (GateBouncer bloquea el primer intento de cada programa y de
+    // cada destino nuevo, y el Allow vale recien para el siguiente). Va ANTES de leer y limpiar
+    // el estado del chequeo: el intento siguiente es el mismo chequeo (manual o no, periodico o
+    // no). Nadie cancela este pedido a proposito; morir el servicio corta la conexion antes.
+    // `allowRetry` va ultimo: cuenta el intento solo si de verdad se reintenta.
+    const QString failedAttempt = m_checkBudget.label();
+    if (LgaNetRetry::shouldRetry(reply, /*cancelledOnPurpose=*/false)
+        && m_checkBudget.allowRetry(reply)) {
+        // Un solo `arg()` con todo: un texto de error con un `%N` adentro no se come al resto.
+        logNet(QStringLiteral("Chequeo fallido (%1): httpStatus=%2 networkError=%3 (%4); se "
+                              "reintenta en %5 ms")
+                   .arg(failedAttempt,
+                        QString::number(
+                            reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()),
+                        QString::number(static_cast<int>(reply->error())), reply->errorString(),
+                        QString::number(LgaNetRetry::delayMs())));
+        reply->deleteLater();
+        retrying = true;
+        QObject *context = newRetryContext();
+        m_checkRetry = context;
+        QTimer::singleShot(LgaNetRetry::delayMs(), context, [this, context]() {
+            m_checkRetry.clear();
+            releaseRetryContext(context);
+            sendCheckRequest();
+        });
         return;
     }
 
@@ -831,22 +917,24 @@ void LgaUpdateService::onCheckFinished()
     // no interrumpe al usuario para decirle que esta al dia.
     if (error != QNetworkReply::NoError) {
         // Al despertar de una suspension la red suele tardar en levantar: el periodico que falla
-        // se reintenta pronto en vez de esperar un intervalo entero.
+        // se reintenta pronto en vez de esperar un intervalo entero. Este reintento largo va
+        // DESPUES de los cortos de `LgaNetRetry`, que ya se gastaron para llegar aca.
         if (periodic && m_config.periodicCheckRetryMs > 0) {
             schedulePeriodicCheckIn(m_config.periodicCheckRetryMs, /*withJitter=*/false);
         }
-        logUpdate(QStringLiteral("Chequeo fallido: httpStatus=%1 networkError=%2 (%3)")
-                      .arg(httpStatus)
-                      .arg(static_cast<int>(error))
-                      .arg(reply->errorString()));
+        logNet(QStringLiteral("Chequeo fallido (%1): httpStatus=%2 networkError=%3 (%4)")
+                   .arg(failedAttempt, QString::number(httpStatus),
+                        QString::number(static_cast<int>(error)), reply->errorString()));
         if (manual) {
             // Sin el detalle crudo, un fallo de parseo y un proxy que devuelve HTML se
             // reportan igual que una caida de red, y no hay nada que copiar y mandar.
             showResultDialog(tr("Update Check Failed"),
                              tr("Could not check for updates. Please try again later."),
-                             QStringLiteral("httpStatus=%1\nurl=%2\nnetworkError=%3\nbody=%4")
+                             QStringLiteral("httpStatus=%1\nurl=%2\nnetworkError=%3\nattempts=%4\n"
+                                            "body=%5")
                                  .arg(QString::number(httpStatus), m_config.manifestUrl,
                                       QString::number(static_cast<int>(error)),
+                                      QString::number(m_checkBudget.attempt()),
                                       QString::fromUtf8(payload.left(2048))),
                              /*warning=*/true);
         }
@@ -1192,6 +1280,15 @@ void LgaUpdateService::requestManifest(
         });
         return;
     }
+    LgaNetRetry::Budget budget;
+    budget.reset();
+    sendManifestRequest(budget, std::move(onDone));
+}
+
+void LgaUpdateService::sendManifestRequest(
+    LgaNetRetry::Budget budget,
+    std::function<void(bool ok, const QByteArray &payload, const QString &detail)> onDone)
+{
     QNetworkRequest request{QUrl(m_config.manifestUrl)};
     request.setHeader(
         QNetworkRequest::UserAgentHeader,
@@ -1200,6 +1297,8 @@ void LgaUpdateService::requestManifest(
     request.setAttribute(QNetworkRequest::CacheLoadControlAttribute,
                          QNetworkRequest::AlwaysNetwork);
     request.setTransferTimeout(m_config.checkTimeoutMs);
+    logNet(QStringLiteral("Manifiesto para las notas (%1): %2")
+               .arg(budget.label(), m_config.manifestUrl));
     QNetworkReply *reply = m_network->get(request);
     connect(reply, &QNetworkReply::sslErrors, this,
             [](const QList<QSslError> &errors) { logSslErrors(errors); });
@@ -1207,21 +1306,47 @@ void LgaUpdateService::requestManifest(
     // `setTransferTimeout` es de INACTIVIDAD: un servidor que gotea un byte cada tanto no lo
     // dispara nunca, y quien espera este manifiesto (el historial con su cursor de espera, el
     // "What's new" de despues de instalar) tiene pospuesto el chequeo automatico mientras
-    // tanto. Este tope es TOTAL: al vencer aborta el reply, que termina por `finished`.
+    // tanto. Este tope es TOTAL por intento: al vencer aborta el reply, que termina por
+    // `finished` y cuenta como un timeout (se reintenta).
     auto *deadline = new QTimer(reply);
     deadline->setSingleShot(true);
     connect(deadline, &QTimer::timeout, reply, [reply]() { reply->abort(); });
     deadline->start(m_config.checkTimeoutMs);
 
-    connect(reply, &QNetworkReply::finished, this, [reply, deadline, onDone]() {
+    connect(reply, &QNetworkReply::finished, this, [this, reply, deadline, budget, onDone]() {
         deadline->stop();
+        // Fallo transitorio: el mismo pedido, despues de la espera de la regla de red. El abort
+        // del tope de arriba es un timeout, no una cancelacion de nadie.
+        const QString failedAttempt = budget.label();
+        LgaNetRetry::Budget next = budget;
+        if (LgaNetRetry::shouldRetry(reply, /*cancelledOnPurpose=*/false)
+            && next.allowRetry(reply)) {
+            logNet(QStringLiteral("Manifiesto para las notas fallido (%1): httpStatus=%2 "
+                                  "networkError=%3 (%4); se reintenta en %5 ms")
+                       .arg(failedAttempt,
+                            QString::number(
+                                reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt()),
+                            QString::number(static_cast<int>(reply->error())),
+                            reply->errorString(), QString::number(LgaNetRetry::delayMs())));
+            reply->deleteLater();
+            QObject *context = newRetryContext();
+            QTimer::singleShot(LgaNetRetry::delayMs(), context, [this, context, next, onDone]() {
+                releaseRetryContext(context);
+                sendManifestRequest(next, onDone);
+            });
+            return;
+        }
         const QNetworkReply::NetworkError error = reply->error();
         const int httpStatus = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
         const QByteArray payload = reply->readAll();
-        const QString detail = QStringLiteral("manifiesto httpStatus=%1 networkError=%2 (%3)")
-                                   .arg(httpStatus)
-                                   .arg(static_cast<int>(error))
-                                   .arg(reply->errorString());
+        const QString detail =
+            QStringLiteral("manifiesto httpStatus=%1 networkError=%2 (%3) intentos=%4")
+                .arg(QString::number(httpStatus), QString::number(static_cast<int>(error)),
+                     reply->errorString(), QString::number(budget.attempt()));
+        if (error != QNetworkReply::NoError) {
+            logNet(QStringLiteral("Manifiesto para las notas fallido (%1): %2")
+                       .arg(failedAttempt, detail));
+        }
         reply->deleteLater();
         onDone(error == QNetworkReply::NoError, payload, detail);
     });
@@ -1240,6 +1365,9 @@ LgaWhatsNewFetcher *LgaUpdateService::startNotesFetch(const LgaWhatsNew::AssetRe
     request.userAgent =
         QStringLiteral("%1/%2").arg(m_config.productId, QApplication::applicationVersion());
     request.allowStaleCache = allowStaleCache;
+    // Los intentos de la descarga de notas van al mismo log que los del chequeo. El fetcher es
+    // hijo de este objeto, asi que `this` vive mientras el fetcher pueda llamar.
+    request.log = [this](const QString &message) { logNet(message); };
     fetcher->fetch(request);
     return fetcher;
 }
@@ -1487,7 +1615,7 @@ void LgaUpdateService::downloadAndRunUpdate(const QUrl &downloadUrl,
                                             const QString &assetName,
                                             const QString &sha256Digest)
 {
-    if (!m_network || m_downloadReply) {
+    if (!m_network || m_downloadReply || m_downloadRetry) {
         return;
     }
 
@@ -1558,14 +1686,14 @@ void LgaUpdateService::downloadAndRunUpdate(const QUrl &downloadUrl,
     m_downloadUrl = downloadUrl;
     m_downloadWritten = 0;
     m_downloadTotal = -1;
-    m_downloadRetries = 0;
+    m_downloadBudget.reset();
     m_downloadSpaceChecked = false;
     m_downloadUserCancelled = false;
 
     logUpdate(QStringLiteral("Descarga: %1\ndestino=%2").arg(downloadUrl.toString(), m_downloadTargetPath));
-    m_progressDialog = new QProgressDialog(
-        tr("Downloading %1 %2...").arg(m_config.displayName, fallbackVersion), tr("Cancel"), 0, 0,
-        parentWindow());
+    m_downloadLabelText = tr("Downloading %1 %2...").arg(m_config.displayName, fallbackVersion);
+    m_downloadShowingRetry = false;
+    m_progressDialog = new QProgressDialog(m_downloadLabelText, tr("Cancel"), 0, 0, parentWindow());
     m_progressDialog->setObjectName(QStringLiteral("updateDownloadProgressDialog"));
     if (!m_config.progressDialogStyleSheet.isEmpty()) {
         m_progressDialog->setStyleSheet(m_config.progressDialogStyleSheet);
@@ -1581,6 +1709,14 @@ void LgaUpdateService::downloadAndRunUpdate(const QUrl &downloadUrl,
         m_downloadUserCancelled = true;
         if (m_downloadReply) {
             m_downloadReply->abort();
+        } else if (m_downloadRetry) {
+            // Cancel durante la espera entre intentos: no hay reply que abortar (y que termine
+            // por `onDownloadFinished`), asi que el reintento pendiente se corta aca y la
+            // descarga se cierra como cualquier cancelacion: sin cartel y sin el parcial.
+            logUpdate(QStringLiteral("Descarga cancelada por el usuario mientras esperaba el "
+                                     "reintento"));
+            closeProgressDialog();
+            discardPartialDownload();
         }
     });
 
@@ -1608,6 +1744,10 @@ void LgaUpdateService::startDownloadRequest(qint64 resumeFrom)
     m_downloadResponseChecked = false;
     m_downloadResumeOffset = resumeFrom;
 
+    logNet(QStringLiteral("Descarga (%1)%2")
+               .arg(m_downloadBudget.label(),
+                    resumeFrom > 0 ? QStringLiteral(": reanuda desde el byte %1").arg(resumeFrom)
+                                   : QString()));
     m_downloadReply = m_network->get(request);
 
     connect(m_downloadReply, &QNetworkReply::readyRead, this,
@@ -1731,6 +1871,14 @@ void LgaUpdateService::onDownloadReadyRead()
             abortDownloadDeferred();
             return;
         }
+        // El reintento anda: el dialogo deja de decir que se reintenta recien ahora, con datos
+        // buenos llegando, y no al mandar el pedido (que puede volver a fallar).
+        if (m_downloadShowingRetry) {
+            m_downloadShowingRetry = false;
+            if (m_progressDialog) {
+                m_progressDialog->setLabelText(m_downloadLabelText);
+            }
+        }
     }
 
     // Se drena el reply en cada senal. Si no se lo drena, Qt acumula TODO el cuerpo en su
@@ -1849,6 +1997,9 @@ void LgaUpdateService::closeProgressDialog()
 
 void LgaUpdateService::discardPartialDownload()
 {
+    // Un reintento pendiente de esta descarga no sale: el archivo al que iba a escribir se tira.
+    delete m_downloadRetry.data();
+    m_downloadShowingRetry = false;
     if (m_downloadFile) {
         // cancelWriting() borra el temporal: un parcial no se deja en disco haciendose pasar por
         // un instalador valido.
@@ -1860,7 +2011,7 @@ void LgaUpdateService::discardPartialDownload()
     m_downloadHash = nullptr;
     m_downloadWritten = 0;
     m_downloadTotal = -1;
-    m_downloadRetries = 0;
+    m_downloadBudget.reset();
     m_downloadSpaceChecked = false;
     m_downloadUserCancelled = false;
     m_downloadResponseChecked = false;
@@ -1905,6 +2056,12 @@ void LgaUpdateService::onDownloadFinished()
         }
     }
     const QString replyErrorString = reply->errorString();
+    // Si el motivo ya lo anoto este servicio (respuesta HTTP mala, disco, escritura...), el
+    // `abort()` que vino despues fue a proposito, no un corte de red. Un 429/5xx igual se
+    // reintenta: `shouldRetry` mira el status antes que el error.
+    const bool abortedOnPurpose = m_downloadFailure != DownloadFailure::None;
+    const bool transientFailure =
+        LgaNetRetry::shouldRetry(reply, m_downloadUserCancelled || abortedOnPurpose);
     reply->deleteLater();
 
     // Cancelar es una decision del usuario, no un fallo: no lleva cartel, pero el parcial se
@@ -1924,10 +2081,13 @@ void LgaUpdateService::onDownloadFinished()
                                            QString::number(m_downloadWritten));
     }
 
-    // Un corte a mitad de camino se reanuda desde donde quedo en vez de empezar de cero: con
-    // assets de cientos de MB, reiniciar por un corte al 90% es tirar todo. Se discrimina por
-    // el FLAG de cancelacion del usuario, no por el codigo de error: el transfer timeout de Qt
-    // tambien produce OperationCanceledError, y es justo el caso que mas conviene reanudar.
+    // Un corte se reintenta con la regla de red (3 reintentos, 5 s entre uno y otro) y se reanuda
+    // desde donde quedo en vez de empezar de cero: con assets de cientos de MB, reiniciar por un
+    // corte al 90% es tirar todo. Un corte antes del primer byte (GateBouncer bloqueando el
+    // primer intento hacia el servidor de los archivos, que es otro destino que github.com)
+    // tambien se reintenta, desde cero. Se discrimina por el FLAG de cancelacion del usuario, no
+    // por el codigo de error: el transfer timeout de Qt tambien produce OperationCanceledError,
+    // y es justo el caso que mas conviene reanudar.
     //
     // NO se reintenta si ya se bajo todo. Un cierre sucio de conexion justo despues del ultimo
     // byte pedia `Range: bytes=<tamano total>-`, y el 416 que devuelve el servidor terminaba
@@ -1941,19 +2101,40 @@ void LgaUpdateService::onDownloadFinished()
         m_downloadFailureDetail.clear();
     }
 
-    const bool retriable = m_downloadFailure == DownloadFailure::Network && m_downloadWritten > 0
-        && !alreadyComplete && m_downloadRetries < kMaxDownloadRetries;
+    // `Http` entra solo con un status transitorio (408/429/5xx, lo decide `transientFailure`):
+    // un 404 o un 416 son definitivos. Nunca se reintentan `Write`, `DiskSpace`, `Integrity` ni
+    // `Resume`: insistir no los arregla. `allowRetry` va ultimo: cuenta el intento (en el
+    // servidor donde fallo, `reply->url()` despues de los redirects) solo si se reintenta.
+    const QString failedAttempt = m_downloadBudget.label();
+    const bool retriable = (m_downloadFailure == DownloadFailure::Network
+                            || m_downloadFailure == DownloadFailure::Http)
+        && transientFailure && !alreadyComplete && m_downloadBudget.allowRetry(reply);
     if (retriable) {
-        ++m_downloadRetries;
-        logUpdate(QStringLiteral("Descarga cortada en %1 bytes; reintento %2 desde ahi\n%3")
-                      .arg(m_downloadWritten)
-                      .arg(m_downloadRetries)
-                      .arg(m_downloadFailureDetail));
+        // Un solo `arg()` con todo: un detalle con un `%N` adentro no se come al resto.
+        logNet(QStringLiteral("Descarga cortada en %1 bytes (%2); se reintenta en %3 ms desde "
+                              "ahi\n%4")
+                   .arg(QString::number(m_downloadWritten), failedAttempt,
+                        QString::number(LgaNetRetry::delayMs()), m_downloadFailureDetail));
         m_downloadFailure = DownloadFailure::None;
         m_downloadFailureDetail.clear();
         // El dialogo de progreso NO se cierra: la descarga sigue, y sin el el usuario se
-        // quedaria sin barra y sin boton para cancelar.
-        startDownloadRequest(m_downloadWritten);
+        // quedaria sin barra y sin boton para cancelar. Durante la espera dice que reintenta;
+        // vuelve al texto de la descarga cuando el intento nuevo trae datos. El numero es el del
+        // servidor que fallo: si el pedido pasa a fallar en otro, la cuenta vuelve a empezar.
+        if (m_progressDialog) {
+            m_progressDialog->setLabelText(
+                tr("Connection problem. Retrying (attempt %1 of %2)...")
+                    .arg(m_downloadBudget.attemptOnHost())
+                    .arg(LgaNetRetry::kRetries + 1));
+        }
+        m_downloadShowingRetry = true;
+        QObject *context = newRetryContext();
+        m_downloadRetry = context;
+        QTimer::singleShot(LgaNetRetry::delayMs(), context, [this, context]() {
+            m_downloadRetry.clear();
+            releaseRetryContext(context);
+            startDownloadRequest(m_downloadWritten);
+        });
         return;
     }
 
@@ -2021,7 +2202,8 @@ void LgaUpdateService::onDownloadFinished()
             break;
         }
         const QString detail = m_downloadFailureDetail;
-        logUpdate(QStringLiteral("Descarga fallida: %1\n%2").arg(message, detail));
+        logNet(QStringLiteral("Descarga fallida (%1): %2\n%3")
+                   .arg(failedAttempt, message, detail));
         discardPartialDownload();
         showResultDialog(tr("Update Failed"), message, detail, /*warning=*/true);
         return;
@@ -2035,7 +2217,7 @@ void LgaUpdateService::onDownloadFinished()
     m_downloadHash = nullptr;
     m_downloadWritten = 0;
     m_downloadTotal = -1;
-    m_downloadRetries = 0;
+    m_downloadBudget.reset();
     m_downloadSpaceChecked = false;
     m_downloadResponseChecked = false;
     m_downloadResumeOffset = 0;

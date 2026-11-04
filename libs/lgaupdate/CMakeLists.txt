@@ -11,6 +11,7 @@ add_library(LGAUpdate STATIC
     src/LgaUpdateService.cpp
     src/LgaVersionCompare.cpp
     src/LgaWhatsNew.cpp
+    include/lgaupdate/LgaNetRetry.h
     include/lgaupdate/LgaUpdateDialog.h
     include/lgaupdate/LgaUpdateService.h
     include/lgaupdate/LgaVersionCompare.h
@@ -32,3 +33,11 @@ target_link_libraries(LGAUpdate
         Qt6::Widgets
         Qt6::Network
 )
+
+# Banco de pruebas de los reintentos de red (`tests/`, servidor HTTP propio en 127.0.0.1).
+# Apagado por defecto: las apps copian esta carpeta tal cual y no lo compilan. Se prende al
+# configurar con -DLGAUPDATE_BUILD_TESTS=ON; como se corre esta en el README.md de esta carpeta.
+option(LGAUPDATE_BUILD_TESTS "Compilar el banco de pruebas de lgaupdate (tests/)" OFF)
+if(LGAUPDATE_BUILD_TESTS)
+    add_subdirectory(tests)
+endif()
