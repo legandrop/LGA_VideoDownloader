@@ -25,16 +25,12 @@ if(APPLE)
     set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 endif()
 
-# Tipo de build. En Windows lo elige compilar.bat con -DCMAKE_BUILD_TYPE (Debug en build/,
-# Release en build-release/) y sin nada es Debug. Antes se forzaba Debug para todos: como una
-# variable normal tapa a la de la cache, el -DCMAKE_BUILD_TYPE=Release del deploy no tenia
-# efecto y el instalador salia compilado en Debug (-g -O0). En macOS sigue forzado, sin
-# cambios: ahi el arbol es uno solo y el cambio no se pudo verificar.
-if(WIN32)
-    if(NOT CMAKE_BUILD_TYPE)
-        set(CMAKE_BUILD_TYPE Debug)
-    endif()
-else()
+# Tipo de build. Lo elige el script con -DCMAKE_BUILD_TYPE (compilar.bat/compilar.sh: Debug en
+# build/, Release en build-release/ con --release) y sin nada es Debug. Antes se forzaba Debug:
+# como una variable normal tapa a la de la cache, el -DCMAKE_BUILD_TYPE=Release del deploy no
+# tenia efecto y se publicaba compilado en Debug (-g -O0), primero en Windows y en macOS hasta
+# la v1.000.
+if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE Debug)
 endif()
 if(WIN32)

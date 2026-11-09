@@ -890,15 +890,40 @@ void ToolsManager::retryInstall()
 void ToolsManager::downloadFfmpegMac()
 {
 #ifdef Q_OS_MAC
+    // Una descarga a la vez: con un intento en curso o un reintento esperando, otro "instalar"
+    // (boton Retry, chequeo de tools) no manda un segundo pedido en paralelo.
+    if (m_ffmpegDownloading) {
+        logMessage(QStringLiteral("ffmpeg download already in progress"));
+        return;
+    }
+    m_ffmpegDownloading = true;
+    m_ffmpegRetry.reset();
+    startFfmpegMacAttempt();
+#endif
+}
+
+void ToolsManager::startFfmpegMacAttempt()
+{
+#ifdef Q_OS_MAC
     // evermeet.cx URL for latest ffmpeg for macOS
     QString url = "https://evermeet.cx/ffmpeg/getrelease/zip";
     QNetworkRequest request(url);
-    
+
     // Set user agent
     request.setRawHeader("User-Agent", "VideoDownloader/1.0");
-    
-    logMessage(QString("Downloading ffmpeg from: %1").arg(url));
-    
+    // Sin datos durante 60 s se corta, y eso cuenta como un fallo que se reintenta: antes no
+    // habia limite y una conexion colgada dejaba la instalacion esperando para siempre.
+    request.setTransferTimeout(60000);
+
+    if (m_ffmpegRetry.attempt() == 1) {
+        logMessage(QString("Downloading ffmpeg from: %1").arg(url));
+    } else {
+        logMessage(QString("Downloading ffmpeg from: %1 (attempt %2 of %3)")
+                       .arg(url)
+                       .arg(m_ffmpegRetry.attemptOnHost())
+                       .arg(LgaNetRetry::kRetries + 1));
+    }
+
     // Start download
     QNetworkReply *reply = m_networkManager->get(request);
     
@@ -913,6 +938,22 @@ void ToolsManager::downloadFfmpegMac()
     });
     
     connect(reply, &QNetworkReply::finished, [this, reply]() {
+        // Fallo de conexion, timeout, 408/429/5xx: se vuelve a pedir en 5 s, sin dormir el hilo
+        // de la interfaz. Un 401/403/404 no se reintenta: el servidor contesto.
+        if (reply->error() != QNetworkReply::NoError
+            && LgaNetRetry::shouldRetry(reply, false)
+            && m_ffmpegRetry.allowRetry(reply)) {
+            logMessage(QString("ffmpeg download failed: %1. Connection problem. Retrying in %2 s (attempt %3 of %4)...")
+                           .arg(reply->errorString())
+                           .arg(LgaNetRetry::delayMs() / 1000)
+                           .arg(m_ffmpegRetry.attemptOnHost())
+                           .arg(LgaNetRetry::kRetries + 1));
+            reply->deleteLater();
+            QTimer::singleShot(LgaNetRetry::delayMs(), this, &ToolsManager::startFfmpegMacAttempt);
+            return;
+        }
+        m_ffmpegDownloading = false;
+
         if (reply->error() == QNetworkReply::NoError) {
             // Save the downloaded zip file temporarily
             QString appDir = QCoreApplication::applicationDirPath();

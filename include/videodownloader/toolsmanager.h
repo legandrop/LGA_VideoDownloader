@@ -9,6 +9,8 @@
 #include <QMap>
 #include <QStringList>
 
+#include <lgaupdate/LgaNetRetry.h>
+
 #include <functional>
 
 class ToolsUpdater;
@@ -102,6 +104,8 @@ private:
 
     // Installation methods - macOS (ffmpeg; yt-dlp y deno los maneja ToolsUpdater)
     void downloadFfmpegMac();
+    // Un intento de la descarga de ffmpeg; downloadFfmpegMac() arranca la cuenta de reintentos.
+    void startFfmpegMacAttempt();
     void updateFfmpegMac();
 
     // Installation methods - Windows
@@ -127,6 +131,10 @@ private:
 
     // Network manager for downloads
     QNetworkAccessManager *m_networkManager;
+    // Descarga de ffmpeg (macOS): 3 reintentos cada 5 s por servidor (LgaNetRetry). Mientras
+    // hay un intento en curso o uno esperando, otro pedido de instalar no arranca una segunda.
+    LgaNetRetry::Budget m_ffmpegRetry;
+    bool m_ffmpegDownloading = false;
     
     // Process counters for async operations
     int m_pendingProcesses;

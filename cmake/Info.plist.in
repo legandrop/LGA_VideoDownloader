@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
-<!-- OJO: deploy.sh REESCRIBE este archivo entero al deployar, con su propio heredoc. Son
-     dos copias de la misma informacion y hay que mantener las dos sincronizadas; ver el
-     comentario en deploy.sh. La version NO se escribe a mano en ninguna de las dos: sale de
-     PROJECT_VERSION via las propiedades MACOSX_BUNDLE_*. -->
+<!-- El UNICO Info.plist de la app: lo usan el bundle de compilar.sh y el que empaqueta
+     deploy.sh, que copia el bundle de CMake tal cual y no reescribe el plist (antes lo pisaba
+     con un heredoc propio y las dos copias se desincronizaron). La version NO se escribe a
+     mano: sale de PROJECT_VERSION via las propiedades MACOSX_BUNDLE_*. -->
 <dict>
     <key>CFBundleExecutable</key>
     <string>${MACOSX_BUNDLE_EXECUTABLE_NAME}</string>
@@ -31,8 +31,10 @@
     <string>${MACOSX_BUNDLE_SHORT_VERSION_STRING}</string>
     <key>CFBundleInfoDictionaryVersion</key>
     <string>6.0</string>
+    <!-- Igual al CMAKE_OSX_DEPLOYMENT_TARGET que pasan compilar.sh y deploy.sh (14.0): el
+         binario no arranca en un macOS anterior. -->
     <key>LSMinimumSystemVersion</key>
-    <string>10.15.0</string>
+    <string>14.0.0</string>
     <key>LSArchitecturePriority</key>
     <array>
         <string>arm64</string>

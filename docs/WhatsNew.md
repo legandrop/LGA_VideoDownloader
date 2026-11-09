@@ -28,3 +28,5 @@ platforms: [win, mac]
 - [improved][win] Installing removes the old VimeoDownloader and keeps your download folder, and everything the app downloads lives inside its install folder, so uninstalling removes it all.
 - [improved][mac] The app is now called "LGA Video Downloader", installs from a DMG and no longer needs anything else installed on the Mac.
 - [improved] New app icon, matching the other LGA apps.
+- [improved] La app ahora se publica compilada en modo optimizado: las versiones anteriores salían en modo de depuración, que es más lento.
+- [fixed][mac] Si la app tiene que bajar ffmpeg y la conexión falla, ya no se rinde al primer intento: espera y vuelve a probar sola.

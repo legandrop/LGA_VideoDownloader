@@ -7,9 +7,12 @@ APP_NAME="LGA Video Downloader"
 ARTIFACT_NAME="LGA_Video_Downloader"
 
 show_help() {
-    echo "Uso: $0 [--no-run] [--wait]"
+    echo "Uso: $0 [--release] [--no-run] [--wait]"
     echo ""
     echo "Opciones:"
+    echo "  --release  Compilar en Release, en el arbol build-release/ (lo usa deploy.sh)."
+    echo "             Sin esto: Debug en build/. Son arboles SEPARADOS para que deployar no"
+    echo "             invalide la cache de desarrollo."
     echo "  --no-run   Compilar sin lanzar la app"
     echo "  --wait     Dejar la app en foreground: la terminal queda retenida hasta"
     echo "             cerrarla y se ven su stdout/stderr y su exit code."
@@ -17,6 +20,10 @@ show_help() {
 }
 
 NO_RUN=false
+# CONVENCION LGA — dos arboles: build/ (Debug, desarrollo) y build-release/ (Release, lo que
+# empaqueta deploy.sh). Con un arbol solo, cada deploy tiraba la cache de desarrollo.
+BUILD_TYPE=Debug
+BUILD_DIR=build
 # CONVENCION LGA — por defecto la app se lanza en BACKGROUND y el script termina enseguida.
 # Dejarla en foreground retiene la terminal hasta que alguien cierre la app a mano, lo que
 # cuelga al que compila (y a cualquier agente) por tiempo indefinido.
@@ -24,6 +31,7 @@ NO_RUN=false
 WAIT_FOR_APP=false
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --release) BUILD_TYPE=Release; BUILD_DIR=build-release; shift ;;
         --no-run) NO_RUN=true; shift ;;
         --wait) WAIT_FOR_APP=true; shift ;;
         --help) show_help; exit 0 ;;
@@ -31,7 +39,7 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-echo "Compilando VideoDownloader..."
+echo "Compilando VideoDownloader en $BUILD_TYPE (arbol $BUILD_DIR/)..."
 
 # Matar SOLO el ejecutable del bundle de este proyecto.
 # IMPORTANTE: no usar `pkill -f VideoDownloader` (patrón demasiado genérico:
@@ -43,8 +51,8 @@ pkill -f "${APP_NAME}.app/Contents/MacOS/${APP_NAME}" 2>/dev/null && echo "   - 
 sleep 1
 
 # Crear directorio de compilación si no existe
-mkdir -p build
-cd build
+mkdir -p "$BUILD_DIR"
+cd "$BUILD_DIR"
 
 # Configurar el proyecto con Qt de Homebrew (compatible con macOS Tahoe)
 # Usar solo arquitectura ARM64 ya que Qt de Homebrew solo soporta ARM64
@@ -60,12 +68,16 @@ fi
 cmake .. -G "Unix Makefiles" \
     -DCMAKE_PREFIX_PATH="/opt/homebrew" \
     -DQt6_DIR="/opt/homebrew/lib/cmake/Qt6" \
+    -DCMAKE_BUILD_TYPE="$BUILD_TYPE" \
     -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
     -DCMAKE_OSX_ARCHITECTURES="arm64" \
     -DCMAKE_OSX_SYSROOT="$SDK_PATH"
 
-# Compilar el proyecto
-cmake --build .
+# Compilar el proyecto. Si falla, el script corta: antes seguia y lanzaba el binario viejo.
+if ! cmake --build .; then
+    echo "ERROR: fallo la compilacion."
+    exit 1
+fi
 
 # Volver al directorio principal
 cd ..
@@ -88,7 +100,7 @@ echo ""
 echo "Preparando carpeta toolsmac..."
 if [ -d "toolsmac" ]; then
     echo "Copiando herramientas desde carpeta toolsmac del proyecto..."
-    cp -r toolsmac "build/${APP_NAME}.app/Contents/MacOS/"
+    cp -r toolsmac "$BUILD_DIR/${APP_NAME}.app/Contents/MacOS/"
     echo "Herramientas copiadas exitosamente."
 else
     echo "Carpeta toolsmac del proyecto no encontrada o vacía."
@@ -98,7 +110,7 @@ fi
 # seguir mostrando el icono viejo por cache (iconservices). touch + lsregister -f fuerzan
 # a re-leer el icono. Si el cache de Tahoe sigue pegajoso, cerrar sesion y volver a entrar.
 LSREG="/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister"
-if [ -d "build/${APP_NAME}.app" ]; then
+if [ "$BUILD_TYPE" = "Debug" ] && [ -d "build/${APP_NAME}.app" ]; then
     touch "build/${APP_NAME}.app"
     [ -x "$LSREG" ] && "$LSREG" -f "build/${APP_NAME}.app" >/dev/null 2>&1 || true
 fi
@@ -115,7 +127,7 @@ fi
 # Ejecutar la aplicación desde el bundle.
 # CONVENCION LGA — por defecto en BACKGROUND (ver comentario de WAIT_FOR_APP arriba).
 export QT_QPA_PLATFORM_PLUGIN_PATH="/opt/homebrew/share/qt/plugins/platforms"
-APP_BIN="./build/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
+APP_BIN="./$BUILD_DIR/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
 if [ "$WAIT_FOR_APP" = "true" ]; then
     "$APP_BIN"
 else

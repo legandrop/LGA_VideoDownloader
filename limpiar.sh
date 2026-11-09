@@ -17,6 +17,11 @@ if [ -d "build" ]; then
     rm -rf build
 fi
 
+if [ -d "build-release" ]; then
+    echo "Eliminando directorio build-release..."
+    rm -rf build-release
+fi
+
 if [ -d "deploy" ]; then
     echo "Eliminando directorio deploy..."
     rm -rf deploy

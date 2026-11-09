@@ -150,101 +150,37 @@ fi
 # Crear directorio de implementación si no existe
 mkdir -p deploy
 
-# Compilar el proyecto en modo Release con configuraciones de compatibilidad
-mkdir -p build
-cd build
-
-# Configurar el proyecto con Qt de Homebrew (compatible con macOS Tahoe)
-# Usar solo arquitectura ARM64 ya que Qt de Homebrew solo soporta ARM64
-cmake .. -G "Unix Makefiles" \
-    -DCMAKE_PREFIX_PATH="$QT_PATH" \
-    -DQt6_DIR="$QT_PATH/lib/cmake/Qt6" \
-    -DCMAKE_BUILD_TYPE=Release \
-    -DCMAKE_OSX_DEPLOYMENT_TARGET=14.0 \
-    -DCMAKE_OSX_ARCHITECTURES="arm64" \
-    -DCMAKE_OSX_SYSROOT="$SDK_PATH"
-
-if ! cmake --build . --config Release; then
+# Compilar con el motor de desarrollo en Release, en build-release/: un arbol SEPARADO del de
+# desarrollo (build/, Debug), asi deployar no invalida la cache de dev. Antes se compilaba en
+# build/ con -DCMAKE_BUILD_TYPE=Release y el CMakeLists lo pisaba con Debug: el .app publicado
+# salia sin optimizar (-g -O0).
+BUILD_DIR="build-release"
+if ! ./compilar.sh --release --no-run; then
     echo "ERROR: fallo la compilacion. No se empaqueta ni se publica nada."
     exit 1
 fi
-cd ..
 
-# Crear estructura del bundle
-mkdir -p "deploy/${APP_NAME}.app/Contents"/{MacOS,Resources,Frameworks}
-if ! cp "build/${APP_NAME}.app/Contents/MacOS/${APP_NAME}" "deploy/${APP_NAME}.app/Contents/MacOS/"; then
-    echo "ERROR: no se pudo copiar el ejecutable al bundle. No se empaqueta ni se publica nada."
+# Lo que se empaqueta TIENE que ser Release: se lee del CMakeCache.txt del arbol, no se supone.
+DEPLOY_BUILD_TYPE="$(sed -n 's/^CMAKE_BUILD_TYPE:[^=]*=//p' "${BUILD_DIR}/CMakeCache.txt" 2>/dev/null | head -1)"
+if [ "$DEPLOY_BUILD_TYPE" != "Release" ]; then
+    echo "ERROR: ${BUILD_DIR}/ quedo configurado en '${DEPLOY_BUILD_TYPE:-?}', no en Release. No se empaqueta ni se publica nada."
     exit 1
 fi
 
-# Copiar el ícono al bundle si existe
-if [ -f "resources/icons/LGA_VideoDownloader.icns" ]; then
-    echo "Copiando ícono al bundle..."
-    cp resources/icons/LGA_VideoDownloader.icns "deploy/${APP_NAME}.app/Contents/Resources/"
+# El bundle se copia ENTERO desde el que armo CMake: ejecutable, Info.plist (generado desde
+# cmake/Info.plist.in, version incluida desde PROJECT_VERSION) y el icono (Assets.car +
+# AppIcon.icns). Antes se armaba a mano con solo el ejecutable y un heredoc reescribia el
+# Info.plist entero: dos copias de la misma informacion, y arreglar una no arreglaba la otra
+# (asi salieron publicadas versiones con CFBundleShortVersionString y CFBundleVersion distintos).
+# El Info.plist es UNO solo: cmake/Info.plist.in. El deploy no lo toca.
+if [ ! -d "${BUILD_DIR}/${APP_NAME}.app" ]; then
+    echo "ERROR: no se encontro ${BUILD_DIR}/${APP_NAME}.app. No se empaqueta ni se publica nada."
+    exit 1
 fi
-
-# Crear Info.plist con configuración mejorada de compatibilidad
-#
-# DEUDA CONOCIDA: esto PISA el Info.plist que ya genero CMake desde cmake/Info.plist.in, asi
-# que hay DOS copias de la misma informacion y hay que mantener las dos. Es exactamente lo
-# que causo el bug del versionado: se arreglo `CFBundleShortVersionString` en una copia y
-# `CFBundleVersion` quedo en 0.86 en la otra, y el bundle publicado salio con las dos claves
-# discrepando durante tres versiones.
-#
-# Existe porque este heredoc agrega claves de compatibilidad que el template no trae
-# (LSMinimumSystemVersion, LSArchitecturePriority, NSAppTransportSecurity,
-# NSSupportsAutomaticGraphicsSwitching). Lo correcto es moverlas al template y que el deploy
-# NO toque el plist. Al tocar cualquier clave de aca, revisar cmake/Info.plist.in tambien.
-cat > "deploy/${APP_NAME}.app/Contents/Info.plist" << EOL
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>CFBundleExecutable</key>
-    <string>${APP_NAME}</string>
-    <key>CFBundleIconFile</key>
-    <string>LGA_VideoDownloader</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.lga.videodownloader</string>
-    <key>CFBundleName</key>
-    <string>${APP_NAME}</string>
-    <key>CFBundleDisplayName</key>
-    <string>${APP_NAME}</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleVersion</key>
-    <string>${APP_VERSION}</string>
-    <key>CFBundleShortVersionString</key>
-    <string>${APP_VERSION}</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>14.0.0</string>
-    <key>LSArchitecturePriority</key>
-    <array>
-        <string>arm64</string>
-        <string>x86_64</string>
-    </array>
-    <key>LSRequiresNativeExecution</key>
-    <false/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.utilities</string>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsArbitraryLoads</key>
-        <true/>
-    </dict>
-    <key>NSPrincipalClass</key>
-    <string>NSApplication</string>
-    <key>NSSupportsAutomaticGraphicsSwitching</key>
-    <true/>
-    <key>NSHumanReadableCopyright</key>
-    <string>© 2024 LGA. Todos los derechos reservados.</string>
-</dict>
-</plist>
-EOL
+if ! ditto "${BUILD_DIR}/${APP_NAME}.app" "deploy/${APP_NAME}.app"; then
+    echo "ERROR: no se pudo copiar el bundle a deploy/. No se empaqueta ni se publica nada."
+    exit 1
+fi
 
 # macdeployqt + fixup: el bundle tiene que ser AUTOCONTENIDO.
 # macdeployqt solo no alcanza con el Qt de Homebrew —que parte Qt en un keg por modulo y
