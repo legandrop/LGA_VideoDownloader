@@ -1,5 +1,9 @@
 #!/bin/bash
 
+# Todo lo que sigue (build/, toolsmac/, `cmake ..`) es relativo a la raiz del repo: llamado
+# desde otra carpeta, compilaba el arbol de esa carpeta.
+cd "$(dirname "$0")" || exit 1
+
 # El .app y el ejecutable se llaman "LGA Video Downloader" (convencion LGA: el nombre visible
 # arranca con "LGA" para que todas las apps queden juntas en /Applications). El nombre de
 # ARCHIVO de los artefactos es otro y va sin espacios, porque viaja por URL en los releases.
@@ -34,8 +38,15 @@ while [[ $# -gt 0 ]]; do
         --release) BUILD_TYPE=Release; BUILD_DIR=build-release; shift ;;
         --no-run) NO_RUN=true; shift ;;
         --wait) WAIT_FOR_APP=true; shift ;;
-        --help) show_help; exit 0 ;;
-        *) echo "Opcion desconocida: $1"; show_help; exit 1 ;;
+        --help|-h) show_help; exit 0 ;;
+        # Una opcion desconocida corta ANTES de cerrar o compilar nada: un `--norun` mal
+        # escrito no compila, no cierra la app abierta y no la vuelve a lanzar.
+        *)
+            echo "ERROR: opcion desconocida: $1"
+            echo ""
+            show_help
+            exit 1
+            ;;
     esac
 done
 
@@ -131,7 +142,13 @@ APP_BIN="./$BUILD_DIR/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
 if [ "$WAIT_FOR_APP" = "true" ]; then
     "$APP_BIN"
 else
-    "$APP_BIN" >/dev/null 2>&1 &
+    # `set -m` (control de trabajos) le da a la app su PROPIO grupo de procesos. Sin eso queda
+    # en el grupo de la terminal que corrio el script, y una herramienta que al cerrarse mata
+    # ese grupo entero se lleva la app (medido el 2026-11-09: kill al grupo del shell mata un
+    # proceso lanzado con `&` + `disown`; con `set -m` sobrevive). stdin desde /dev/null para
+    # que, fuera del grupo de primer plano, la app no frene con SIGTTIN si lee la terminal.
+    set -m
+    "$APP_BIN" </dev/null >/dev/null 2>&1 &
     disown
     echo "   PID $! (background)."
     echo "   Usa --wait si necesitas ver su salida o su exit code en la terminal."

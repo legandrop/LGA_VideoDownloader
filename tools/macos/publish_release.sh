@@ -134,6 +134,41 @@ for var in APP_NAME ARTIFACT_NAME RELEASE_REPO VERSION_CHECK_CMD; do
 done
 
 GH="${LGA_GH:-gh}"
+
+# ---- Red: 3 reintentos cada 5 s (regla de Lega para todo lo LGA) --------------------------------
+# GateBouncer bloquea el primer intento de cada programa y de cada destino nuevo: sin reintentos,
+# `gh` o `git` fallan antes de que se llegue a apretar Allow. Se reintenta SOLO si el error es de
+# red (no conecta, DNS, timeout, corte, 429, 5xx): un 404 ("release not found") o un error de
+# login es una respuesta del servidor y vuelve enseguida, como antes.
+# stdout del comando pasa tal cual (los llamadores lo capturan); stderr es el del ULTIMO intento,
+# asi un llamador con `2>&1` o `2>/dev/null` ve lo mismo que sin reintentos. El aviso de cada
+# reintento va al stderr ORIGINAL del script (fd 9), que no se mezcla con esas capturas.
+exec 9>&2
+NET_RETRY_ATTEMPTS="${LGA_NET_RETRY_ATTEMPTS:-4}"
+NET_RETRY_DELAY="${LGA_NET_RETRY_DELAY:-5}"
+NET_RETRY_PATTERN='could not resolve|resolve host|no such host|connection refused|connection reset|connection timed out|connection closed|operation timed out|i/o timeout|timed out|tls handshake|unexpected eof|network is unreachable|failed to connect|unable to access|error connecting to|http 429|http 5[0-9][0-9]|returned error: 5[0-9][0-9]|bad gateway|service unavailable|gateway timeout|stream error|early eof'
+net_retry() {
+    local attempt=1 rc errf
+    errf="$(mktemp "${TMPDIR:-/tmp}/lga_net_retry.XXXXXX")"
+    while :; do
+        if "$@" 2>"$errf"; then
+            rc=0
+        else
+            rc=$?
+        fi
+        if [[ $rc -eq 0 ]] || (( attempt >= NET_RETRY_ATTEMPTS )) \
+           || ! grep -qiE "$NET_RETRY_PATTERN" "$errf"; then
+            break
+        fi
+        echo "  Red: '$1 ${2:-}' fallo ($(head -1 "$errf" | cut -c1-120)); reintento $attempt de $((NET_RETRY_ATTEMPTS - 1)) en ${NET_RETRY_DELAY} s..." >&9
+        sleep "$NET_RETRY_DELAY"
+        attempt=$((attempt + 1))
+    done
+    cat "$errf" >&2
+    rm -f "$errf"
+    return $rc
+}
+
 if [[ -n "$VERSION_CMD" ]]; then
     APP_VERSION="$(bash -c "$VERSION_CMD" | tr -d '\r\n')"
 elif [[ -f "$VERSION_FILE" ]]; then
@@ -180,14 +215,14 @@ gh_write() {
         echo "  [dry-run] NO se ejecuta: gh $*"
         return 0
     fi
-    "$GH" "$@"
+    net_retry "$GH" "$@"
 }
 git_write() {
     if [[ "$DRY_RUN" == "true" ]]; then
         echo "  [dry-run] NO se ejecuta: git $*"
         return 0
     fi
-    git "$@"
+    net_retry git "$@"
 }
 
 # ---- SHA256SUMS ----------------------------------------------------------------------------------
@@ -224,7 +259,7 @@ tag_check() {
     TAG_REMOTE=false
     TAG_SHA=""
     head_sha="$(git rev-parse HEAD)"
-    if ! refs="$(git ls-remote origin "refs/tags/$SOURCE_TAG" "refs/tags/$SOURCE_TAG^{}" 2>&1)"; then
+    if ! refs="$(net_retry git ls-remote origin "refs/tags/$SOURCE_TAG" "refs/tags/$SOURCE_TAG^{}" 2>&1)"; then
         echo "ERROR: no se pudo leer los tags de origin: $refs"
         return 1
     fi
@@ -235,7 +270,7 @@ tag_check() {
             echo "       Borrarlo (git tag -d $SOURCE_TAG) y volver a correr: se crea de nuevo sobre HEAD."
             return 1
         fi
-        if ! branch_refs="$(git ls-remote origin "refs/heads/$CODE_BRANCH" 2>&1)"; then
+        if ! branch_refs="$(net_retry git ls-remote origin "refs/heads/$CODE_BRANCH" 2>&1)"; then
             echo "ERROR: no se pudo leer $CODE_BRANCH de origin: $branch_refs"
             return 1
         fi
@@ -285,7 +320,7 @@ release_check() {
     REL_EXISTS=false
     REL_SUMS=false
     REL_HAS_WIN=false
-    if ! out="$("$GH" release view "$TAG" --repo "$RELEASE_REPO" --json isDraft,assets 2>&1)"; then
+    if ! out="$(net_retry "$GH" release view "$TAG" --repo "$RELEASE_REPO" --json isDraft,assets 2>&1)"; then
         if printf '%s\n' "$out" | grep -qi "not found"; then
             echo "Release $TAG de $RELEASE_REPO: no existe; se crea."
             return 0
@@ -333,7 +368,7 @@ state_consistent() {
         fi
         return 0
     fi
-    if [[ "$REL_EXISTS" != "true" ]] && "$GH" api "repos/$RELEASE_REPO/git/refs/tags/$TAG" >/dev/null 2>&1; then
+    if [[ "$REL_EXISTS" != "true" ]] && net_retry "$GH" api "repos/$RELEASE_REPO/git/refs/tags/$TAG" >/dev/null 2>&1; then
         echo "ERROR: $RELEASE_REPO tiene el tag $TAG pero no el release (una corrida anterior quedo a medias)."
         echo "       Revisarlo a mano: borrar el tag publico o crear el release a mano."
         return 1
@@ -358,11 +393,11 @@ pre_fail() {
 # se termine publicando): todo eso lo vuelve a comprobar --preflight despues de la decision.
 probe() {
     local out names draft branch head_sha tag_sha email gh_user vis state="error" gh_ok=false
-    if ! command -v "$GH" >/dev/null 2>&1 || ! "$GH" auth status >/dev/null 2>&1; then
+    if ! command -v "$GH" >/dev/null 2>&1 || ! net_retry "$GH" auth status >/dev/null 2>&1; then
         echo "blocker=gh (GitHub CLI) no esta instalado o no tiene login (gh auth login)"
     else
         gh_ok=true
-        gh_user="$("$GH" api user -q .login 2>/dev/null || true)"
+        gh_user="$(net_retry "$GH" api user -q .login 2>/dev/null || true)"
         if [[ -n "$EXPECTED_GH_USER" && "$gh_user" != "$EXPECTED_GH_USER" ]]; then
             echo "blocker=gh esta logueado como '${gh_user:-?}', no como $EXPECTED_GH_USER"
         fi
@@ -392,10 +427,10 @@ probe() {
     fi
     if [[ "$gh_ok" == "true" ]]; then
         if [[ "$REQUIRE_PUBLIC_REPO" == "true" ]]; then
-            vis="$("$GH" repo view "$RELEASE_REPO" --json visibility -q .visibility 2>/dev/null || true)"
+            vis="$(net_retry "$GH" repo view "$RELEASE_REPO" --json visibility -q .visibility 2>/dev/null || true)"
             [[ "$vis" == "PUBLIC" ]] || echo "blocker=$RELEASE_REPO no es publico (${vis:-no se pudo leer})"
         fi
-        if out="$("$GH" release view "$TAG" --repo "$RELEASE_REPO" --json isDraft,assets 2>&1)"; then
+        if out="$(net_retry "$GH" release view "$TAG" --repo "$RELEASE_REPO" --json isDraft,assets 2>&1)"; then
             draft="$(printf '%s' "$out" | /usr/bin/python3 -c 'import json,sys; print(str(json.load(sys.stdin)["isDraft"]).lower())')"
             names="$(printf '%s' "$out" | /usr/bin/python3 -c 'import json,sys; [print(a["name"]) for a in json.load(sys.stdin)["assets"]]')"
             if [[ "$draft" == "true" ]]; then
@@ -568,11 +603,11 @@ preflight() {
     echo "Comprobaciones previas de la publicacion de $APP_NAME $TAG (macOS) en $RELEASE_REPO..."
 
     local gh_ok=false
-    if ! command -v "$GH" >/dev/null 2>&1 || ! "$GH" auth status >/dev/null 2>&1; then
+    if ! command -v "$GH" >/dev/null 2>&1 || ! net_retry "$GH" auth status >/dev/null 2>&1; then
         pre_fail "publicar necesita gh (GitHub CLI) instalado y con login (gh auth login)."
     else
         gh_ok=true
-        gh_user="$("$GH" api user -q .login 2>/dev/null || true)"
+        gh_user="$(net_retry "$GH" api user -q .login 2>/dev/null || true)"
         if [[ -n "$EXPECTED_GH_USER" && "$gh_user" != "$EXPECTED_GH_USER" ]]; then
             pre_fail "gh esta logueado como '${gh_user:-?}', no como $EXPECTED_GH_USER."
         fi
@@ -587,7 +622,7 @@ preflight() {
         pre_fail "hay cambios sin commitear; el release tiene que salir de un commit:"
         printf '%s\n' "$status" | head -20 | sed 's/^/       /'
     fi
-    git fetch -q origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG" 2>/dev/null || true
+    net_retry git fetch -q origin "refs/tags/$SOURCE_TAG:refs/tags/$SOURCE_TAG" 2>/dev/null || true
 
     # La rama importa solo si el tag se crea ahora: re-publicar el codigo de un tag existente se
     # hace con ese commit afuera (git checkout <tag>), fuera de la rama.
@@ -620,12 +655,12 @@ preflight() {
 
     if [[ "$gh_ok" == "true" ]]; then
         if [[ "$REQUIRE_PUBLIC_REPO" == "true" ]]; then
-            vis="$("$GH" repo view "$RELEASE_REPO" --json visibility -q .visibility 2>/dev/null || true)"
+            vis="$(net_retry "$GH" repo view "$RELEASE_REPO" --json visibility -q .visibility 2>/dev/null || true)"
             if [[ "$vis" != "PUBLIC" ]]; then
                 pre_fail "$RELEASE_REPO no es publico (${vis:-no se pudo leer}): el updater y el manifiesto no verian el release."
             fi
             if [[ "$SAME_REPO" != "true" ]]; then
-                default_branch="$("$GH" repo view "$RELEASE_REPO" --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || true)"
+                default_branch="$(net_retry "$GH" repo view "$RELEASE_REPO" --json defaultBranchRef -q .defaultBranchRef.name 2>/dev/null || true)"
                 if [[ -z "$default_branch" ]]; then
                     pre_fail "$RELEASE_REPO esta vacio (sin rama por defecto): no se le puede crear un release."
                 fi
@@ -689,7 +724,7 @@ publish() {
         work="$(mktemp -d)"
         old=/dev/null
         if [[ "$REL_SUMS" == "true" ]]; then
-            "$GH" release download "$TAG" --repo "$RELEASE_REPO" --pattern SHA256SUMS --dir "$work" \
+            net_retry "$GH" release download "$TAG" --repo "$RELEASE_REPO" --pattern SHA256SUMS --dir "$work" \
                 || { rm -rf "$work"; echo "ERROR: no se pudo bajar el SHA256SUMS del release."; return 1; }
             old="$work/SHA256SUMS"
         fi
@@ -735,7 +770,7 @@ publish() {
         # Mismo repo: el release usa el tag recien pusheado. Repo aparte: GitHub crea el tag publico
         # sobre la rama por defecto del repo de releases.
         local target_args=(--verify-tag)
-        [[ "$SAME_REPO" == "true" ]] || target_args=(--target "$("$GH" repo view "$RELEASE_REPO" --json defaultBranchRef -q .defaultBranchRef.name)")
+        [[ "$SAME_REPO" == "true" ]] || target_args=(--target "$(net_retry "$GH" repo view "$RELEASE_REPO" --json defaultBranchRef -q .defaultBranchRef.name)")
         if ! gh_write release create "$TAG" "${upload[@]}" --repo "$RELEASE_REPO" "${target_args[@]}" \
                 --title "$RELEASE_TITLE" --notes "$RELEASE_NOTES"; then
             echo "ERROR: no se pudo crear el release $TAG. El tag $SOURCE_TAG ya quedo en origin: reintentar con el"
@@ -770,7 +805,7 @@ publish() {
         return 0
     fi
 
-    names="$("$GH" release view "$TAG" --repo "$RELEASE_REPO" --json assets -q '.assets[].name' 2>/dev/null | tr -d '\r')" || names=""
+    names="$(net_retry "$GH" release view "$TAG" --repo "$RELEASE_REPO" --json assets -q '.assets[].name' 2>/dev/null | tr -d '\r')" || names=""
     for a in "$ZIP_NAME" "$DMG_NAME" ${sums:+SHA256SUMS}; do
         printf '%s\n' "$names" | grep -qx "$a" || echo "AVISO: el release $TAG no lista $a despues de subir. Revisarlo."
     done
@@ -780,7 +815,7 @@ publish() {
 
     if [[ "$REFRESH_MANIFEST" == "true" ]]; then
         # Sin esto hay que esperar al cron de LGA_Updates. Si falla, el cron lo levanta igual.
-        if "$GH" workflow run refresh_versions.yml --repo legandrop/LGA_Updates >/dev/null 2>&1 </dev/null; then
+        if net_retry "$GH" workflow run refresh_versions.yml --repo legandrop/LGA_Updates >/dev/null 2>&1 </dev/null; then
             echo "Manifiesto de versiones: refresco disparado."
         else
             echo "AVISO: no se pudo disparar el refresco del manifiesto. El cron lo levanta solo."
