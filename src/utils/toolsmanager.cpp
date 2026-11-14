@@ -3,6 +3,7 @@
 #include "videodownloader/toolsupdater.h"
 
 #include <QCoreApplication>
+#include <QCryptographicHash>
 #include <QDebug>
 #include <QDir>
 #include <QFile>
@@ -53,6 +54,25 @@ QString damagedToolLine(ToolsUpdater::Tool tool)
         }
     }
     return QString();
+}
+#endif
+
+#ifdef Q_OS_MAC
+// ffmpeg de macOS: viene en el bundle (toolsmac/ffmpeg, firmado con el resto). Si falta, la app
+// baja ESTE build fijo —arm64 nativo, estatico, firmado y notarizado por su autor— y lo deja en la
+// carpeta de tools de usuario, fuera del bundle (escribir adentro rompe la firma). Antes bajaba
+// "el ultimo" de evermeet.cx, que es solo Intel: corria con Rosetta y macOS avisa que esa app deja
+// de abrir en la proxima version. Mismo build que va en toolsmac/.
+const QString kFfmpegMacUrl = QStringLiteral(
+    "https://ffmpeg.martin-riedl.de/download/macos/arm64/1789931890_9.0.2/ffmpeg.zip");
+const QByteArray kFfmpegMacSha256 = QByteArrayLiteral(
+    "c8ed4c4e6978a03c485edbfe4e0a5dc2380f8a30bba5150531b31b094492d924");
+
+// El que bajo la app (carpeta de tools de usuario), o vacio si no esta.
+QString downloadedFfmpegMacPath()
+{
+    const QString path = ToolsUpdater::toolsDir() + QStringLiteral("/ffmpeg");
+    return QFileInfo(path).isFile() ? path : QString();
 }
 #endif
 
@@ -528,10 +548,11 @@ void ToolsManager::checkFfmpegInstallation()
     // macOS: Check if ffmpeg exists in the toolsmac subdirectory first, then fallback to system
     QString appDir = QCoreApplication::applicationDirPath();
     QString ffmpegPath = appDir + "/toolsmac/ffmpeg";
-    
-    if (QFile::exists(ffmpegPath)) {
+
+    if (QFile::exists(ffmpegPath) || !downloadedFfmpegMacPath().isEmpty()) {
         m_ffmpegInstalled = true;
-        logMessage("✓ ffmpeg found in toolsmac directory");
+        logMessage(QFile::exists(ffmpegPath) ? QStringLiteral("✓ ffmpeg found in toolsmac directory")
+                                             : QStringLiteral("✓ ffmpeg found in the tools folder"));
         
         // Update button state after both checks are done
         if (m_pendingProcesses == 0) {
@@ -905,8 +926,8 @@ void ToolsManager::downloadFfmpegMac()
 void ToolsManager::startFfmpegMacAttempt()
 {
 #ifdef Q_OS_MAC
-    // evermeet.cx URL for latest ffmpeg for macOS
-    QString url = "https://evermeet.cx/ffmpeg/getrelease/zip";
+    // Build fijo arm64 con SHA-256 conocido (kFfmpegMacUrl, arriba).
+    const QString url = kFfmpegMacUrl;
     QNetworkRequest request(url);
 
     // Set user agent
@@ -955,28 +976,34 @@ void ToolsManager::startFfmpegMacAttempt()
         m_ffmpegDownloading = false;
 
         if (reply->error() == QNetworkReply::NoError) {
-            // Save the downloaded zip file temporarily
-            QString appDir = QCoreApplication::applicationDirPath();
-            QString toolsDir = appDir + "/toolsmac";
-            
-            // Create toolsmac directory if it doesn't exist
-            QDir dir;
-            if (!dir.exists(toolsDir)) {
-                if (!dir.mkpath(toolsDir)) {
-                    logMessage("ERROR: Could not create toolsmac directory");
-                    updateButtonState();
-                    reply->deleteLater();
-                    return;
-                }
+            // Carpeta de tools de usuario, FUERA del bundle: escribir adentro del .app rompe la
+            // firma (y en /Applications puede no ser escribible).
+            const QString toolsDir = ToolsUpdater::toolsDir();
+            if (!QDir().mkpath(toolsDir)) {
+                logMessage("ERROR: Could not create the tools folder");
+                updateButtonState();
+                reply->deleteLater();
+                return;
             }
-            
+
             QString tempZipPath = toolsDir + "/ffmpeg_temp.zip";
             QString ffmpegPath = toolsDir + "/ffmpeg";
-            
+
+            // Sin el SHA-256 esperado no se instala nada.
+            const QByteArray data = reply->readAll();
+            const QByteArray sha = QCryptographicHash::hash(data, QCryptographicHash::Sha256).toHex();
+            if (sha != kFfmpegMacSha256) {
+                logMessage(QStringLiteral("ERROR: ffmpeg download failed verification (SHA-256 %1)")
+                               .arg(QString::fromLatin1(sha)));
+                updateButtonState();
+                reply->deleteLater();
+                return;
+            }
+
             // Save zip file
             QFile zipFile(tempZipPath);
             if (zipFile.open(QIODevice::WriteOnly)) {
-                zipFile.write(reply->readAll());
+                zipFile.write(data);
                 zipFile.close();
                 
                 // Extract ffmpeg binary using system unzip command
@@ -1015,7 +1042,7 @@ void ToolsManager::startFfmpegMacAttempt()
                 });
                 
                 // Extract only the ffmpeg binary from the zip
-                unzipProcess->start("unzip", QStringList() << "-j" << tempZipPath << "ffmpeg" << "-d" << toolsDir);
+                unzipProcess->start("unzip", QStringList() << "-o" << "-j" << tempZipPath << "ffmpeg" << "-d" << toolsDir);
                 
                 if (!unzipProcess->waitForStarted(5000)) {
                     logMessage("ERROR: Could not start unzip process");
@@ -1097,6 +1124,11 @@ QString ToolsManager::getFfmpegPath() const
     QString localPath = appDir + "/toolsmac/ffmpeg";
     if (QFile::exists(localPath)) {
         return localPath;
+    }
+    // El que bajo la app si faltaba el del bundle (downloadFfmpegMac).
+    const QString downloaded = downloadedFfmpegMacPath();
+    if (!downloaded.isEmpty()) {
+        return downloaded;
     }
     // Fallback to system PATH
     return "ffmpeg";

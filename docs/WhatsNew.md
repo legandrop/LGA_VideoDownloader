@@ -26,7 +26,7 @@ platforms: [win, mac]
 - [new] Settings has the update check, how to install the browser extension and the versions of the download tools; Help shows the app version, what's new and the credits.
 - [improved] The window fits small laptop screens without overlapping controls.
 - [improved][win] Installing removes the old VimeoDownloader and keeps your download folder, and everything the app downloads lives inside its install folder, so uninstalling removes it all.
-- [improved][mac] La app ahora se llama "LGA Video Downloader", se instala desde un DMG firmado y verificado por Apple que se abre sin pasar por la Terminal, y no necesita nada más instalado en la Mac.
+- [improved][mac] La app ahora se llama "LGA Video Downloader", se instala desde un DMG firmado y verificado por Apple que se abre sin pasar por la Terminal, corre nativa en Apple Silicon y no necesita nada más instalado en la Mac.
 - [improved] New app icon, matching the other LGA apps.
 - [improved] La app ahora se publica compilada en modo optimizado: las versiones anteriores salían en modo de depuración, que es más lento.
 - [fixed][mac] Si la app tiene que bajar ffmpeg y la conexión falla, ya no se rinde al primer intento: espera y vuelve a probar sola.
