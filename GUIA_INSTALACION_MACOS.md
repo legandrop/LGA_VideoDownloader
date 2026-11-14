@@ -1,5 +1,10 @@
 # 🚀 Guía Completa: VideoDownloader en macOS (Incluyendo Sequoia 15.1+)
 
+> **Obsoleta.** Esta guía describe el instalador `.tar.gz` viejo, de cuando la app no estaba
+> firmada. Hoy la app se instala con el DMG del release, que va firmado con Developer ID y
+> notarizado por Apple: se abre con doble clic, sin Terminal y sin `xattr -cr`. Se conserva solo
+> como historia.
+
 Esta guía explica cómo hacer funcionar VideoDownloader en cualquier Mac, incluyendo versiones recientes como macOS Sequoia 15.1, sin necesidad de certificados pagos de Apple.
 
 ## 📋 Problema que Resolvimos

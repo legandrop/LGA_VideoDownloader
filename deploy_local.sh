@@ -9,6 +9,12 @@ set -euo pipefail
 # Es el cierre de toda implementacion en la Mac: lo que se prueba es la app instalada, no la de
 # build/. Detalle en docs/Doc_Deploy_macOS.md §6 de LGA_Base_QT_C_Py.
 #
+# NO notariza por defecto (Lega, 2026-11-13): la app instalada en esta Mac no lo necesita, y cada
+# envio a Apple son minutos de espera en cada cambio. Con --notarize lo hace, para tener un DMG
+# listo para mandarle a alguien. Se pasa por LGA_NOTARIZE y no por un flag porque un deploy.sh que
+# todavia no migro a Developer ID no conoce --no-notarize y cortaria. Publicar (deploy.sh
+# --publish) notariza siempre.
+#
 # No duplica el deploy: delega en el deploy de cada edicion, que es el unico dueno del build y de
 # la verificacion del bundle. --no-publish apaga la publicacion, --dmg arma el DMG sin preguntar,
 # y stdin en /dev/null apaga las demas preguntas (ZIP, Finder), que los deploy hacen solo con
@@ -29,12 +35,13 @@ cd "$ROOT_DIR"
 show_help() {
     local names=""
     for entry in "${EDITIONS[@]}"; do names+="${entry%%:*} "; done
-    echo "Uso: $0 [--only <edicion>] [--no-open] [--no-install] [--parallel N]"
+    echo "Uso: $0 [--only <edicion>] [--notarize] [--no-open] [--no-install] [--parallel N]"
     echo ""
     echo "  Compila en Release, arma el DMG, instala en /Applications y abre la app."
-    echo "  Sin ZIP y sin publicar en GitHub. Ediciones: ${names% }"
+    echo "  Sin ZIP, sin publicar en GitHub y sin notarizar. Ediciones: ${names% }"
     echo ""
     echo "  --only <edicion>  Instalar solo esa edicion"
+    echo "  --notarize        Notarizar la app y el DMG con Apple (un DMG para mandar a alguien)"
     echo "  --no-open         Instalar en /Applications sin abrir la app"
     echo "  --no-install      Solo compilar y verificar el bundle de deploy/, sin instalar"
     echo "  --parallel N      Usar N nucleos para compilar (si el deploy.sh lo admite)"
@@ -42,6 +49,7 @@ show_help() {
 
 ONLY=""
 PASS_ARGS=()
+NOTARIZE_LOCAL=0
 while [ $# -gt 0 ]; do
     case "$1" in
         -h|--help) show_help; exit 0 ;;
@@ -53,6 +61,7 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || { echo "ERROR: --parallel requiere un valor."; exit 1; }
             PASS_ARGS+=("$1" "$2"); shift 2 ;;
         --dmg) shift ;;  # ya es el default
+        --notarize) NOTARIZE_LOCAL=1; shift ;;
         --zip|--publish|--no-publish|--dry-run|--replace|--yes)
             echo "ERROR: $1 no va en el deploy local; usar ./deploy.sh."
             exit 1 ;;
@@ -86,7 +95,7 @@ for entry in "${EDITIONS[@]}"; do
     read -r -a cmd <<< "${entry#*:}"
     echo ""
     echo "===== Deploy local: ${name} (${cmd[*]}) ====="
-    bash "${cmd[@]}" --no-publish --dmg ${PASS_ARGS[@]+"${PASS_ARGS[@]}"} < /dev/null
+    LGA_NOTARIZE="$NOTARIZE_LOCAL" bash "${cmd[@]}" --no-publish --dmg ${PASS_ARGS[@]+"${PASS_ARGS[@]}"} < /dev/null
     RAN=$((RAN + 1))
 done
 
@@ -104,7 +113,11 @@ if [ ${#DMGS[@]} -eq 0 ]; then
 fi
 
 echo ""
-echo "DMG listos para mandar:"
+if [ "$NOTARIZE_LOCAL" = "1" ]; then
+    echo "DMG notarizados, listos para mandar:"
+else
+    echo "DMG sin notarizar (para mandar a alguien: ./deploy_local.sh --notarize):"
+fi
 for f in "${DMGS[@]}"; do echo "  ${ROOT_DIR}/${f#./}"; done
 
 if [ -t 0 ]; then

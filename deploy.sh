@@ -7,7 +7,7 @@ APP_NAME="LGA Video Downloader"
 ARTIFACT_NAME="LGA_Video_Downloader"
 
 show_help() {
-    echo "Uso: $0 [--zip] [--dmg] [--no-install] [--no-open] [--publish [--dry-run] [--replace] [--yes] | --no-publish]"
+    echo "Uso: $0 [--zip] [--dmg] [--no-install] [--no-open] [--no-notarize] [--publish [--dry-run] [--replace] [--yes] | --no-publish]"
     echo "  --zip         Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.zip firmado (actualizacion)"
     echo "  --dmg         Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.dmg (primera instalacion)"
     echo "  --no-install  No instalar en /Applications ni abrir la app (deja solo deploy/)."
@@ -19,6 +19,7 @@ show_help() {
     echo "  --dry-run     Con --publish: todo menos escribir en GitHub y en el repo"
     echo "  --replace     Con --publish: reemplazar los archivos de macOS si el release ya los tiene"
     echo "  --yes         Con --publish: no preguntar en el control de las notas"
+    echo "  --no-notarize No mandar a notarizar el ZIP ni el DMG (salen pidiendo xattr)"
     echo ""
     echo "Sin flags y con terminal interactiva, mira GitHub y pregunta primero, con una tecla: publicar"
     echo "(o sumar macOS al release), build local o cancelar. Sin terminal (pipe, CI) no pregunta"
@@ -32,6 +33,10 @@ OPEN_APP=true
 # "prompt" = preguntar solo sin flags y con terminal: un script sin tty no se cuelga esperando input.
 PUBLISH_MODE="prompt"
 PUBLISH_ARGS=()
+# Notarizar cuando hay Developer ID y se arma un ZIP o un DMG. LGA_NOTARIZE=0 lo apaga igual que
+# --no-notarize (sirve para deploy_local.sh sin red, o para no esperar a Apple en una prueba).
+NOTARIZE=true
+[ "${LGA_NOTARIZE:-1}" = "0" ] && NOTARIZE=false
 ARG_COUNT=$#
 for arg in "$@"; do
     case "$arg" in
@@ -46,6 +51,7 @@ for arg in "$@"; do
             [ "$PUBLISH_MODE" = "always" ] && { echo "ERROR: --publish y --no-publish se contradicen."; exit 1; }
             PUBLISH_MODE="never" ;;
         --dry-run|--replace|--yes) PUBLISH_ARGS+=("$arg") ;;
+        --no-notarize) NOTARIZE=false ;;
         -h|--help) show_help; exit 0 ;;
         # Una opcion mal escrita corta: un `--no-instal` no puede terminar instalando y abriendo.
         *) echo "ERROR: opcion desconocida: $arg"; show_help; exit 1 ;;
@@ -218,15 +224,51 @@ cp -R extension "deploy/${APP_NAME}.app/Contents/Resources/extension"
 # Hacer ejecutable el script
 chmod +x "deploy/${APP_NAME}.app/Contents/MacOS/${APP_NAME}"
 
-# Firma ad-hoc del bundle YA armado: la firma cubre el contenido, asi que va al final. No
-# es notarizacion ni confianza de Gatekeeper (sigue haciendo falta el `xattr -cr`): sirve
-# para poder verificar con `codesign --verify` que el bundle llego entero.
-echo "Firmando el bundle (ad-hoc)..."
-if ! codesign --force --deep --sign - "deploy/${APP_NAME}.app"; then
+# Firma del bundle YA armado: la firma cubre el contenido, asi que va despues de copiar todo
+# adentro. La hace tools/macos/sign_bundle.sh (pieza canonica, copia IDENTICA), que elige la
+# identidad: Developer ID si esta en el llavero (hardened runtime, sello de tiempo, de adentro
+# hacia afuera: es lo que se puede notarizar), si no "LGA Code Signing" y si no ad-hoc. Con
+# cualquiera de las tres, `codesign --verify` comprueba despues que el bundle llego entero, que es
+# lo que hace el updater.
+# Las tools de toolsmac/ (yt-dlp, deno, ffmpeg) quedan re-firmadas con nuestra identidad y hardened
+# runtime: probado que arrancan asi y que deno conserva el JIT sin entitlements. La app no necesita
+# entitlements (Qt Widgets, sin Python embebido); si algun dia los necesita, van en
+# resources/macos/Entitlements.plist. Las tools que la app baja despues a Application Support no
+# pasan por aca: quedan con la firma de su autor y sin cuarentena (la app no las marca).
+ENTITLEMENTS_FILE="resources/macos/Entitlements.plist"
+SIGN_ARGS=()
+[ -f "$ENTITLEMENTS_FILE" ] && SIGN_ARGS+=(--entitlements "$ENTITLEMENTS_FILE")
+if ! bash "./tools/macos/sign_bundle.sh" "deploy/${APP_NAME}.app" ${SIGN_ARGS[@]+"${SIGN_ARGS[@]}"}; then
     echo "ERROR: fallo la firma del bundle. No se empaqueta ni se publica nada."
     exit 1
 fi
 bash "./tools/macos/verify_bundle_signature.sh" "deploy/${APP_NAME}.app" || exit 1
+SIGN_KIND="$(bash "./tools/macos/sign_bundle.sh" --kind)"
+
+# Notarizacion (tools/macos/notarize.sh, pieza canonica): primero el .app, asi el ticket queda
+# abrochado adentro del ZIP y del DMG; despues el DMG, que es lo que baja el usuario. Sin eso
+# Gatekeeper no deja abrir la app en otra Mac sin el `xattr -cr`.
+# Un rechazo de Apple corta una publicacion; en un build local avisa y sigue.
+NOTARIZED=false
+notarize_or_warn() {  # <ruta>; 0 = notarizado
+    local rc=0
+    bash "./tools/macos/notarize.sh" "$1" || rc=$?
+    [ $rc -eq 0 ] && return 0
+    if [ $rc -eq 1 ] && [ "$PUBLISH" = "true" ]; then
+        echo "ERROR: no se publica un release que Apple rechazo."
+        exit 1
+    fi
+    echo "AVISO: $(basename "$1") sale SIN notarizar: en otra Mac va a pedir el 'xattr -cr'."
+    return 1
+}
+if { [ "$CREATE_ZIP" = "true" ] || [ "$CREATE_DMG" = "true" ]; } && [ "$SIGN_KIND" = "developer-id" ]; then
+    if [ "$NOTARIZE" = "true" ]; then
+        notarize_or_warn "deploy/${APP_NAME}.app" && NOTARIZED=true
+        bash "./tools/macos/verify_bundle_signature.sh" "deploy/${APP_NAME}.app" || exit 1
+    else
+        echo "AVISO: --no-notarize: el ZIP y el DMG salen sin notarizar (piden el 'xattr -cr')."
+    fi
+fi
 
 if [ "$CREATE_ZIP" = "true" ]; then
     ZIP_NAME="${ARTIFACT_NAME}_Mac_v${APP_VERSION}.zip"
@@ -256,6 +298,11 @@ if [ "$CREATE_DMG" = "true" ]; then
     if ! bash ./create_dmg.sh --no-open; then
         echo "ERROR: no se pudo crear el .dmg. No se publica nada."
         exit 1
+    fi
+    if [ "$NOTARIZED" = "true" ]; then
+        DMG_FILE="deploy/${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"
+        bash "./tools/macos/sign_bundle.sh" "$DMG_FILE" || exit 1
+        notarize_or_warn "$DMG_FILE" || true
     fi
 fi
 

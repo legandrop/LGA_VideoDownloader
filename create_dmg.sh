@@ -176,7 +176,25 @@ cleanup() {
 }
 trap cleanup EXIT
 
-cat > "$WORK_ROOT/LEEME.txt" << EOF
+# El LEEME depende de si la app va notarizada (ticket abrochado por tools/macos/notarize.sh):
+# notarizada, Gatekeeper la abre sin mas y el `xattr -cr` sobra. Sin notarizar (Developer ID
+# ausente, --no-notarize, Apple la rechazo), sigue haciendo falta y se explica.
+if xcrun stapler validate -q "$SRC_APP" >/dev/null 2>&1; then
+    echo "La app va notarizada: el LEEME no pide xattr."
+    cat > "$WORK_ROOT/LEEME.txt" << EOF
+${DISPLAY_NAME} para macOS
+=========================
+
+Instalacion:
+1. Arrastrar ${APP_NAME}.app a Applications.
+2. Abrir la app desde Applications.
+
+La app esta firmada y verificada por Apple. La primera vez macOS pregunta si se quiere
+abrir una app bajada de internet: se contesta Abrir.
+EOF
+else
+    echo "AVISO: la app NO va notarizada: el LEEME explica el xattr -cr."
+    cat > "$WORK_ROOT/LEEME.txt" << EOF
 ${DISPLAY_NAME} para macOS
 =========================
 
@@ -195,6 +213,7 @@ Quita el atributo de cuarentena del bundle instalado. No otorga permisos permane
 no cambia tus datos y no desactiva Gatekeeper globalmente. Solo limpia esa marca para
 esa copia instalada.
 EOF
+fi
 
 cat > "$WORK_ROOT/settings.py" << EOF
 import os

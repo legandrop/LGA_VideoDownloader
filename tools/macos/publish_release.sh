@@ -105,6 +105,7 @@ WIN_ASSET=""
 WHATS_NEW_FILE=""
 REFRESH_MANIFEST=true
 PINNED_CERT_SHA1=""       # si no esta vacio, ese certificado tiene que estar valido en el llavero
+REQUIRE_NOTARIZATION=false # true: no se publica un DMG que Gatekeeper no da por notarizado (sin eso, solo avisa)
 RELEASE_TITLE=""
 RELEASE_NOTES=""
 DEV_VERSION_FILE=""       # changelog cuyo primer "vX.Y:" es la version EN DESARROLLO (para --decide)
@@ -716,6 +717,17 @@ publish() {
 
     # Lo que baja el auto-update: el archivo EXACTO que se sube.
     bash "$SCRIPT_DIR/verify_bundle_signature.sh" "$ZIP_PATH" || return 1
+    # Lo que baja el usuario nuevo: si el DMG no esta notarizado, en otra Mac pide el `xattr -cr`
+    # (docs/Doc_Firma_Apple.md). Con REQUIRE_NOTARIZATION=true corta; si no, avisa fuerte.
+    local assess
+    assess="$(spctl -a -t open --context context:primary-signature -vv "$DMG_PATH" 2>&1 || true)"
+    if [[ "$assess" != *"source=Notarized Developer ID"* ]]; then
+        if [[ "$REQUIRE_NOTARIZATION" == "true" ]]; then
+            echo "ERROR: $DMG_NAME no esta notarizado (REQUIRE_NOTARIZATION=true). No se publica."
+            return 1
+        fi
+        echo "AVISO: $DMG_NAME NO esta notarizado: quien lo instale va a necesitar el 'xattr -cr'."
+    fi
 
     sums=""
     if [[ "$SHA256SUMS" == "true" ]]; then
