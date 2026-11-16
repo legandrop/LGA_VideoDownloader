@@ -72,12 +72,21 @@ if %ERRORLEVEL% neq 0 (
 )
 
 REM Usar windeployqt para copiar todas las DLLs de Qt necesarias
-"%WINDEPLOYQT%" --release deploy\VideoDownloader.exe
+REM Sin Qt Virtual Keyboard (teclado en pantalla): la app no lo usa y en Qt libre es GPLv3, no
+REM LGPL; viajar en el instalador obligaria a abrir el codigo. Se excluye y, por las dudas, se
+REM borra lo que haya quedado (plugin y DLLs del modulo).
+"%WINDEPLOYQT%" --release --exclude-plugins qtvirtualkeyboardplugin deploy\VideoDownloader.exe
 if %ERRORLEVEL% neq 0 (
     echo.
     echo Error: windeployqt fallo. El deploy quedo incompleto y no sirve para el instalador.
     exit /b 1
 )
+if exist deploy\platforminputcontexts\qtvirtualkeyboardplugin.dll del /F /Q deploy\platforminputcontexts\qtvirtualkeyboardplugin.dll
+if exist deploy\Qt6VirtualKeyboard.dll del /F /Q deploy\Qt6VirtualKeyboard.dll
+if exist deploy\Qt6VirtualKeyboardQml.dll del /F /Q deploy\Qt6VirtualKeyboardQml.dll
+if exist deploy\Qt6VirtualKeyboardSettings.dll del /F /Q deploy\Qt6VirtualKeyboardSettings.dll
+if exist deploy\virtualkeyboard rmdir /S /Q deploy\virtualkeyboard
+if exist deploy\platforminputcontexts rmdir deploy\platforminputcontexts 2>nul
 
 REM Crear carpeta tools en deploy y copiar herramientas
 echo.

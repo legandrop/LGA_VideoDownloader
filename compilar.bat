@@ -323,7 +323,7 @@ if not exist "%QT_DIR%\bin\windeployqt.exe" (
     goto :eof
 )
 echo Todavia faltan dependencias: probando con windeployqt...
-"%QT_DIR%\bin\windeployqt.exe" --compiler-runtime --no-translations --no-opengl-sw --no-system-d3d-compiler --dir "%BUILD_DIR%" "%BUILD_DIR%\%APP_EXE_NAME%"
+"%QT_DIR%\bin\windeployqt.exe" --compiler-runtime --no-translations --no-opengl-sw --no-system-d3d-compiler --exclude-plugins qtvirtualkeyboardplugin,qtvirtualkeyboardplugind --dir "%BUILD_DIR%" "%BUILD_DIR%\%APP_EXE_NAME%"
 if errorlevel 1 echo AVISO: windeployqt devolvio error.
 goto :eof
 

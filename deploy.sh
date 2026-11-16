@@ -191,12 +191,21 @@ fi
 # macdeployqt + fixup: el bundle tiene que ser AUTOCONTENIDO.
 # macdeployqt solo no alcanza con el Qt de Homebrew —que parte Qt en un keg por modulo y
 # arrastra dependencias entre ellos que la herramienta no persigue: sin QtDBus el binario
-# muere en dyld, y quedan QtSvg, QtPdf y las QtVirtualKeyboard declaradas como @rpath pero
-# nunca copiadas—. `tools/macos/bundle_fixup.py` completa eso y VERIFICA que no quede
+# muere en dyld, y quedan QtSvg y QtPdf declaradas como @rpath pero nunca copiadas—. `tools/macos/bundle_fixup.py` completa eso y VERIFICA que no quede
 # ninguna referencia fuera del bundle. Ver docs.
 echo ""
 echo "Ejecutando macdeployqt..."
 "$QT_PATH/opt/qtbase/bin/macdeployqt" "deploy/${APP_NAME}.app" >/dev/null 2>&1 || true
+
+# Qt Virtual Keyboard (teclado en pantalla para kioscos y pantallas tactiles) FUERA del bundle.
+# La app no lo usa, pero macdeployqt copia todos los plugins de platforminputcontexts y el plugin
+# arrastra sus frameworks. En Qt libre es GPLv3, no LGPL: viajar en el bundle obligaria a abrir el
+# codigo de la app. En la Mac la escritura la maneja Cocoa, sin ese plugin. Va ANTES del fixup:
+# sin el plugin, el fixup ya no tiene por que copiar sus frameworks, y verifica el bundle que queda.
+rm -rf "deploy/${APP_NAME}.app/Contents/PlugIns/platforminputcontexts/libqtvirtualkeyboardplugin.dylib" \
+       "deploy/${APP_NAME}.app/Contents/Frameworks/QtVirtualKeyboard.framework" \
+       "deploy/${APP_NAME}.app/Contents/Frameworks/QtVirtualKeyboardQml.framework"
+rmdir "deploy/${APP_NAME}.app/Contents/PlugIns/platforminputcontexts" 2>/dev/null || true
 
 echo "Completando dependencias del bundle..."
 if ! python3 tools/macos/bundle_fixup.py "deploy/${APP_NAME}.app"; then
