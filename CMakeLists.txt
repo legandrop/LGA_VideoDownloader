@@ -257,7 +257,7 @@ if(APPLE)
         # juntas en /Applications, donde Finder ordena por el nombre de ARCHIVO del bundle (no
         # por CFBundleName). OUTPUT_NAME define el .app Y el ejecutable de adentro: en un target
         # MACOSX_BUNDLE no se pueden separar. El nombre de ARCHIVO del .zip/.dmg es otra cosa
-        # (LGA_Video_Downloader_Mac_vX): va sin espacios porque viaja por URL en los releases.
+        # (LGA_Video_Downloader_Mac_vX.zip, LGA_Video_Downloader_vX.dmg): va sin espacios porque viaja por URL en los releases.
         OUTPUT_NAME "LGA Video Downloader"
         MACOSX_BUNDLE_BUNDLE_NAME "LGA Video Downloader"
         MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}

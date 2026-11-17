@@ -44,7 +44,7 @@ DISPLAY_NAME="LGA Video Downloader"      # nombre visible del volumen y del titu
 show_help() {
     echo "Uso: $0 [--no-open]"
     echo ""
-    echo "Crea deploy/${ARTIFACT_NAME}_Mac_v<version>.dmg para una instalacion nueva."
+    echo "Crea deploy/${ARTIFACT_NAME}_v<version>.dmg para una instalacion nueva."
     echo "La actualizacion in-place usa ${ARTIFACT_NAME}_Mac_v<version>.zip (lo arma deploy.sh --zip)."
     echo ""
     echo "  --no-open   No revelar el DMG en Finder al terminar"
@@ -94,7 +94,7 @@ if ! [[ "$APP_VERSION" =~ ^[0-9]+(\.[0-9]+)+$ ]]; then
     exit 1
 fi
 
-DMG_NAME="${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"
+DMG_NAME="${ARTIFACT_NAME}_v${APP_VERSION}.dmg"
 VOL_NAME="${DISPLAY_NAME} ${APP_VERSION}"
 SRC_APP="deploy/${APP_NAME}.app"
 DMG_PATH="deploy/${DMG_NAME}"

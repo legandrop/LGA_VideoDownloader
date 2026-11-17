@@ -23,7 +23,8 @@ set -euo pipefail
 #
 # Invariantes que no se tocan, porque los leen el updater de cada app, el manifiesto de LGA_Updates
 # y el card de LGA Updates de PipeSync:
-#   - los nombres <ARTIFACT_NAME>_Mac_v<version>.zip/.dmg y SHA256SUMS, y el tag publico v<version>;
+#   - los nombres <ARTIFACT_NAME>_Mac_v<version>.zip, <ARTIFACT_NAME>_v<version>.dmg y SHA256SUMS, y el
+#     tag publico v<version> (el DMG perdio el "_Mac" en 2026-11; el zip no, porque lo busca el updater);
 #   - el que publica segundo (Windows o Mac) SUMA al release existente: no lo recrea ni borra las
 #     lineas de la otra plataforma en SHA256SUMS;
 #   - el What's new se publica antes del refresco del manifiesto, que es el que lo anuncia.
@@ -184,8 +185,12 @@ if ! [[ "$APP_VERSION" =~ $VERSION_REGEX ]]; then
 fi
 TAG="v${APP_VERSION}"                       # tag PUBLICO, el que lee el manifiesto
 SOURCE_TAG="${SOURCE_TAG_PREFIX}${APP_VERSION}"  # tag del repo de CODIGO
+# El zip conserva el "_Mac": lo busca por ese nombre el updater de las copias ya instaladas
+# (libs/lgaupdate). El DMG lo perdio; LEGACY_DMG_NAME es como se llamaba, y solo sirve para
+# reconocer un release que se publico antes del cambio (re-publicar una version vieja).
 ZIP_NAME="${ARTIFACT_NAME}_Mac_v${APP_VERSION}.zip"
-DMG_NAME="${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"
+DMG_NAME="${ARTIFACT_NAME}_v${APP_VERSION}.dmg"
+LEGACY_DMG_NAME="${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"
 ZIP_PATH="${DEPLOY_DIR}/${ZIP_NAME}"
 DMG_PATH="${DEPLOY_DIR}/${DMG_NAME}"
 [[ -n "$RELEASE_TITLE" ]] || RELEASE_TITLE="$TAG"
@@ -338,12 +343,19 @@ release_check() {
     fi
     printf '%s\n' "$names" | grep -qx 'SHA256SUMS' && REL_SUMS=true
     [[ -n "$WIN_ASSET" ]] && printf '%s\n' "$names" | grep -qx "$WIN_ASSET" && REL_HAS_WIN=true
-    if printf '%s\n' "$names" | grep -qx -e "$ZIP_NAME" -e "$DMG_NAME"; then
+    # Cualquiera de los archivos de macOS, incluido el DMG con el nombre viejo: un release que se
+    # publico antes del cambio de nombre tambien "ya tiene la Mac".
+    if printf '%s\n' "$names" | grep -qx -e "$ZIP_NAME" -e "$DMG_NAME" -e "$LEGACY_DMG_NAME"; then
         if [[ "$REPLACE" != "true" ]]; then
             echo "ERROR: el release $TAG ya tiene los archivos de macOS. Para reemplazarlos (re-publicar), --replace."
             return 1
         fi
         echo "Release $TAG: ya tiene los archivos de macOS; se reemplazan (--replace)."
+        if printf '%s\n' "$names" | grep -qx "$LEGACY_DMG_NAME"; then
+            # No se borra solo: borrar un asset publicado no se deshace. Queda al lado del nuevo.
+            echo "AVISO: el release $TAG tiene ademas $LEGACY_DMG_NAME (el nombre viejo del DMG). Se sube"
+            echo "       $DMG_NAME y el viejo queda; para sacarlo: gh release delete-asset $TAG $LEGACY_DMG_NAME --repo $RELEASE_REPO"
+        fi
     fi
     if [[ "$SHA256SUMS" == "true" && "$REL_HAS_WIN" == "true" && "$REL_SUMS" != "true" ]]; then
         echo "ERROR: el release $TAG tiene $WIN_ASSET pero no SHA256SUMS: fusionar contra nada borraria su"
@@ -437,7 +449,7 @@ probe() {
             if [[ "$draft" == "true" ]]; then
                 state="draft"
                 echo "blocker=el release $TAG existe como borrador (publicarlo o borrarlo a mano)"
-            elif printf '%s\n' "$names" | grep -qx -e "$ZIP_NAME" -e "$DMG_NAME"; then
+            elif printf '%s\n' "$names" | grep -qx -e "$ZIP_NAME" -e "$DMG_NAME" -e "$LEGACY_DMG_NAME"; then
                 state="mine"
             else
                 state="other"

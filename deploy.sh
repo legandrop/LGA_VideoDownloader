@@ -9,7 +9,7 @@ ARTIFACT_NAME="LGA_Video_Downloader"
 show_help() {
     echo "Uso: $0 [--zip] [--dmg] [--no-install] [--no-open] [--no-notarize] [--publish [--dry-run] [--replace] [--yes] | --no-publish]"
     echo "  --zip         Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.zip firmado (actualizacion)"
-    echo "  --dmg         Crear deploy/${ARTIFACT_NAME}_Mac_v<version>.dmg (primera instalacion)"
+    echo "  --dmg         Crear deploy/${ARTIFACT_NAME}_v<version>.dmg (primera instalacion)"
     echo "  --no-install  No instalar en /Applications ni abrir la app (deja solo deploy/)."
     echo "                --no-run es un sinonimo, por compatibilidad"
     echo "  --no-open     Instalar en /Applications pero no abrir la app"
@@ -303,13 +303,13 @@ fi
 # El DMG es el artefacto de PRIMERA INSTALACION; el ZIP de arriba es el de actualizacion y
 # los dos no son intercambiables. Ver ../LGA_Base_QT_C_Py/docs/Doc_Deploy_macOS.md.
 if [ "$CREATE_DMG" = "true" ]; then
-    rm -f "deploy/${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"
+    rm -f "deploy/${ARTIFACT_NAME}_v${APP_VERSION}.dmg"
     if ! bash ./create_dmg.sh --no-open; then
         echo "ERROR: no se pudo crear el .dmg. No se publica nada."
         exit 1
     fi
     if [ "$NOTARIZED" = "true" ]; then
-        DMG_FILE="deploy/${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"
+        DMG_FILE="deploy/${ARTIFACT_NAME}_v${APP_VERSION}.dmg"
         bash "./tools/macos/sign_bundle.sh" "$DMG_FILE" || exit 1
         notarize_or_warn "$DMG_FILE" || true
     fi
@@ -323,7 +323,7 @@ if [ "$CREATE_ZIP" = "true" ] || [ "$CREATE_DMG" = "true" ]; then
     (
         cd deploy
         rm -f SHA256SUMS
-        for artifact in "${ARTIFACT_NAME}_Mac_v${APP_VERSION}.zip" "${ARTIFACT_NAME}_Mac_v${APP_VERSION}.dmg"; do
+        for artifact in "${ARTIFACT_NAME}_Mac_v${APP_VERSION}.zip" "${ARTIFACT_NAME}_v${APP_VERSION}.dmg"; do
             if [ -f "$artifact" ]; then
                 shasum -a 256 "$artifact" >> SHA256SUMS
             fi
