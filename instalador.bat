@@ -92,6 +92,7 @@ set "MENU_ACTION="
 set "MENU_STATUS="
 set "MENU_NOTE="
 set "PUB_BLOCKER="
+set "REL_STATE="
 set "CL_VERSION="
 set "CL_AHEAD="
 for /f "tokens=1 delims=:" %%L in ('findstr /r /b /c:"v[0-9][0-9.]*[ ]*:" "docs\ChangeLog.md"') do if not defined CL_VERSION set "CL_VERSION=%%L"
@@ -133,10 +134,31 @@ if defined MENU_STATUS echo %MENU_STATUS%
 if defined CL_AHEAD echo El changelog tiene v%CL_VERSION% en desarrollo.
 if defined MENU_NOTE echo %MENU_NOTE%
 if defined PUB_BLOCKER echo No se puede publicar: %PUB_BLOCKER%.
+REM ---------------------------------------------------------------- lo que saldria en What's New
+REM Antes de preguntar: los items para el usuario desde la ultima version publicada [bloque de
+REM Doc_Instaladores_Inno.md, seccion 12, de LGA_Base_QT_C_Py, con goto en vez de un bloque
+REM entre parentesis porque este script no usa EnableDelayedExpansion], de la version en
+REM desarrollo [la seccion ## vX mas alta de docs\WhatsNew.md: VERSION dice la publicada hasta el
+REM bump]. Corre tambien si algo impide publicar: es cuando se decide si el bump vale la pena; ahi
+REM solo muestra. No corre al sumar el instalador a un release que ya existe: eso tiene sentido
+REM aunque no traiga nada nuevo. Exit 3 = nada nuevo: si hay opcion 1, se marca como no
+REM recomendada [si igual se elige, el check de las notas pregunta S/N]. Exit 1 [sin red, archivo
+REM roto] no corta: el check de despues lo vuelve a mirar.
+set "WN_NADA_NUEVO="
+if not defined CL_AHEAD if "%REL_STATE%"=="other" goto :publish_menu_wn_done
+call "%SCRIPT_DIR%whats_new_pendiente.bat"
+if errorlevel 3 goto :publish_menu_wn_nada
+if errorlevel 1 echo No se pudo calcular lo que saldria en What's New: ver arriba.
+goto :publish_menu_wn_done
+:publish_menu_wn_nada
+set "WN_NADA_NUEVO=true"
+if defined MENU_ACTION set "MENU_ACTION=%MENU_ACTION% - no recomendado: nada nuevo para el usuario"
+:publish_menu_wn_done
 echo.
 if not defined MENU_ACTION goto :publish_menu_fallback
 echo   1. %MENU_ACTION%
-echo   2. Instalador local, sin subir a GitHub
+if defined WN_NADA_NUEVO echo   2. Instalador local, sin subir a GitHub  - recomendado
+if not defined WN_NADA_NUEVO echo   2. Instalador local, sin subir a GitHub
 echo   3. Cancelar
 choice /C 123 /N /M "Opcion: "
 set "MENU_KEY=%ERRORLEVEL%"

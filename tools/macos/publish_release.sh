@@ -6,7 +6,8 @@ set -euo pipefail
 # .dmg (primera instalacion), mas SHA256SUMS y las notas para el usuario (What's new) si la app las
 # usa. Lo llama el `deploy.sh` de cada app, en dos tiempos (mas un sondeo previo opcional):
 #
-#   publish_release.sh --decide [opciones]      ANTES de compilar, con terminal: mira GitHub, pregunta
+#   publish_release.sh --decide [opciones]      ANTES de compilar, con terminal: mira GitHub, muestra lo
+#                                               que saldria en What's New, pregunta
 #                                               con UNA tecla (publicar / sumar la edicion / bump / local /
 #                                               cancelar), hace el bump si se elige y corre el preflight.
 #                                               Sale 0 = publicar, 10 = build local, 20 = cancelado.
@@ -214,6 +215,7 @@ if [[ "$(printf '%s' "$ORIGIN_SLUG" | tr '[:upper:]' '[:lower:]')" == "$(printf 
 fi
 
 WHATS_NEW_SH="${LGA_REPOTOOLS:-$REPO_ROOT/../LGA_RepoTools}/WhatsNew_Mac/whats_new_release.sh"
+WN_BUILD_SH="${LGA_REPOTOOLS:-$REPO_ROOT/../LGA_RepoTools}/WhatsNew_Mac/build_whats_new.sh"
 
 # ---- Escrituras: con --dry-run no se ejecuta ninguna ---------------------------------------------
 gh_write() {
@@ -475,10 +477,12 @@ probe() {
 # Si lo elegido no se puede hacer (notas, bump, preflight) se vuelve a ofrecer 2/3: el build no
 # depende de GitHub, asi que nunca se corta solo. Exit 0 = publicar (el preflight ya paso, y con
 # la version que haya dejado el bump: deploy.sh la relee), 10 = build local, 20 = cancelado.
-read_key() {  # <opciones validas>; deja la tecla, en mayuscula, en KEY
+read_key() {  # <opciones validas> [opcion de Enter]; deja la tecla, en mayuscula, en KEY
     local k
     while true; do
         IFS= read -rsn1 k || { KEY=""; return 1; }
+        # Enter llega como cadena vacia: vale la opcion por defecto, si la hay.
+        [[ -z "$k" && -n "${2:-}" ]] && k="$2"
         k="$(printf '%s' "$k" | tr '[:lower:]' '[:upper:]')"
         if [[ -n "$k" && "$1" == *"$k"* ]]; then
             KEY="$k"
@@ -576,11 +580,30 @@ decide() {
     echo ""
     [[ -n "$action" ]] || decide_local_or_cancel
 
+    # Lo que el usuario veria en What's New si se publica, ANTES de preguntar. Solo para una
+    # version nueva (release nuevo o bump): sumar esta plataforma a un release que ya existe tiene
+    # sentido aunque no traiga nada nuevo. Exit 3 = nada nuevo: se avisa y Enter elige el build
+    # local; 1 (sin red, archivo roto) no corta, porque el check de las notas lo vuelve a mirar.
+    local default_key="" pending_rc=0
+    if [[ -n "$WHATS_NEW_FILE" && -f "$WHATS_NEW_FILE" && -f "$WN_BUILD_SH" ]] \
+            && { [[ "$action" == "bump" ]] || [[ "$state" == "none" ]]; }; then
+        sh "$WN_BUILD_SH" pending --file "$WHATS_NEW_FILE" --version "${target:-$APP_VERSION}" \
+            || pending_rc=$?
+        echo ""
+        if [[ "$pending_rc" == "3" ]]; then
+            label="$label (no recomendado: nada nuevo para el usuario)"
+            default_key="2"
+        elif [[ "$pending_rc" != "0" ]]; then
+            echo "    (No se pudo calcular lo que saldria en What's New; ver arriba.)"
+            echo ""
+        fi
+    fi
+
     echo "  1. $label"
-    echo "  2. Build local, sin subir a GitHub"
+    echo "  2. Build local, sin subir a GitHub${default_key:+  (recomendado: Enter)}"
     echo "  3. Cancelar"
     printf 'Opcion: '
-    read_key "123" || exit 20
+    read_key "123" "$default_key" || exit 20
     case "$KEY" in
         2) exit 10 ;;
         3) exit 20 ;;
