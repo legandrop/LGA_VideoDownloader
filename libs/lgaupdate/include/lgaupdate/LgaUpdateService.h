@@ -26,8 +26,14 @@
  *       de HTTP/2 o 408/429/5xx se vuelve a mandar 3 veces POR SERVIDOR (tope 10 en total), 5 s
  *       entre intentos (chequeo, manifiesto de las notas, notas y descarga, que ademas reanuda
  *       por `Range`).
+ *   4 — textos en ingles o castellano segun `LgaUpdateConfig::language` (`LgaUpdateI18n.h`):
+ *       carteles, descarga, rotulos de las notas y avisos del helper. Default: ingles, como antes.
+ *   5 — notas en el idioma de la app: un item puede traer `text_en` (productos bilingues) y
+ *       `LgaWhatsNew::displayText()` lo elige si el updater esta en ingles; si no, el castellano.
+ *   6 — el cartel de update espera las notas `whatsNewWaitMs` = 12 s (antes 4 s): cubre un
+ *       primer intento bloqueado en github.com y otro en el servidor de los archivos.
  */
-#define LGAUPDATE_REVISION 3
+#define LGAUPDATE_REVISION 6
 
 class QNetworkAccessManager;
 class QNetworkReply;
@@ -217,6 +223,14 @@ struct LgaUpdateConfig {
      * `updateDownloadProgressDialog`). Vacia (default) = el estilo de la app.
      */
     QString progressDialogStyleSheet;
+    /**
+     * Idioma de los textos del updater, el que eligio el usuario en la app: "es" los muestra en
+     * castellano (carteles, dialogo de la descarga, rotulos de las notas y avisos del helper);
+     * vacio (default) o cualquier otro valor, en ingles. Las notas mismas no se traducen: vienen
+     * escritas en el WhatsNew.md del producto. Acepta "es_AR" o "es-ES". Vale para todo el proceso: manda
+     * el ultimo servicio creado (una app tiene uno solo). Detalle en `LgaUpdateI18n.h`.
+     */
+    QString language;
 
     // ------------------------------------------------------------ notas ("What's new")
     /**
@@ -235,8 +249,13 @@ struct LgaUpdateConfig {
     /**
      * Cuanto espera el cartel de update a que lleguen las notas antes de mostrarse SIN ellas.
      * Las notas nunca bloquean ni demoran el update mas que esto. 0 = no buscar notas.
+     *
+     * Tiene que cubrir los reintentos de red (rev 6): las notas salen de github.com y siguen un
+     * redirect al servidor de los archivos, y un firewall por aplicacion puede frenar el primer
+     * intento en cada uno. Son dos esperas de reintento mas margen. Con los 4 s de antes, menos
+     * que una sola espera, un primer intento bloqueado dejaba el cartel siempre sin notas.
      */
-    int whatsNewWaitMs = 4000;
+    int whatsNewWaitMs = 2 * LgaNetRetry::kDelayMs + 2000;
     /// Demora, desde `scheduleAutomaticCheck()`, del "What's new" de despues de instalar.
     int whatsNewAfterUpdateDelayMs = 1500;
 

@@ -534,6 +534,7 @@ struct DialogEntry {
     QString title;
     QString message;
     QString details;
+    QString notesHtml;
 };
 
 /// La pregunta de "no se puede instalar ahora" en las descargas: la primera vez (al elegir
@@ -566,9 +567,9 @@ struct Harness {
     LgaUpdateService *service = nullptr;
 
     /// `port` es el del manifiesto; el resto de los pedidos va al mismo puerto, salvo lo que
-    /// cambie `options`.
+    /// cambie `options`. `whatsNewWaitMs` 0 = el cartel de update no busca notas.
     Harness(const QString &dir, quint16 port, bool downloads,
-            const LoopbackOptions &options = LoopbackOptions())
+            const LoopbackOptions &options = LoopbackOptions(), int whatsNewWaitMs = 0)
         : caseDir(dir)
         , logPath(QDir(dir).filePath(QStringLiteral("Update.log")))
     {
@@ -584,7 +585,7 @@ struct Harness {
         config.periodicCheckIntervalMs = 0;
         config.checkTimeoutMs = 5000;
         config.downloadTimeoutMs = 10000;
-        config.whatsNewWaitMs = 0;
+        config.whatsNewWaitMs = whatsNewWaitMs;
         config.automaticChecksEnabled = []() { return false; };
         config.updateBlockedReason = []() { return QString(); };
         if (downloads) {
@@ -613,7 +614,7 @@ struct Harness {
             return new LoopbackNetwork(port, &net, owner, options);
         };
         config.presentDialog = [this](QWidget *, const LgaUpdateDialogSpec &spec) {
-            dialogs.append({spec.kind, spec.title, spec.messageHtml, spec.details});
+            dialogs.append({spec.kind, spec.title, spec.messageHtml, spec.details, spec.notesHtml});
             if (spec.kind == LgaUpdateDialogSpec::Kind::UpdatePrompt) {
                 const int index = LgaUpdateDialog::indexOf(
                     spec, clickUpdate ? LgaUpdateDialogSpec::Role::Update
@@ -1509,6 +1510,93 @@ CaseResult caseDownloadPerHost(const QString &dir)
     return result;
 }
 
+// (10) Rev 6: con la espera REAL entre intentos (5 s) y el tope de notas por defecto, el cartel
+// de update sale CON las notas aunque el primer intento falle en github.com y otro en el
+// servidor de los archivos. Con el tope de la rev 5 (4 s) salia sin notas: es el control.
+CaseResult caseNotesWaitCoversRetries(const QString &dir)
+{
+    CaseResult result;
+    // La espera de produccion para este caso; las demas siguen con la corta del banco.
+    struct RealDelay {
+        int previous = LgaNetRetry::delayMsOverrideForTests();
+        RealDelay() { LgaNetRetry::delayMsOverrideForTests() = -1; }
+        ~RealDelay() { LgaNetRetry::delayMsOverrideForTests() = previous; }
+    } realDelay;
+    const QByteArray notes = QByteArrayLiteral(
+        R"({"schemaVersion":1,"product":"legandrop/LGA_TestRetry_Release","name":"LGA Test Retry",)"
+        R"("versions":[{"version":"9.999","date":"2026-11-17",)"
+        R"("items":[{"kind":"new","text":"Notas tras dos reintentos."}]}]})");
+    const QByteArray manifest = manifestJson(kOfferedVersion, kFakeSha, sha256Hex(notes));
+    int githubHits = 0;
+    int blobHits = 0;
+    int otherHits = 0;
+    ScriptServer server([&](QTcpSocket *socket, int, const HttpRequestInfo &request) {
+        if (request.path.endsWith("/versions.json")) {
+            sendFull(socket, 200, "OK", manifest, "Content-Type: application/json\r\n");
+            return;
+        }
+        if (request.path.contains("//github.com/")) {
+            if (githubHits++ == 0) {
+                sendFull(socket, 503, "Service Unavailable", "try later");
+            } else {
+                sendFull(socket, 302, "Found", QByteArray(),
+                         "Location: http://objects.githubusercontent.com/blob/whats_new.json\r\n");
+            }
+            return;
+        }
+        if (request.path.contains("//objects.githubusercontent.com/")) {
+            if (blobHits++ == 0) {
+                sendFull(socket, 503, "Service Unavailable", "try later");
+            } else {
+                sendFull(socket, 200, "OK", notes, "Content-Type: application/json\r\n");
+            }
+            return;
+        }
+        ++otherHits;
+        sendFull(socket, 404, "Not Found", "fuera del guion");
+    });
+    if (!server.listen()) {
+        result.expect(false, QStringLiteral("no se pudo escuchar en 127.0.0.1"));
+        return result;
+    }
+    LoopbackOptions options;
+    options.viaProxy = true;
+    const int defaultWaitMs = LgaUpdateConfig().whatsNewWaitMs;
+    Harness h(dir, server.port(), /*downloads=*/false, options, defaultWaitMs);
+    QElapsedTimer timer;
+    timer.start();
+    h.service->checkForUpdates(/*manual=*/true);
+    const bool done = waitUntil(
+        [&]() { return h.firstOfKind(LgaUpdateDialogSpec::Kind::UpdatePrompt) != nullptr; },
+        defaultWaitMs + 10000);
+    const qint64 elapsed = timer.elapsed();
+    result.expect(done, QStringLiteral("no salio el cartel de update"));
+    const DialogEntry *prompt = h.firstOfKind(LgaUpdateDialogSpec::Kind::UpdatePrompt);
+    result.expect(prompt && prompt->notesHtml.contains(QStringLiteral("Notas tras dos reintentos.")),
+                  QStringLiteral("el cartel salio sin las notas a los %1 ms (tope %2 ms)")
+                      .arg(elapsed).arg(defaultWaitMs));
+    result.expect(defaultWaitMs > 2 * LgaNetRetry::kDelayMs,
+                  QStringLiteral("whatsNewWaitMs=%1 no cubre dos esperas de %2 ms")
+                      .arg(defaultWaitMs).arg(LgaNetRetry::kDelayMs));
+    result.expect(elapsed >= 2 * LgaNetRetry::kDelayMs,
+                  QStringLiteral("tardo %1 ms: no hubo las dos esperas reales").arg(elapsed));
+    // Cada intento vuelve a empezar por github.com: el tercero pasa por el redirect otra vez.
+    result.expect(githubHits == 3 && blobHits == 2,
+                  QStringLiteral("github.com=%1 archivos=%2, se esperaban 3 y 2")
+                      .arg(githubHits).arg(blobHits));
+    result.expect(otherHits == 0, QStringLiteral("%1 pedido(s) fuera del guion").arg(otherHits));
+    result.expect(h.checkStarted == 1 && h.checkFinished == 1,
+                  QStringLiteral("checkStarted=%1 checkFinished=%2, se esperaba una sola fase")
+                      .arg(h.checkStarted).arg(h.checkFinished));
+    result.expect(h.quitCalls == 0, QStringLiteral("se pidio cerrar la app"));
+    result.notes << QStringLiteral("tope=%1 ms cartel a los %2 ms github.com=%3 archivos=%4")
+                        .arg(defaultWaitMs).arg(elapsed).arg(githubHits).arg(blobHits);
+    if (!result.ok) {
+        result.notes << QStringLiteral("log:\n    ") + lastLines(h.log(), 20);
+    }
+    return result;
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -1562,6 +1650,7 @@ int main(int argc, char *argv[])
         {QStringLiteral("8c_http2_goaway_reanuda"),
          [](const QString &dir) { return caseHttp2Cut(dir, H2Cut::GoAway); }},
         {QStringLiteral("9_cuenta_por_servidor_redirect_de_github"), caseDownloadPerHost},
+        {QStringLiteral("10_cartel_espera_notas_con_dos_reintentos"), caseNotesWaitCoversRetries},
     };
 
     out(QStringLiteral("lgaupdate-retry-tests: espera entre intentos=%1 ms, reintentos=%2, "
