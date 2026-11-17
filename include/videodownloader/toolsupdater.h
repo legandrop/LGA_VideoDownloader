@@ -9,9 +9,12 @@
 #include <QStringList>
 #include <QUrl>
 
+#include <lgaupdate/LgaNetRetry.h>
+
 class QCryptographicHash;
 class QNetworkAccessManager;
 class QNetworkReply;
+class QNetworkRequest;
 class QProcess;
 class QSaveFile;
 class QTimer;
@@ -41,6 +44,10 @@ public:
 
     // Carpeta de tools donde escribe el updater (ver AppPaths::heavyDataDir).
     static QString toolsDir();
+
+    // Solo para `--qa-tools-update`: la carpeta de tools pasa a ser `dir` (una carpeta de prueba),
+    // asi la prueba no escribe en la de ninguna copia de la app. Vacio = la de AppPaths.
+    static void setToolsDirForQa(const QString &dir);
     // Nombre del binario final: "yt-dlp.exe"/"deno.exe" en Windows, sin extension en macOS.
     static QString binaryName(Tool tool);
     // Clave en tools.json y en los logs: "yt-dlp" / "deno".
@@ -89,6 +96,13 @@ private:
     enum class Phase { Idle, ResolveTag, Sums, Asset, Extract, Smoke };
 
     void startTool(Tool tool);
+    // Un pedido por fase. Cada uno se vuelve a mandar igual si el anterior fallo por la red.
+    void sendResolve();
+    void sendSums();
+    void sendAsset();
+    // true si el fallo de `reply` es transitorio (conexion, timeout, 408/429/5xx) y queda
+    // reintento para su servidor: deja el aviso en el log y programa `resend` en 5 s.
+    bool scheduleRetry(QNetworkReply *reply, bool cancelledOnPurpose, void (ToolsUpdater::*resend)());
     void nextTool();
     void failTool(const QString &line);
     void onResolveFinished();
@@ -104,6 +118,7 @@ private:
     QString assetName(Tool tool) const;
     QString sumsFileName(Tool tool) const;
     QUrl githubUrl(const QString &path) const;
+    void restrictRedirectsForLocalBase(QNetworkRequest &request) const;
 
     QNetworkAccessManager *m_network = nullptr;
     QString m_githubBase;
@@ -122,6 +137,8 @@ private:
     bool m_statusChecked = false;
     bool m_writeFailed = false;
     QString m_downloadPath;
+    // Reintentos del pedido en curso: 3 por servidor, 5 s entre intentos (regla LGA de red).
+    LgaNetRetry::Budget m_retry;
     QPointer<QProcess> m_process;
 };
 

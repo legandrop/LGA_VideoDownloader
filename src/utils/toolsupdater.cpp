@@ -122,8 +122,24 @@ ToolsUpdater::~ToolsUpdater()
     discardDownload();
 }
 
+namespace {
+QString &qaToolsDir()
+{
+    static QString dir;
+    return dir;
+}
+} // namespace
+
+void ToolsUpdater::setToolsDirForQa(const QString &dir)
+{
+    qaToolsDir() = dir;
+}
+
 QString ToolsUpdater::toolsDir()
 {
+    if (!qaToolsDir().isEmpty()) {
+        return qaToolsDir();
+    }
     // Windows: `<app>/tools`, la misma carpeta que siembra el instalador (fallback a
     // %LOCALAPPDATA% si no es escribible). macOS: Application Support, fuera del bundle.
     return AppPaths::heavyDataDir(QStringLiteral("tools"));
@@ -355,6 +371,16 @@ QUrl ToolsUpdater::githubUrl(const QString &path) const
     return QUrl(m_githubBase + path);
 }
 
+void ToolsUpdater::restrictRedirectsForLocalBase(QNetworkRequest &request) const
+{
+    // Con la base desviada a un servidor local de prueba, lo que se baja y se ejecuta no puede
+    // venir de otro host por un redirect. Contra GitHub real los redirects al servidor de los
+    // archivos son normales y siguen la politica por defecto.
+    if (UpdateUrls::isLocalOverride(QUrl(m_githubBase))) {
+        request.setAttribute(QNetworkRequest::RedirectPolicyAttribute, QNetworkRequest::SameOriginRedirectPolicy);
+    }
+}
+
 void ToolsUpdater::start()
 {
     if (m_running) {
@@ -408,9 +434,37 @@ void ToolsUpdater::startTool(Tool tool)
     m_tag.clear();
     m_version.clear();
     m_expectedSha.clear();
-    m_phase = Phase::ResolveTag;
+    m_retry.reset();
+    sendResolve();
+}
 
-    QNetworkRequest request(githubUrl(QStringLiteral("/%1/releases/latest").arg(repoSlug(tool))));
+bool ToolsUpdater::scheduleRetry(QNetworkReply *reply, bool cancelledOnPurpose, void (ToolsUpdater::*resend)())
+{
+    // Un firewall por aplicacion corta el primer intento de cada programa y de cada servidor
+    // nuevo; sin reintentos la tool fallaba antes de que el usuario pudiera permitirla. Lo que el
+    // servidor contesto en forma definitiva (401, 403, 404...) no se reintenta.
+    if (!LgaNetRetry::shouldRetry(reply, cancelledOnPurpose) || !m_retry.allowRetry(reply)) {
+        return false;
+    }
+    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const QString why = status >= 400 ? QStringLiteral("HTTP %1").arg(status) : reply->errorString();
+    const QString key = toolKey(m_tool);
+    qWarning() << "[ToolsUpdater] Fallo de red" << key << why << "- se reintenta," << m_retry.label();
+    emit logMessage(QStringLiteral("%1: connection problem (%2). Retrying in %3 s (attempt %4 of %5)...")
+                        .arg(key, why)
+                        .arg(LgaNetRetry::delayMs() / 1000)
+                        .arg(m_retry.attemptOnHost())
+                        .arg(LgaNetRetry::kRetries + 1));
+    // Con QTimer y `this` como contexto: nunca se duerme el hilo, y si el updater se destruye
+    // mientras espera, el reintento no corre.
+    QTimer::singleShot(LgaNetRetry::delayMs(), this, resend);
+    return true;
+}
+
+void ToolsUpdater::sendResolve()
+{
+    m_phase = Phase::ResolveTag;
+    QNetworkRequest request(githubUrl(QStringLiteral("/%1/releases/latest").arg(repoSlug(m_tool))));
     request.setHeader(QNetworkRequest::UserAgentHeader,
                       QStringLiteral("LGA_VideoDownloader/%1").arg(QCoreApplication::applicationVersion()));
     // Sin seguir el redirect: lo que interesa es el Location, que trae el tag.
@@ -436,6 +490,9 @@ void ToolsUpdater::onResolveFinished()
         target = QUrl(QString::fromUtf8(reply->rawHeader("Location")));
     }
     if (reply->error() != QNetworkReply::NoError || (status != 301 && status != 302) || target.isEmpty()) {
+        if (scheduleRetry(reply, false, &ToolsUpdater::sendResolve)) {
+            return;
+        }
         failTool(QStringLiteral("%1: could not check for updates (%2)")
                      .arg(key, reply->error() != QNetworkReply::NoError
                                    ? reply->errorString()
@@ -488,12 +545,19 @@ void ToolsUpdater::onResolveFinished()
         return;
     }
 
+    m_retry.reset();
+    sendSums();
+}
+
+void ToolsUpdater::sendSums()
+{
     m_phase = Phase::Sums;
     QNetworkRequest request(githubUrl(QStringLiteral("/%1/releases/download/%2/%3")
                                           .arg(repoSlug(m_tool), m_tag, sumsFileName(m_tool))));
     request.setHeader(QNetworkRequest::UserAgentHeader,
                       QStringLiteral("LGA_VideoDownloader/%1").arg(QCoreApplication::applicationVersion()));
     request.setTransferTimeout(kMetaTimeoutMs);
+    restrictRedirectsForLocalBase(request);
     m_reply = m_network->get(request);
     connect(m_reply, &QNetworkReply::finished, this, &ToolsUpdater::onSumsFinished);
 }
@@ -510,6 +574,9 @@ void ToolsUpdater::onSumsFinished()
     const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
 
     if (reply->error() != QNetworkReply::NoError || status != 200) {
+        if (scheduleRetry(reply, false, &ToolsUpdater::sendSums)) {
+            return;
+        }
         failTool(QStringLiteral("%1: checksum file not available (%2); nothing installed")
                      .arg(key, reply->error() != QNetworkReply::NoError ? reply->errorString()
                                                                         : QStringLiteral("HTTP %1").arg(status)));
@@ -531,6 +598,23 @@ void ToolsUpdater::onSumsFinished()
         return;
     }
     m_downloadPath = downloadDir() + QLatin1Char('/') + assetName(m_tool);
+    emit logMessage(QStringLiteral("%1: downloading %2...").arg(key, m_version));
+    m_retry.reset();
+    sendAsset();
+}
+
+void ToolsUpdater::sendAsset()
+{
+    const QString key = toolKey(m_tool);
+    // Cada intento baja de cero: lo que dejo un intento cortado se descarta (QSaveFile borra su
+    // temporal) y el hash vuelve a empezar, asi un parcial nunca se mezcla con el siguiente.
+    if (m_file) {
+        m_file->cancelWriting();
+        delete m_file;
+        m_file = nullptr;
+    }
+    delete m_hash;
+    m_hash = nullptr;
     m_file = new QSaveFile(m_downloadPath);
     if (!m_file->open(QIODevice::WriteOnly)) {
         failTool(QStringLiteral("%1: could not write %2 (%3)").arg(key, m_downloadPath, m_file->errorString()));
@@ -541,12 +625,12 @@ void ToolsUpdater::onSumsFinished()
     m_writeFailed = false;
     m_phase = Phase::Asset;
 
-    emit logMessage(QStringLiteral("%1: downloading %2...").arg(key, m_version));
     QNetworkRequest request(githubUrl(QStringLiteral("/%1/releases/download/%2/%3")
                                           .arg(repoSlug(m_tool), m_tag, assetName(m_tool))));
     request.setHeader(QNetworkRequest::UserAgentHeader,
                       QStringLiteral("LGA_VideoDownloader/%1").arg(QCoreApplication::applicationVersion()));
     request.setTransferTimeout(kAssetIdleTimeoutMs);
+    restrictRedirectsForLocalBase(request);
     m_reply = m_network->get(request);
     connect(m_reply, &QNetworkReply::readyRead, this, &ToolsUpdater::onAssetReadyRead);
     connect(m_reply, &QNetworkReply::finished, this, &ToolsUpdater::onAssetFinished);
@@ -617,6 +701,14 @@ void ToolsUpdater::onAssetFinished()
     }
 
     if (reply->error() != QNetworkReply::NoError || status != 200 || m_writeFailed || !m_file) {
+        // El abort() propio (status distinto de 200 o error de escritura) cuenta como cancelado a
+        // proposito: un 5xx igual se reintenta por su status; un error de disco, no.
+        // Un error de escritura propio nunca se reintenta, aunque el reply haya terminado antes por
+        // un error de red: el disco no se arregla esperando.
+        const bool diskError = m_writeFailed && status == 200;
+        if (m_file && !diskError && scheduleRetry(reply, m_writeFailed, &ToolsUpdater::sendAsset)) {
+            return;
+        }
         const QString detail = m_writeFailed && status == 200
                                    ? QStringLiteral("write error")
                                    : (reply->error() != QNetworkReply::NoError && status == 200

@@ -38,7 +38,7 @@ VideoPasswordDialog::VideoPasswordDialog(const QString &videoUrl, QWidget *paren
 
     // Message label
     m_messageLabel = new QLabel(this);
-    m_messageLabel->setText(QString("The video <b>%1</b> is protected by a password.\n\nPlease enter the video password:").arg(displayUrl));
+    m_messageLabel->setText(QString("The video <span style=\"font-weight:600;\">%1</span> is protected by a password.\n\nPlease enter the video password:").arg(displayUrl));
     m_messageLabel->setWordWrap(true);
     mainLayout->addWidget(m_messageLabel);
 

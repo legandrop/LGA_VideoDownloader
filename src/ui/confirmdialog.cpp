@@ -29,11 +29,13 @@ constexpr int NOTES_MAX_HEIGHT = 260;
 constexpr int DETAILS_HEIGHT = 140;
 
 // Las palabras en <b> resaltan en el blanco de los textos destacados de Help; las teclas de la
-// fila de atajos, en violeta.
+// fila de atajos, en violeta. Peso 600 y no <b> (700): la Inter embebida no trae 700 y lo que se
+// dibuja es la SemiBold; pedirla directo no cambia nada a la vista.
 QString tintBold(QString html, const char *color)
 {
-    html.replace(QStringLiteral("<b>"), QStringLiteral("<span style=\"color:%1;\"><b>").arg(QLatin1String(color)));
-    html.replace(QStringLiteral("</b>"), QStringLiteral("</b></span>"));
+    html.replace(QStringLiteral("<b>"),
+                 QStringLiteral("<span style=\"color:%1; font-weight:600;\">").arg(QLatin1String(color)));
+    html.replace(QStringLiteral("</b>"), QStringLiteral("</span>"));
     return html;
 }
 

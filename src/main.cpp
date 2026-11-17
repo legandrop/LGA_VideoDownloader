@@ -1,4 +1,5 @@
 #include "videodownloader/mainwindow.h"
+#include "videodownloader/LgaHeadlessGuard.h"
 #include "videodownloader/LgaRegistry.h"
 #include "videodownloader/apppaths.h"
 #include "videodownloader/appinstance.h"
@@ -154,6 +155,13 @@ int main(int argc, char *argv[])
         return NativeHost::run(argc, argv);
     }
 
+    // ANTES de QApplication: si se pidio una plataforma de Qt (QT_QPA_PLATFORM=offscreen, como en
+    // toda corrida sin pantalla) y falta su plugin, Qt abre un cartel modal desde adentro del
+    // constructor. El guard sale por stderr con un codigo; sin plataforma pedida no decide nada.
+    // Va despues del host de la extension, que no construye QApplication ni carga plataforma.
+    if (const int guard = LgaHeadlessGuard::check(argc, argv)) {
+        return guard;
+    }
     QApplication app(argc, argv);
 
     // Configurar información de la aplicación
@@ -187,6 +195,9 @@ int main(int argc, char *argv[])
     }
     if (app.arguments().contains(QStringLiteral("--qa-tools-check"))) {
         return runToolsCheck(app.arguments());
+    }
+    if (app.arguments().contains(QStringLiteral("--qa-tools-update"))) {
+        return runToolsUpdateCheck(app.arguments());
     }
     if (app.arguments().contains(QStringLiteral("--qa-titlebar"))) {
         Theme::apply(app);

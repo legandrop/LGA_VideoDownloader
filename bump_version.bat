@@ -20,7 +20,8 @@ if not defined FLAG (
     endlocal & exit /b 2
 )
 set "FLAGS=%FLAGS% %FLAG%"
-shift
+rem shift /1 y no shift: un shift pelado corre tambien %0 y %~dp0 pasa a ser la carpeta actual.
+shift /1
 goto args
 :help
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-Help '%~dp0tools\bump_version.ps1' -Detailed"

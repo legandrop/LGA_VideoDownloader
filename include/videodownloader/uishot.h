@@ -37,6 +37,14 @@ int runUpdateDirsCheck(const QStringList &args);
 // carpeta de prueba, nunca en la carpeta de tools de una copia de la app.
 int runToolsCheck(const QStringList &args);
 
+// `--qa-tools-update <carpeta-tools>`: corre el ToolsUpdater real (resolver el tag, sumas, descarga,
+// extraccion, prueba `--version` y staging) contra un servidor LOCAL, con `<carpeta-tools>` (una
+// carpeta de prueba) como carpeta de tools. Exige `LGA_VD_GITHUB_BASE` apuntando a localhost: sin
+// eso sale con 2 sin tocar la red. Imprime cada linea del log y `finished ok=0|1`; sale con 0 si
+// las dos tools terminaron bien. Sirve para probar los reintentos con un servidor que falla a
+// proposito. No hace el swap (`applyStaged`): lo verificado queda en `.staging`.
+int runToolsUpdateCheck(const QStringList &args);
+
 // `--qa-titlebar`: marco propio de la ventana con un HWND real (Windows, runner con `-Platform windows`):
 // estilo nativo, WM_NCHITTEST en barra, botones, cuerpo, bordes y esquinas, y maximizar, restaurar,
 // minimizar y cerrar con los botones de la barra. Modo captura: sin tools, cola, red ni settings.

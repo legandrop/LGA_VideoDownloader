@@ -396,6 +396,46 @@ int runToolsCheck(const QStringList &args)
     return 0;
 }
 
+int runToolsUpdateCheck(const QStringList &args)
+{
+    const QString dir = args.value(args.indexOf(QStringLiteral("--qa-tools-update")) + 1);
+    if (dir.isEmpty() || dir.startsWith(QStringLiteral("--")) || !QDir(dir).exists()) {
+        fprintf(stderr, "qa-tools-update: needs an existing test folder\n");
+        return 2;
+    }
+    // Solo contra un servidor local: este modo baja y ejecuta lo que el servidor le da.
+    if (UpdateUrls::localOverride("LGA_VD_GITHUB_BASE").isEmpty()) {
+        fprintf(stderr, "qa-tools-update: LGA_VD_GITHUB_BASE must point to localhost/127.0.0.1\n");
+        return 2;
+    }
+    ToolsUpdater::setToolsDirForQa(QDir(dir).absolutePath());
+    ToolsUpdater updater;
+    QObject::connect(&updater, &ToolsUpdater::logMessage, [](const QString &line) {
+        fprintf(stdout, "log %s\n", qPrintable(line));
+        fflush(stdout);
+    });
+    QObject::connect(&updater, &ToolsUpdater::toolStaged, [](const QString &tool, const QString &version) {
+        fprintf(stdout, "staged %s %s\n", qPrintable(tool), qPrintable(version));
+        fflush(stdout);
+    });
+    int result = 1;
+    QObject::connect(&updater, &ToolsUpdater::finished, [&result](bool ok) {
+        fprintf(stdout, "finished ok=%d\n", ok ? 1 : 0);
+        fflush(stdout);
+        result = ok ? 0 : 1;
+        QCoreApplication::quit();
+    });
+    // Tope de seguridad, holgado: con timeouts (30 s por pedido de metadatos, 60 s sin datos en la
+    // descarga) y hasta 10 intentos por pedido, una tool puede tardar varios minutos en fallar.
+    QTimer::singleShot(25 * 60 * 1000, []() {
+        fprintf(stdout, "timeout\n");
+        QCoreApplication::exit(3);
+    });
+    QTimer::singleShot(0, &updater, &ToolsUpdater::start);
+    const int loop = QCoreApplication::exec();
+    return loop == 3 ? 3 : result;
+}
+
 int runUpdateDirsCheck(const QStringList &args)
 {
     const int index = args.indexOf(QStringLiteral("--qa-update-dirs"));

@@ -433,6 +433,13 @@ void DownloadQueue::startDownloadProcess(DownloadItem &item)
     arguments << "--newline" << "--no-quiet" << "--no-simulate" << "--progress" << "--no-colors";
     // Los mensajes propios de yt-dlp (no solo --print) en UTF-8, igual que PYTHONIOENCODING.
     arguments << "--encoding" << "utf-8";
+    // Reintentos de red con 5 s de espera (regla LGA: un firewall por aplicacion corta el primer
+    // intento de cada servidor nuevo, y sin espera yt-dlp gastaba sus reintentos en el acto). Las
+    // cuentas de la descarga y los fragmentos quedan en los 10 de yt-dlp, por encima de los 3 de
+    // la regla: una descarga larga que se corta reanuda. La pagina inicial no entra aca: un
+    // fallo ahi termina en "Connection problem" y se reintenta desde la tarjeta.
+    arguments << "--retries" << "10" << "--fragment-retries" << "10" << "--extractor-retries" << "3"
+              << "--retry-sleep" << "http:5" << "--retry-sleep" << "fragment:5" << "--retry-sleep" << "extractor:5";
     arguments << "--progress-template"
               << "download:[vdprog] %(progress.downloaded_bytes)s|%(progress.total_bytes)s|"
                  "%(progress.total_bytes_estimate)s|%(progress.speed)s|%(progress.eta)s";

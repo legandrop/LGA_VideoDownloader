@@ -120,6 +120,7 @@ set(SOURCES
 # Archivos de cabecera
 set(HEADERS
     include/videodownloader/mainwindow.h
+    include/videodownloader/LgaHeadlessGuard.h
     include/videodownloader/videopassworddialog.h
     include/videodownloader/theme.h
     include/videodownloader/uiwidgets.h
