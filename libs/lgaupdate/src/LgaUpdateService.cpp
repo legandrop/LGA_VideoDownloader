@@ -2502,8 +2502,7 @@ exit 2
     if (!targetParentInfo.exists() || !targetParentInfo.isWritable()) {
         setError(
             tr("%1 could not update automatically because this location is not writable:\n%2\n\n"
-               "Please install the new macOS release manually and run:\n"
-               "sudo xattr -cr /Applications/%3")
+               "Please download the new macOS release and drag %3 to the Applications folder.")
                 .arg(m_config.displayName, targetAppPath, bundleName));
         return false;
     }
